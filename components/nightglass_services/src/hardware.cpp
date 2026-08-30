@@ -9,6 +9,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nightglass/core/health.hpp"
+#include "nightglass/services/gyro_processor.hpp"
 
 namespace nightglass::services {
 namespace {
@@ -49,6 +50,11 @@ bool imu_ready = false;
 bool haptic_output_ready = false;
 bool haptic_supply_cleanup_verified = true;
 esp_timer_handle_t haptic_timer = nullptr;
+GyroProcessor gyro_processor;
+bool gyro_calibration_announced = false;
+bool stable_moving = false;
+bool pending_moving = false;
+std::int64_t pending_motion_since_us = 0;
 
 std::uint8_t from_bcd(std::uint8_t value) {
     return static_cast<std::uint8_t>(((value >> 4U) * 10U) + (value & 0x0FU));
@@ -138,8 +144,13 @@ void publish_motion() {
     next.present = imu_ready;
     next.sampled_at_us = esp_timer_get_time();
     if (imu_ready) {
+        std::uint8_t status = 0;
         std::uint8_t data[12]{};
-        if (read_register(imu_device, 0x35, data, sizeof(data)) == ESP_OK) {
+        // STATUS0 bit 1 is the vendor-defined gyro-data-available flag. Only
+        // successful fresh frames may advance the boot calibration.
+        if (read_register(imu_device, 0x2E, &status, 1) == ESP_OK &&
+            (status & 0x02U) != 0 &&
+            read_register(imu_device, 0x35, data, sizeof(data)) == ESP_OK) {
             const auto raw_ax = static_cast<std::int16_t>((data[1] << 8U) | data[0]);
             const auto raw_ay = static_cast<std::int16_t>((data[3] << 8U) | data[2]);
             const auto raw_az = static_cast<std::int16_t>((data[5] << 8U) | data[4]);
@@ -150,31 +161,60 @@ void publish_motion() {
             next.accel_x_g = static_cast<float>(raw_ax) / 4096.0F;
             next.accel_y_g = static_cast<float>(raw_ay) / 4096.0F;
             next.accel_z_g = static_cast<float>(raw_az) / 4096.0F;
-            next.gyro_x_dps = static_cast<float>(raw_gx) / 64.0F;
-            next.gyro_y_dps = static_cast<float>(raw_gy) / 64.0F;
-            next.gyro_z_dps = static_cast<float>(raw_gz) / 64.0F;
+            const auto gyro = gyro_processor.process({
+                .x_dps = static_cast<float>(raw_gx) / 64.0F,
+                .y_dps = static_cast<float>(raw_gy) / 64.0F,
+                .z_dps = static_cast<float>(raw_gz) / 64.0F,
+                .accel_x_g = next.accel_x_g,
+                .accel_y_g = next.accel_y_g,
+                .accel_z_g = next.accel_z_g,
+            });
+            next.gyro_calibrated = gyro.calibrated;
+            next.gyro_calibration_samples = gyro.calibration_samples;
+            next.gyro_calibration_required = gyro.calibration_required;
+            next.gyro_calibration_restarts = gyro.calibration_restarts;
+            next.gyro_x_dps = gyro.display_x_dps;
+            next.gyro_y_dps = gyro.display_y_dps;
+            next.gyro_z_dps = gyro.display_z_dps;
+            next.gyro_bias_x_dps = gyro.bias_x_dps;
+            next.gyro_bias_y_dps = gyro.bias_y_dps;
+            next.gyro_bias_z_dps = gyro.bias_z_dps;
+
+            if (gyro.calibration_restarted) {
+                ESP_LOGW(kTag, "Gyro calibration restarted: keep watch stationary");
+            }
+            if (gyro.calibrated && !gyro_calibration_announced) {
+                gyro_calibration_announced = true;
+                ESP_LOGI(kTag, "Gyro calibration complete: samples=%u bias=%+.3f,%+.3f,%+.3f dps",
+                         gyro.calibration_samples, gyro.bias_x_dps, gyro.bias_y_dps,
+                         gyro.bias_z_dps);
+                nightglass::core::health_registry().set(
+                    "imu", nightglass::core::HealthState::ok,
+                    "QMI8658 calibrated and streaming filtered motion");
+            }
 
             const float accel_energy = next.accel_x_g * next.accel_x_g +
                                        next.accel_y_g * next.accel_y_g +
                                        next.accel_z_g * next.accel_z_g;
-            const float gyro_energy = next.gyro_x_dps * next.gyro_x_dps +
-                                      next.gyro_y_dps * next.gyro_y_dps +
-                                      next.gyro_z_dps * next.gyro_z_dps;
+            const float gyro_energy = gyro.corrected_x_dps * gyro.corrected_x_dps +
+                                      gyro.corrected_y_dps * gyro.corrected_y_dps +
+                                      gyro.corrected_z_dps * gyro.corrected_z_dps;
             const bool candidate = accel_energy < 0.7744F || accel_energy > 1.2544F ||
-                                   gyro_energy > 64.0F;
-            static bool stable_moving = false;
-            static bool pending_moving = false;
-            static std::int64_t pending_since_us = 0;
+                                   (gyro.calibrated && gyro_energy > 64.0F);
             if (candidate != pending_moving) {
                 pending_moving = candidate;
-                pending_since_us = next.sampled_at_us;
+                pending_motion_since_us = next.sampled_at_us;
             } else if (candidate != stable_moving &&
-                       next.sampled_at_us - pending_since_us >= 300'000) {
+                       next.sampled_at_us - pending_motion_since_us >= 300'000) {
                 stable_moving = candidate;
             }
             next.moving = stable_moving;
         }
     }
+
+    // Preserve the last good sample when the sensor has no fresh frame or an
+    // I2C read fails. Its timestamp will age into STALE/NO DATA naturally.
+    if (!next.valid) return;
 
     portENTER_CRITICAL(&snapshot_mux);
     current.motion = next;
@@ -392,10 +432,15 @@ void probe_devices(i2c_master_bus_handle_t bus_handle) {
                     write_register(imu_device, 0x03, 0x28) == ESP_OK &&
                     write_register(imu_device, 0x04, 0x58) == ESP_OK &&
                     write_register(imu_device, 0x08, 0x03) == ESP_OK;
+        gyro_processor.reset();
+        gyro_calibration_announced = false;
+        stable_moving = false;
+        pending_moving = false;
+        pending_motion_since_us = 0;
     }
     nightglass::core::health_registry().set("imu", imu_ready ? nightglass::core::HealthState::degraded
                                                          : nightglass::core::HealthState::failed,
-                                       imu_ready ? "QMI8658 identified; first read pending"
+                                       imu_ready ? "QMI8658 identified; gyro calibration pending"
                                                  : "QMI8658 initialization failed");
 
     ESP_LOGI(kTag, "Hardware probes: rtc=%d pmic=%d imu=%d", rtc_added,
@@ -406,6 +451,7 @@ void hardware_task(void *context) {
     probe_devices(static_cast<i2c_master_bus_handle_t>(context));
     std::int64_t last_rtc_us = -1'000'000;
     std::int64_t last_battery_us = -2'000'000;
+    TickType_t last_wake_tick = xTaskGetTickCount();
 
     while (true) {
         const std::int64_t now = esp_timer_get_time();
@@ -434,7 +480,7 @@ void hardware_task(void *context) {
             publish_battery();
             last_battery_us = now;
         }
-        vTaskDelay(kPollTicks);
+        vTaskDelayUntil(&last_wake_tick, kPollTicks);
     }
 }
 

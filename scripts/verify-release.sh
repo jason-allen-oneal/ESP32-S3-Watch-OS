@@ -15,6 +15,7 @@ fi
 # The pinned absolute path is checked above.
 # shellcheck disable=SC1091
 source "${idf_dir}/export.sh" >/dev/null
+"${project_dir}/scripts/test-host.sh" >/dev/null
 "${project_dir}/scripts/build.sh" >/dev/null
 
 artifacts=(

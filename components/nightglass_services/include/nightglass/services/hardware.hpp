@@ -37,12 +37,19 @@ struct MotionSnapshot {
     bool present{false};
     bool valid{false};
     bool moving{false};
+    bool gyro_calibrated{false};
+    std::uint16_t gyro_calibration_samples{0};
+    std::uint16_t gyro_calibration_required{0};
+    std::uint32_t gyro_calibration_restarts{0};
     float accel_x_g{0.0F};
     float accel_y_g{0.0F};
     float accel_z_g{0.0F};
     float gyro_x_dps{0.0F};
     float gyro_y_dps{0.0F};
     float gyro_z_dps{0.0F};
+    float gyro_bias_x_dps{0.0F};
+    float gyro_bias_y_dps{0.0F};
+    float gyro_bias_z_dps{0.0F};
     std::int64_t sampled_at_us{0};
 };
 

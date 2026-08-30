@@ -50,8 +50,15 @@ a cross-core critical section and never performs I2C or GPIO work.
   untouched; the only PMIC write enables its battery-voltage ADC channel with a
   read-modify-write.
 - QMI8658 is reset into known state, identified, configured for 8 g at
-  31.25 Hz and 512 dps at 28.025 Hz, and sampled at 25 Hz. Motion is explicitly a heuristic,
-  not step count or orientation.
+  31.25 Hz and 512 dps at 28.025 Hz, and sampled at 25 Hz. At each boot, the
+  gyro discards one second of startup data, then collects 500 stationary
+  samples (about 20 seconds), rejects moving or
+  noisy calibration windows, and stores an in-memory zero-rate bias for each
+  axis. Runtime values are bias-corrected, low-pass filtered, and displayed as
+  zero inside a +/-0.5 dps deadband. Motion is explicitly a heuristic, not step
+  count or orientation. Because constant rotation cannot be distinguished from
+  sensor bias without an external reference, the watch must remain still until
+  calibration completes; the UI never labels gyro data live before that point.
 - GPIO18 starts low. The schematic's P1/P2 motor path and its ALDO3 supply were
   electrically exercised, but this physical unit produced no mechanical
   response and Waveshare does not list an installed actuator. Haptics are

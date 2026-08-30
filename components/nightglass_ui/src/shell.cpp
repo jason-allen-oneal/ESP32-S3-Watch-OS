@@ -424,8 +424,12 @@ void Shell::refresh_home() {
     const auto &motion = snapshot.motion;
     const auto motion_age = now - motion.sampled_at_us;
     if (motion.present && motion.valid && motion_age <= 2'000'000) {
-        set_state(home_motion_, motion.moving ? "MOTION · MOVING" : "MOTION · STILL",
-                  motion_age > 500'000 ? kAmber : motion.moving ? kCyan : kPrimary);
+        if (!motion.gyro_calibrated) {
+            set_state(home_motion_, "MOTION · CALIBRATING", kAmber);
+        } else {
+            set_state(home_motion_, motion.moving ? "MOTION · MOVING" : "MOTION · STILL",
+                      motion_age > 500'000 ? kAmber : motion.moving ? kCyan : kPrimary);
+        }
     } else {
         set_state(home_motion_, "MOTION · UNAVAILABLE", kRed);
     }
@@ -479,14 +483,27 @@ void Shell::refresh_diagnostics() {
     if (!motion.present || !motion.valid || motion_age > 2'000'000) {
         set_state(diagnostics_motion_state_, "NO DATA", kRed);
         lv_label_set_text(diagnostics_motion_detail_, "QMI8658 sample unavailable");
+    } else if (!motion.gyro_calibrated) {
+        set_state(diagnostics_motion_state_, "CALIBRATING", kAmber);
+        const unsigned progress = motion.gyro_calibration_required == 0
+                                      ? 0
+                                      : 100U * motion.gyro_calibration_samples /
+                                            motion.gyro_calibration_required;
+        std::snprintf(buffer, sizeof(buffer),
+                      "Keep watch stationary · %u%%\nGyro zero %u / %u samples\nRestarts %lu",
+                      progress, motion.gyro_calibration_samples,
+                      motion.gyro_calibration_required,
+                      static_cast<unsigned long>(motion.gyro_calibration_restarts));
+        lv_label_set_text(diagnostics_motion_detail_, buffer);
     } else {
         set_state(diagnostics_motion_state_, motion_age > 500'000 ? "STALE" : "LIVE",
                   motion_age > 500'000 ? kAmber : kGreen);
         std::snprintf(buffer, sizeof(buffer),
-                      "%s\nACC %+.2f  %+.2f  %+.2f g\nGYR %+.1f  %+.1f  %+.1f d/s",
-                      motion.moving ? "Moving" : "Still", motion.accel_x_g, motion.accel_y_g,
-                      motion.accel_z_g, motion.gyro_x_dps, motion.gyro_y_dps,
-                      motion.gyro_z_dps);
+                      "%s · bias %+.1f %+.1f %+.1f\nACC %+.2f  %+.2f  %+.2f g\nGYR %+.1f  %+.1f  %+.1f d/s",
+                      motion.moving ? "Moving" : "Still", motion.gyro_bias_x_dps,
+                      motion.gyro_bias_y_dps, motion.gyro_bias_z_dps, motion.accel_x_g,
+                      motion.accel_y_g, motion.accel_z_g, motion.gyro_x_dps,
+                      motion.gyro_y_dps, motion.gyro_z_dps);
         lv_label_set_text(diagnostics_motion_detail_, buffer);
     }
 
