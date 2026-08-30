@@ -7,6 +7,8 @@ time_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-time-test.XXXXXX")"
 face_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-face-test.XXXXXX")"
 trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}"' EXIT
 
+python3 "${project_dir}/scripts/check-runtime-glyphs.py"
+
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \
   "${project_dir}/components/nightglass_services/src/gyro_processor.cpp" \

@@ -49,7 +49,7 @@ Quick Settings, notifications, glance tiles, edge gestures, and side-button
 navigation remain roadmap behavior until their services and input contracts
 exist. They are not represented by inactive or misleading controls.
 
-## Design tokens
+## Classic design tokens
 
 - Background `#000000`
 - Surface `#0B0D12`
@@ -66,20 +66,26 @@ exist. They are not represented by inactive or misleading controls.
 Grid is 4 px, safe-area side gutter 28 px, standard gaps 8/12/16/24 px, and cards use
 12/16 px radii. Shadows and continuous decorative animation are forbidden.
 
-## Customization
+## Theme packages and customization
 
-Users may change watch face, accent theme, complication assignments, launcher
+Users may change watch-face/theme package, complication assignments, launcher
 favorites, glance-tile order, quick controls, handedness, text scale, wake
 gestures, sound/haptic profile, AOD, and notification privacy without flashing.
 
-Watch faces and themes are validated data packs with format version, resource
-limits, compatible complications, and checksums. They cannot contain executable
-code. A built-in fallback face and theme always remain available.
+Face and shell chrome are one validated package selection so application routes
+cannot drift away from the active face. Packages have a format version,
+resource limits, compatible complications, and enum-allowlisted layouts,
+assets, and chrome. They cannot contain executable code, callbacks, filesystem
+paths, arbitrary resources, scripts, or fonts. An invalid package or stored ID
+resolves to the built-in Classic face and cyan shell.
 
-Format 1 is implemented as a built-in manifest registry with persistent NVS
-selection. Nightglass Classic is the fallback; Revenant Grid is the first
-original themed pack. External filesystem loading remains deferred until
-manifest validation and decoded-asset limits are enforced.
+Format 3 is implemented as a built-in manifest registry with persistent NVS
+selection. Nightglass Classic is the fallback. Revenant Grid v2 adds a
+black/gunmetal shell, acid-green accents and borders, themed pressed states,
+and its compiled background at low opacity behind all non-home routes and alert
+overlays. Semantic healthy, warning, and error colors remain green, amber, and
+red. External filesystem loading remains deferred until manifest validation
+and decoded-asset limits are enforced.
 
 ## Release UX gates
 

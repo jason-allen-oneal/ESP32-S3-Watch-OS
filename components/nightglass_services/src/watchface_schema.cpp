@@ -12,6 +12,7 @@ constexpr std::uint16_t kKnownComplications =
     complication_timer;
 constexpr std::uint8_t kMaxTextSlots = 24;
 constexpr std::uint8_t kMaxActionSlots = 4;
+constexpr std::uint8_t kMaxRouteBackgroundOpacity = 64;
 
 bool valid_rect(const FaceRect &rect) {
     if (rect.x < 0 || rect.y < 0 || rect.width == 0 || rect.height == 0) return false;
@@ -77,16 +78,31 @@ bool valid_text_slot(const FaceTextSlot &slot, std::uint16_t complications) {
     return slot.fixed_text == nullptr &&
            (complications & field_complication(slot.field)) != 0;
 }
+
+bool valid_chrome(const FaceChrome &chrome) {
+    switch (chrome.theme) {
+        case ChromeTheme::classic:
+            return chrome.route_background_asset == FaceAsset::none &&
+                   chrome.route_background_opacity == 0;
+        case ChromeTheme::revenant:
+            return chrome.route_background_asset == FaceAsset::revenant_grid_v2 &&
+                   chrome.route_background_opacity > 0 &&
+                   chrome.route_background_opacity <= kMaxRouteBackgroundOpacity;
+    }
+    return false;
+}
 }  // namespace
 
 bool valid_face_pack(const FacePack &pack) {
     if (!pack.slug || !pack.slug[0] || !pack.name || !pack.name[0] ||
-        pack.format_version != 2 || (pack.complications & ~kKnownComplications) != 0) {
+        pack.format_version != 3 || (pack.complications & ~kKnownComplications) != 0 ||
+        !valid_chrome(pack.chrome)) {
         return false;
     }
 
     if (pack.layout == FaceLayout::classic) {
         return pack.id == 0 && pack.background_asset == FaceAsset::none &&
+               pack.chrome.theme == ChromeTheme::classic &&
                pack.text_slots == nullptr && pack.text_slot_count == 0 &&
                pack.action_slots == nullptr && pack.action_slot_count == 0;
     }

@@ -24,6 +24,14 @@ enum FaceComplication : std::uint16_t {
 
 enum class FaceAsset : std::uint8_t { none, revenant_grid_v2 };
 
+enum class ChromeTheme : std::uint8_t { classic, revenant };
+
+struct FaceChrome {
+    ChromeTheme theme;
+    FaceAsset route_background_asset;
+    std::uint8_t route_background_opacity;
+};
+
 enum class FaceField : std::uint8_t {
     fixed_text,
     time,
@@ -93,6 +101,7 @@ struct FacePack {
     std::uint16_t complications;
     FacePalette palette;
     FaceAsset background_asset;
+    FaceChrome chrome;
     const FaceTextSlot *text_slots;
     std::uint8_t text_slot_count;
     const FaceActionSlot *action_slots;

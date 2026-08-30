@@ -28,12 +28,57 @@ constexpr std::uint32_t kGreen = 0x50D890;
 constexpr std::uint32_t kAmber = 0xFFB454;
 constexpr std::uint32_t kRed = 0xFF6174;
 
+struct ChromePalette {
+    std::uint32_t background;
+    std::uint32_t surface;
+    std::uint32_t elevated;
+    std::uint32_t border;
+    std::uint32_t primary;
+    std::uint32_t secondary;
+    std::uint32_t accent;
+    std::uint32_t accent_alternate;
+    std::uint32_t pressed;
+};
+
+constexpr ChromePalette kClassicChrome{
+    kVoid, kSurface, kElevated, kDivider, kPrimary, kSecondary, kCyan, kViolet,
+    kElevated,
+};
+constexpr ChromePalette kRevenantChrome{
+    0x000000, 0x080B09, 0x111712, 0x355128, 0xF3F7F4, 0x9BA79F, 0xA8FF32,
+    0x7ED321, 0x263C1B,
+};
+
 constexpr int kPanelWidth = 410;
 constexpr int kPanelHeight = 502;
 constexpr int kSafeInset = 28;
 constexpr int kSafeRight = kPanelWidth - kSafeInset;
 constexpr int kSafeBottom = kPanelHeight - kSafeInset;
 constexpr int kSafeContentWidth = kPanelWidth - (2 * kSafeInset);
+
+const ChromePalette &chrome_palette() {
+    const auto &pack = nightglass::services::watchface_service().selected();
+    if (nightglass::services::valid_face_pack(pack) &&
+        pack.chrome.theme == nightglass::services::ChromeTheme::revenant) {
+        return kRevenantChrome;
+    }
+    return kClassicChrome;
+}
+
+bool revenant_chrome() { return &chrome_palette() == &kRevenantChrome; }
+
+std::uint32_t chrome_color(std::uint32_t color) {
+    if (!revenant_chrome()) return color;
+    if (color == kVoid) return kRevenantChrome.background;
+    if (color == kSurface) return kRevenantChrome.surface;
+    if (color == kElevated) return kRevenantChrome.elevated;
+    if (color == kDivider) return kRevenantChrome.border;
+    if (color == kPrimary) return kRevenantChrome.primary;
+    if (color == kSecondary) return kRevenantChrome.secondary;
+    if (color == kCyan) return kRevenantChrome.accent;
+    if (color == kViolet) return kRevenantChrome.accent_alternate;
+    return color;
+}
 
 template <typename T, std::size_t N>
 T next_value(T current, const T (&values)[N]) {
@@ -54,7 +99,7 @@ lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
     auto *obj = lv_label_create(parent);
     lv_label_set_text(obj, text);
     lv_obj_set_style_text_font(obj, font, 0);
-    lv_obj_set_style_text_color(obj, lv_color_hex(color), 0);
+    lv_obj_set_style_text_color(obj, lv_color_hex(chrome_color(color)), 0);
     return obj;
 }
 
@@ -72,13 +117,19 @@ lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int width, int height,
     lv_obj_set_size(button, width, height);
     lv_obj_set_pos(button, x, y);
     lv_obj_set_style_radius(button, 14, 0);
-    lv_obj_set_style_bg_color(button, lv_color_hex(background), 0);
+    const auto &chrome = chrome_palette();
+    lv_obj_set_style_bg_color(button, lv_color_hex(chrome_color(background)), 0);
     lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(button, 0, 0);
+    lv_obj_set_style_border_color(button, lv_color_hex(chrome.border), 0);
+    lv_obj_set_style_border_width(button, revenant_chrome() ? 1 : 0, 0);
     lv_obj_set_style_shadow_width(button, 0, 0);
-    lv_obj_set_style_bg_color(button,
-                              lv_color_hex(background == kCyan ? kViolet : kElevated),
-                              LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(
+        button,
+        lv_color_hex(revenant_chrome()
+                         ? (background == kCyan ? chrome.accent_alternate : chrome.pressed)
+                         : (background == kCyan ? kViolet : kElevated)),
+        LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(button, lv_color_hex(chrome.accent), LV_STATE_PRESSED);
     lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
 
     auto *button_label = label(button, text, &lv_font_montserrat_18, foreground);
@@ -94,6 +145,14 @@ void add_header(lv_obj_t *parent, const char *title, lv_event_cb_t back_callback
     lv_obj_set_pos(heading, 100, 39);
     lv_obj_set_width(heading, kSafeRight - 100);
     lv_label_set_long_mode(heading, LV_LABEL_LONG_MODE_DOTS);
+    if (revenant_chrome()) {
+        auto *rail = lv_obj_create(parent);
+        lv_obj_remove_style_all(rail);
+        lv_obj_set_size(rail, kSafeContentWidth, 1);
+        lv_obj_set_pos(rail, kSafeInset, 91);
+        lv_obj_set_style_bg_color(rail, lv_color_hex(chrome_palette().accent), 0);
+        lv_obj_set_style_bg_opa(rail, LV_OPA_70, 0);
+    }
 }
 
 lv_obj_t *make_route_card(lv_obj_t *parent, int y, int height) {
@@ -101,9 +160,9 @@ lv_obj_t *make_route_card(lv_obj_t *parent, int y, int height) {
     lv_obj_set_size(obj, kSafeContentWidth, height);
     lv_obj_set_pos(obj, kSafeInset, y);
     lv_obj_set_style_radius(obj, 16, 0);
-    lv_obj_set_style_bg_color(obj, lv_color_hex(kSurface), 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(chrome_palette().surface), 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(obj, lv_color_hex(kDivider), 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(chrome_palette().border), 0);
     lv_obj_set_style_border_width(obj, 1, 0);
     lv_obj_set_style_pad_all(obj, 16, 0);
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
@@ -119,6 +178,11 @@ lv_obj_t *make_scroller(lv_obj_t *parent) {
     lv_obj_set_style_pad_all(scroller, 4, 0);
     lv_obj_set_scroll_dir(scroller, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(scroller, LV_SCROLLBAR_MODE_ACTIVE);
+    if (revenant_chrome()) {
+        lv_obj_set_style_bg_color(scroller, lv_color_hex(chrome_palette().border),
+                                  LV_PART_SCROLLBAR);
+        lv_obj_set_style_bg_opa(scroller, LV_OPA_70, LV_PART_SCROLLBAR);
+    }
     return scroller;
 }
 
@@ -160,9 +224,9 @@ lv_obj_t *make_diagnostic_card(lv_obj_t *parent, int height, const char *title,
     auto *obj = lv_obj_create(parent);
     lv_obj_set_size(obj, kSafeContentWidth - 8, height);
     lv_obj_set_style_radius(obj, 14, 0);
-    lv_obj_set_style_bg_color(obj, lv_color_hex(kSurface), 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(chrome_palette().surface), 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(obj, lv_color_hex(kDivider), 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(chrome_palette().border), 0);
     lv_obj_set_style_border_width(obj, 1, 0);
     lv_obj_set_style_pad_all(obj, 14, 0);
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
@@ -350,13 +414,22 @@ void Shell::watchface_next_callback(lv_event_t *event) {
     const auto &selected = service.selected();
     const auto *packs = service.packs();
     const auto count = service.pack_count();
+    bool changed = false;
     for (std::size_t index = 0; index < count; ++index) {
         if (packs[index].id == selected.id) {
-            service.select(packs[(index + 1) % count].id);
+            changed = service.select(packs[(index + 1) % count].id);
             break;
         }
     }
-    self->refresh_watchface_settings();
+    if (changed) {
+        // The pack owns both its home face and system chrome. Recreate the
+        // active route and any visible system overlay from the new metadata.
+        self->render_route();
+        self->displayed_alert_kind_ = 0;
+        self->refresh_system_overlay();
+    } else {
+        self->refresh_watchface_settings();
+    }
 }
 
 void Shell::alarm_callback(lv_event_t *event) {
@@ -537,6 +610,21 @@ void Shell::render_route() {
     clear_route_objects();
     lv_obj_clean(content_host_);
 
+    const auto &pack = nightglass::services::watchface_service().selected();
+    const auto &chrome = chrome_palette();
+    lv_obj_set_style_bg_color(content_host_, lv_color_hex(chrome.background), 0);
+    lv_obj_set_style_bg_opa(content_host_, LV_OPA_COVER, 0);
+    if (navigation_.route != nightglass::core::Route::home &&
+        nightglass::services::valid_face_pack(pack) &&
+        pack.chrome.route_background_asset != nightglass::services::FaceAsset::none) {
+        if (const auto *asset = face_asset(pack.chrome.route_background_asset)) {
+            auto *background = lv_image_create(content_host_);
+            lv_image_set_src(background, asset);
+            lv_obj_set_pos(background, 0, 0);
+            lv_obj_set_style_image_opa(background, pack.chrome.route_background_opacity, 0);
+        }
+    }
+
     switch (navigation_.route) {
         case nightglass::core::Route::home:
             render_home();
@@ -604,7 +692,7 @@ void Shell::render_classic_home() {
     auto *status_card = make_route_card(content_host_, 246, 116);
     auto *glance = label(status_card, "AT A GLANCE", &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(glance, 0, 0);
-    home_motion_ = label(status_card, "MOTION · UNAVAILABLE", &lv_font_montserrat_20, kPrimary);
+    home_motion_ = label(status_card, "MOTION | UNAVAILABLE", &lv_font_montserrat_20, kPrimary);
     lv_obj_set_pos(home_motion_, 0, 29);
     home_battery_detail_ = label(status_card, "Battery data unavailable", &lv_font_montserrat_14,
                                  kSecondary);
@@ -731,7 +819,7 @@ void Shell::render_watchface_settings() {
     watchface_name_ = label(card, "", &lv_font_montserrat_26, kPrimary);
     lv_obj_set_pos(watchface_name_, 0, 38);
     lv_obj_set_width(watchface_name_, kSafeContentWidth - 32);
-    auto *contract = label(card, "Declarative · versioned · persistent",
+    auto *contract = label(card, "Declarative | versioned | persistent",
                            &lv_font_montserrat_14, kGreen);
     lv_obj_set_pos(contract, 0, 85);
 
@@ -777,9 +865,10 @@ void Shell::render_clock_settings() {
     lv_obj_set_size(preview, kSafeContentWidth - 16, 98);
     lv_obj_set_pos(preview, 0, 0);
     lv_obj_set_style_radius(preview, 14, 0);
-    lv_obj_set_style_bg_color(preview, lv_color_hex(kSurface), 0);
+    lv_obj_set_style_bg_color(preview, lv_color_hex(chrome_palette().surface), 0);
     lv_obj_set_style_bg_opa(preview, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(preview, 0, 0);
+    lv_obj_set_style_border_color(preview, lv_color_hex(chrome_palette().border), 0);
+    lv_obj_set_style_border_width(preview, revenant_chrome() ? 1 : 0, 0);
     lv_obj_remove_flag(preview, LV_OBJ_FLAG_SCROLLABLE);
     clock_preview_ = label(preview, "TIME UNAVAILABLE", &lv_font_montserrat_24, kPrimary);
     lv_obj_center(clock_preview_);
@@ -801,18 +890,18 @@ void Shell::refresh_settings_labels() {
     if (!setting_active_) return;
     const auto settings = nightglass::services::power_service().snapshot().settings;
     char text[64]{};
-    std::snprintf(text, sizeof(text), "ACTIVE BRIGHTNESS · %u%%", settings.active_brightness);
+    std::snprintf(text, sizeof(text), "ACTIVE BRIGHTNESS | %u%%", settings.active_brightness);
     set_button_text(setting_active_, text);
-    std::snprintf(text, sizeof(text), "DIM BRIGHTNESS · %u%%", settings.dim_brightness);
+    std::snprintf(text, sizeof(text), "DIM BRIGHTNESS | %u%%", settings.dim_brightness);
     set_button_text(setting_dim_, text);
-    std::snprintf(text, sizeof(text), "DIM AFTER · %u SEC", settings.dim_after_seconds);
+    std::snprintf(text, sizeof(text), "DIM AFTER | %u SEC", settings.dim_after_seconds);
     set_button_text(setting_dim_after_, text);
-    std::snprintf(text, sizeof(text), "SCREEN OFF · %u SEC", settings.blank_after_seconds);
+    std::snprintf(text, sizeof(text), "SCREEN OFF | %u SEC", settings.blank_after_seconds);
     set_button_text(setting_blank_after_, text);
     if (settings.sleep_after_blank_seconds == 0) {
-        set_button_text(setting_sleep_after_, "LIGHT SLEEP · OFF");
+        set_button_text(setting_sleep_after_, "LIGHT SLEEP | OFF");
     } else {
-        std::snprintf(text, sizeof(text), "LIGHT SLEEP · +%u SEC",
+        std::snprintf(text, sizeof(text), "LIGHT SLEEP | +%u SEC",
                       settings.sleep_after_blank_seconds);
         set_button_text(setting_sleep_after_, text);
     }
@@ -834,7 +923,7 @@ void Shell::render_alarm() {
                 alarm_minute_callback, this);
     alarm_toggle_ = make_button(content_host_, kSafeInset, 338, kSafeContentWidth, 70, "",
                                 kCyan, kVoid, alarm_enabled_callback, this);
-    auto *note = label(content_host_, "Visual alert only · wakes light sleep",
+    auto *note = label(content_host_, "Visual alert only | wakes light sleep",
                        &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(note, kSafeInset, 430);
     lv_obj_set_width(note, kSafeContentWidth);
@@ -895,19 +984,20 @@ void Shell::render_diagnostics() {
     lv_obj_set_style_pad_row(scroller, 10, 0);
     lv_obj_set_scroll_dir(scroller, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(scroller, LV_SCROLLBAR_MODE_ACTIVE);
-    lv_obj_set_style_bg_color(scroller, lv_color_hex(kDivider), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(scroller, lv_color_hex(chrome_palette().border),
+                              LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_opa(scroller, LV_OPA_70, LV_PART_SCROLLBAR);
     lv_obj_set_flex_flow(scroller, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(scroller, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
 
-    make_diagnostic_card(scroller, 106, "RTC · PCF85063", &diagnostics_rtc_state_,
+    make_diagnostic_card(scroller, 106, "RTC | PCF85063", &diagnostics_rtc_state_,
                          &diagnostics_rtc_detail_);
-    make_diagnostic_card(scroller, 126, "POWER · AXP2101", &diagnostics_battery_state_,
+    make_diagnostic_card(scroller, 126, "POWER | AXP2101", &diagnostics_battery_state_,
                          &diagnostics_battery_detail_);
-    make_diagnostic_card(scroller, 152, "MOTION · QMI8658", &diagnostics_motion_state_,
+    make_diagnostic_card(scroller, 152, "MOTION | QMI8658", &diagnostics_motion_state_,
                          &diagnostics_motion_detail_);
-    make_diagnostic_card(scroller, 116, "HAPTIC · GPIO18", &diagnostics_haptic_state_,
+    make_diagnostic_card(scroller, 116, "HAPTIC | GPIO18", &diagnostics_haptic_state_,
                          &diagnostics_haptic_detail_);
 
     // High-rate board refresh belongs exclusively to this active route.
@@ -923,7 +1013,7 @@ void Shell::render_about() {
     lv_obj_set_pos(name, 0, 0);
     auto *kind = label(identity, "Native watch system", &lv_font_montserrat_16, kCyan);
     lv_obj_set_pos(kind, 0, 44);
-    auto *version = label(identity, "ESP-IDF 5.5.5 · LVGL 9.5", &lv_font_montserrat_14,
+    auto *version = label(identity, "ESP-IDF 5.5.5 | LVGL 9.5", &lv_font_montserrat_14,
                           kSecondary);
     lv_obj_set_pos(version, 0, 78);
 
@@ -931,7 +1021,7 @@ void Shell::render_about() {
     auto *heading = label(hardware, "HARDWARE", &lv_font_montserrat_14, kViolet);
     lv_obj_set_pos(heading, 0, 0);
     auto *detail = label(hardware,
-                         "ESP32-S3 · 8 MB PSRAM\n32 MB flash · 410 x 502 AMOLED\n"
+                         "ESP32-S3 | 8 MB PSRAM\n32 MB flash | 410 x 502 AMOLED\n"
                          "Waveshare Touch AMOLED 2.06",
                          &lv_font_montserrat_16, kPrimary);
     lv_obj_set_pos(detail, 0, 29);
@@ -1017,11 +1107,11 @@ void Shell::refresh_home() {
         const int offset_abs = effective_offset < 0 ? -effective_offset : effective_offset;
         if (full_background) {
             std::snprintf(buffer, sizeof(buffer), "%s%sRTC LIVE",
-                          period, period[0] ? " · " : "");
+                          period, period[0] ? " | " : "");
             set_state(home_time_state_, buffer, pack.palette.accent);
         } else {
-            std::snprintf(buffer, sizeof(buffer), "%s%sUTC%c%d:%02d · LIVE",
-                          period, period[0] ? " · " : "", effective_offset < 0 ? '-' : '+',
+            std::snprintf(buffer, sizeof(buffer), "%s%sUTC%c%d:%02d | LIVE",
+                          period, period[0] ? " | " : "", effective_offset < 0 ? '-' : '+',
                           offset_abs / 60, offset_abs % 60);
             set_state(home_time_state_, buffer, kGreen);
         }
@@ -1045,12 +1135,12 @@ void Shell::refresh_home() {
         lv_label_set_text(home_battery_, buffer);
         if (battery.voltage_valid) {
             if (full_background) {
-                std::snprintf(buffer, sizeof(buffer), "%u.%02uV · %s",
+                std::snprintf(buffer, sizeof(buffer), "%u.%02uV | %s",
                               battery.voltage_mv / 1000, (battery.voltage_mv % 1000) / 10,
                               battery.charging ? "CHARGE" : battery.discharging ? "DRAIN"
                                                                                  : "STATE ?");
             } else {
-                std::snprintf(buffer, sizeof(buffer), "%u.%02u V · %s",
+                std::snprintf(buffer, sizeof(buffer), "%u.%02u V | %s",
                               battery.voltage_mv / 1000, (battery.voltage_mv % 1000) / 10,
                               battery.charging ? "Charging" : battery.discharging ? "Battery"
                                                                                  : "State partial");
@@ -1058,7 +1148,7 @@ void Shell::refresh_home() {
             lv_label_set_text(home_battery_detail_, buffer);
         } else {
             lv_label_set_text(home_battery_detail_, full_background ? "VOLTAGE N/A"
-                                      : battery.charging ? "Charging · voltage unavailable"
+                                      : battery.charging ? "Charging | voltage unavailable"
                                                          : "Voltage unavailable");
         }
         lv_obj_set_style_text_color(home_battery_,
@@ -1095,7 +1185,7 @@ void Shell::refresh_home() {
                 std::snprintf(buffer, sizeof(buffer), "CAL\n%u%%", progress);
                 set_state(home_motion_, buffer, kAmber);
             } else {
-                set_state(home_motion_, "MOTION · CALIBRATING", kAmber);
+                set_state(home_motion_, "MOTION | CALIBRATING", kAmber);
             }
         } else {
             const auto color = motion_age > 500'000
@@ -1105,12 +1195,12 @@ void Shell::refresh_home() {
                                                           : pack.palette.primary)
                                          : (motion.moving ? kCyan : kPrimary);
             set_state(home_motion_, full_background ? (motion.moving ? "MOVE" : "STILL")
-                                                    : (motion.moving ? "MOTION · MOVING"
-                                                                     : "MOTION · STILL"),
+                                                    : (motion.moving ? "MOTION | MOVING"
+                                                                     : "MOTION | STILL"),
                       color);
         }
     } else {
-        set_state(home_motion_, full_background ? "N/A\nNO DATA" : "MOTION · UNAVAILABLE", kRed);
+        set_state(home_motion_, full_background ? "N/A\nNO DATA" : "MOTION | UNAVAILABLE", kRed);
     }
 
     if (home_alarm_) {
@@ -1146,17 +1236,17 @@ void Shell::refresh_clock_settings() {
     if (!setting_time_format_) return;
     const auto snapshot = nightglass::services::clock_service().snapshot();
     set_button_text(setting_time_format_, snapshot.settings.use_24_hour
-                                             ? "TIME FORMAT · 24 HOUR"
-                                             : "TIME FORMAT · 12 HOUR");
+                                             ? "TIME FORMAT | 24 HOUR"
+                                             : "TIME FORMAT | 12 HOUR");
     const int offset = snapshot.settings.utc_offset_minutes;
     const int offset_abs = offset < 0 ? -offset : offset;
     char buffer[96]{};
-    std::snprintf(buffer, sizeof(buffer), "UTC OFFSET · %c%d:%02d",
+    std::snprintf(buffer, sizeof(buffer), "UTC OFFSET | %c%d:%02d",
                   offset < 0 ? '-' : '+', offset_abs / 60, offset_abs % 60);
     set_button_text(setting_utc_offset_, buffer);
     set_button_text(setting_dst_, snapshot.settings.daylight_saving
-                                      ? "DAYLIGHT SAVING · ON"
-                                      : "DAYLIGHT SAVING · OFF");
+                                      ? "DAYLIGHT SAVING | ON"
+                                      : "DAYLIGHT SAVING | OFF");
     if (snapshot.time_valid && clock_preview_) {
         const char *period = "";
         format_time(buffer, sizeof(buffer), snapshot.local_time,
@@ -1200,7 +1290,7 @@ void Shell::refresh_countdown() {
     format_duration(buffer, sizeof(buffer),
                     static_cast<std::uint64_t>(snapshot.timer_remaining_seconds) * 1000, false);
     lv_label_set_text(countdown_time_, buffer);
-    std::snprintf(buffer, sizeof(buffer), "DURATION · %u MIN",
+    std::snprintf(buffer, sizeof(buffer), "DURATION | %u MIN",
                   static_cast<unsigned>(snapshot.timer_configured_seconds / 60));
     set_button_text(countdown_duration_, buffer);
     set_button_text(countdown_toggle_, snapshot.timer_running ? "PAUSE" : "START");
@@ -1235,6 +1325,16 @@ void Shell::refresh_system_overlay() {
     lv_obj_set_style_bg_opa(overlay_layer_, LV_OPA_90, 0);
     lv_obj_remove_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(overlay_layer_);
+    const auto &pack = nightglass::services::watchface_service().selected();
+    if (nightglass::services::valid_face_pack(pack) &&
+        pack.chrome.route_background_asset != nightglass::services::FaceAsset::none) {
+        if (const auto *asset = face_asset(pack.chrome.route_background_asset)) {
+            auto *background = lv_image_create(overlay_layer_);
+            lv_image_set_src(background, asset);
+            lv_obj_set_pos(background, 0, 0);
+            lv_obj_set_style_image_opa(background, pack.chrome.route_background_opacity, 0);
+        }
+    }
     alert_card_ = make_route_card(overlay_layer_, 112, 230);
     const char *title = kind == nightglass::services::AlertKind::alarm ? "ALARM"
                         : kind == nightglass::services::AlertKind::countdown ? "TIMER COMPLETE"
@@ -1277,7 +1377,7 @@ void Shell::refresh_diagnostics() {
         lv_label_set_text(diagnostics_battery_detail_, "AXP2101 telemetry unavailable");
     } else if (!battery.battery_present) {
         set_state(diagnostics_battery_state_, "NO BATTERY", kAmber);
-        lv_label_set_text(diagnostics_battery_detail_, "PMIC live · battery not detected");
+        lv_label_set_text(diagnostics_battery_detail_, "PMIC live | battery not detected");
     } else {
         set_state(diagnostics_battery_state_, battery_age > 5'000'000 ? "STALE" : "LIVE",
                   battery_age > 5'000'000 ? kAmber : kGreen);
@@ -1285,10 +1385,10 @@ void Shell::refresh_diagnostics() {
                              : battery.discharging ? "Discharging"
                                                   : "Charge state partial";
         if (battery.percent_valid && battery.voltage_valid) {
-            std::snprintf(buffer, sizeof(buffer), "%u%% · %u.%02u V\n%s", battery.percent,
+            std::snprintf(buffer, sizeof(buffer), "%u%% | %u.%02u V\n%s", battery.percent,
                           battery.voltage_mv / 1000, (battery.voltage_mv % 1000) / 10, charge);
         } else {
-            std::snprintf(buffer, sizeof(buffer), "Battery detected\n%s · metrics partial", charge);
+            std::snprintf(buffer, sizeof(buffer), "Battery detected\n%s | metrics partial", charge);
         }
         lv_label_set_text(diagnostics_battery_detail_, buffer);
     }
@@ -1305,7 +1405,7 @@ void Shell::refresh_diagnostics() {
                                       : 100U * motion.gyro_calibration_samples /
                                             motion.gyro_calibration_required;
         std::snprintf(buffer, sizeof(buffer),
-                      "Keep watch stationary · %u%%\nGyro zero %u / %u samples\nRestarts %lu",
+                      "Keep watch stationary | %u%%\nGyro zero %u / %u samples\nRestarts %lu",
                       progress, motion.gyro_calibration_samples,
                       motion.gyro_calibration_required,
                       static_cast<unsigned long>(motion.gyro_calibration_restarts));
@@ -1314,7 +1414,7 @@ void Shell::refresh_diagnostics() {
         set_state(diagnostics_motion_state_, motion_age > 500'000 ? "STALE" : "LIVE",
                   motion_age > 500'000 ? kAmber : kGreen);
         std::snprintf(buffer, sizeof(buffer),
-                      "%s · bias %+.1f %+.1f %+.1f\nACC %+.2f  %+.2f  %+.2f g\nGYR %+.1f  %+.1f  %+.1f d/s",
+                      "%s | bias %+.1f %+.1f %+.1f\nACC %+.2f  %+.2f  %+.2f g\nGYR %+.1f  %+.1f  %+.1f d/s",
                       motion.moving ? "Moving" : "Still", motion.gyro_bias_x_dps,
                       motion.gyro_bias_y_dps, motion.gyro_bias_z_dps, motion.accel_x_g,
                       motion.accel_y_g, motion.accel_z_g, motion.gyro_x_dps,
@@ -1337,7 +1437,7 @@ void Shell::refresh_diagnostics() {
         lv_label_set_text(diagnostics_haptic_detail_, "Actuator service available");
     } else {
         set_state(diagnostics_haptic_state_, "UNAVAILABLE", kRed);
-        lv_label_set_text(diagnostics_haptic_detail_, "Actuator present · service unavailable");
+        lv_label_set_text(diagnostics_haptic_detail_, "Actuator present | service unavailable");
     }
 }
 

@@ -1,14 +1,15 @@
 # Nightglass Watch-Face Packs
 
-Watch faces are versioned, declarative data packs. The system owns time,
+Watch faces are versioned, declarative theme packs. The system owns time,
 battery, alarms, motion, input, and power behavior; a pack can only select
-firmware-known resources and place native UI fields.
+firmware-known resources, place native UI fields, and choose allowlisted system
+chrome. Selecting a pack applies its home face and its shell theme together.
 
 Nightglass Classic is pack ID `0` and the guaranteed fallback. Selection is
 persisted by ID in NVS. An unknown ID, invalid schema, unsupported version, or
 unknown resource resolves to Classic.
 
-## Format 2
+## Format 3
 
 Each built-in `FacePack` declares:
 
@@ -16,6 +17,8 @@ Each built-in `FacePack` declares:
 - one firmware-supported layout (`classic` or `full_background`);
 - a complication capability bitmask and OLED palette;
 - a background `FaceAsset` enum value;
+- one allowlisted chrome theme (`classic` or `revenant`), an optional
+  firmware-known route-background asset, and a bounded opacity;
 - bounded `FaceTextSlot` records for fixed captions and live system fields;
 - bounded `FaceActionSlot` records for firmware-known actions.
 
@@ -24,7 +27,10 @@ font styles, alignment, and palette role. Fixed captions may contain text;
 live fields may not. Every text rectangle must stay inside the 28-pixel safe
 inset on the 410x502 panel. Actions and assets are enums, not callbacks,
 scripts, module names, URLs, or filesystem paths. The validator limits packs
-to 24 text slots and four action slots.
+to 24 text slots and four action slots. Chrome metadata cannot name fonts,
+paths, arbitrary resources, scripts, or callbacks. Classic chrome accepts no
+route asset and zero opacity. Revenant chrome accepts only the compiled
+Revenant asset at a nonzero opacity no greater than 64/255.
 
 `full_background` currently allows only the compiled Revenant Grid v2 asset.
 That allowlist is deliberately narrow. A future import transport must retain
@@ -36,7 +42,8 @@ Classic fallback before external data can reach this structure.
 ### Nightglass Classic
 
 The legible system fallback with live time, date, battery, and motion state.
-It does not depend on an image asset or pack metadata renderer.
+It does not depend on an image asset or pack metadata renderer. Its system
+shell preserves the original black, gunmetal, white, and cyan presentation.
 
 ### Revenant Grid v2
 
@@ -51,6 +58,12 @@ empty instrument bays. Native LVGL overlays provide:
 - large local time, RTC availability, day, and date;
 - actual alarm and countdown state;
 - a full-face, firmware-owned touch target that launches Apps.
+
+The same pack themes Launcher, Settings, Power, Clock & Region, Watch Face,
+Alarm, Timer, Stopwatch, Diagnostics, About, and system alert overlays. Those
+routes use black/gunmetal surfaces, acid-green accents and borders, and the
+compiled Revenant background at restrained opacity. Warning and error states
+remain amber and red so their meaning does not change with the theme.
 
 All text remains native and is updated from current service snapshots. Missing
 or stale inputs are shown as unavailable instead of being synthesized.

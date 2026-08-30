@@ -56,17 +56,19 @@ constexpr FaceActionSlot kRevenantActions[]{
 };
 
 constexpr FacePack kPacks[]{
-    {0, "classic", "Nightglass Classic", 2, FaceLayout::classic,
+    {0, "classic", "Nightglass Classic", 3, FaceLayout::classic,
      complication_time | complication_date | complication_battery |
          complication_motion,
      {0x000000, 0x0B0D12, 0x272D3A, 0xF4F6FA, 0xA2ABBA, 0x63DDE4, 0x274C55},
-     FaceAsset::none, nullptr, 0, nullptr, 0},
-    {1, "revenant-grid-v2", "Revenant Grid v2", 2, FaceLayout::full_background,
+     FaceAsset::none, {ChromeTheme::classic, FaceAsset::none, 0}, nullptr, 0,
+     nullptr, 0},
+    {1, "revenant-grid-v2", "Revenant Grid v2", 3, FaceLayout::full_background,
      complication_time | complication_date | complication_battery |
          complication_motion | complication_steps | complication_alarm |
          complication_timer,
      {0x000000, 0x101413, 0x252D29, 0xF3F7F4, 0x829087, 0xA8FF32, 0x0B3A24},
-     FaceAsset::revenant_grid_v2, kRevenantTextSlots,
+     FaceAsset::revenant_grid_v2,
+     {ChromeTheme::revenant, FaceAsset::revenant_grid_v2, 36}, kRevenantTextSlots,
      static_cast<std::uint8_t>(std::size(kRevenantTextSlots)), kRevenantActions,
      static_cast<std::uint8_t>(std::size(kRevenantActions))},
 };

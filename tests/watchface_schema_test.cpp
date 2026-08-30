@@ -18,11 +18,12 @@ FacePack full_pack() {
     return {1,
             "test",
             "Test",
-            2,
+            3,
             FaceLayout::full_background,
             complication_time,
             kPalette,
             FaceAsset::revenant_grid_v2,
+            {ChromeTheme::revenant, FaceAsset::revenant_grid_v2, 36},
             kText,
             2,
             kActions,
@@ -31,9 +32,10 @@ FacePack full_pack() {
 }  // namespace
 
 int main() {
-    const FacePack classic{0, "classic", "Classic", 2, FaceLayout::classic,
+    const FacePack classic{0, "classic", "Classic", 3, FaceLayout::classic,
                            complication_time, kPalette, FaceAsset::none,
-                           nullptr, 0, nullptr, 0};
+                           {ChromeTheme::classic, FaceAsset::none, 0}, nullptr, 0,
+                           nullptr, 0};
     assert(valid_face_pack(classic));
 
     auto pack = full_pack();
@@ -43,6 +45,18 @@ int main() {
     assert(!valid_face_pack(pack));
     pack = full_pack();
     pack.background_asset = FaceAsset::none;
+    assert(!valid_face_pack(pack));
+    pack = full_pack();
+    pack.chrome.theme = static_cast<ChromeTheme>(99);
+    assert(!valid_face_pack(pack));
+    pack = full_pack();
+    pack.chrome.route_background_asset = FaceAsset::none;
+    assert(!valid_face_pack(pack));
+    pack = full_pack();
+    pack.chrome.route_background_opacity = 65;
+    assert(!valid_face_pack(pack));
+    pack = full_pack();
+    pack.chrome.route_background_opacity = 0;
     assert(!valid_face_pack(pack));
 
     constexpr FaceTextSlot unsafe_text[]{
