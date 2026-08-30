@@ -4,4 +4,4 @@ idf_component_register(
          "src/watchface_schema.cpp"
     INCLUDE_DIRS "include"
     REQUIRES nightglass_core nightglass_bsp esp_driver_i2c esp_driver_gpio esp_timer
-             esp_hw_support nvs_flash)
+             esp_driver_usb_serial_jtag esp_hw_support nvs_flash)

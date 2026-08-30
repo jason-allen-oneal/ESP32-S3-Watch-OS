@@ -1,6 +1,7 @@
 #include "nightglass/services/power.hpp"
 
 #include "driver/gpio.h"
+#include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
@@ -224,6 +225,7 @@ void enter_light_sleep(std::int64_t observed_activity_us) {
 void supervisor(void *) {
     bool debounced_key = gpio_get_level(kSideKeyGpio) > 0;
     bool candidate_key = debounced_key;
+    bool usb_sleep_inhibited = false;
     std::uint8_t stable_samples = kDebounceSamples;
     while (true) {
         ulTaskNotifyTake(pdTRUE, kSupervisorPeriod);
@@ -263,11 +265,24 @@ void supervisor(void *) {
         apply_state(target, snapshot.last_activity_us);
         if (snapshot.settings.sleep_after_blank_seconds > 0 &&
             inactive_us >= blank_after_us + sleep_after_us) {
-            PowerSnapshot latest{};
-            portENTER_CRITICAL(&snapshot_mux);
-            latest = current;
-            portEXIT_CRITICAL(&snapshot_mux);
-            enter_light_sleep(latest.last_activity_us);
+            if (usb_serial_jtag_is_connected()) {
+                if (!usb_sleep_inhibited) {
+                    ESP_LOGI(kTag, "USB host connected; light sleep inhibited");
+                    usb_sleep_inhibited = true;
+                }
+            } else {
+                if (usb_sleep_inhibited) {
+                    ESP_LOGI(kTag, "USB host disconnected; light sleep restored");
+                    usb_sleep_inhibited = false;
+                }
+                PowerSnapshot latest{};
+                portENTER_CRITICAL(&snapshot_mux);
+                latest = current;
+                portEXIT_CRITICAL(&snapshot_mux);
+                enter_light_sleep(latest.last_activity_us);
+            }
+        } else {
+            usb_sleep_inhibited = false;
         }
     }
 }
