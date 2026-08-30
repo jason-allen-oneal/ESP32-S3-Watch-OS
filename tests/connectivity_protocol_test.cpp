@@ -27,4 +27,16 @@ int main() {
     assert(media[1] == 0x10 && media[2] == 9 && media[3] == 2);
     const auto action = encode_notification_action(true, 0x12345678, 4);
     assert(action[1] == 0x11 && action[3] == 0x78 && action[6] == 0x12);
+    const std::array<std::uint8_t, 10> wifi{1, 0x20, 3, 3, 'N', 'e', 't', 's', 'e', 'c'};
+    assert(parse_companion_message(wifi, message));
+    assert(message.kind == CompanionMessageKind::wifi_provision);
+    assert(message.wifi.ssid_length == 3 && message.wifi.password_length == 3);
+    const std::array<std::uint8_t, 14> weather{1, 0x21, 3, 1, 30, 0,
+                                               0, 0, 0, 0, 0, 0, 0, 0};
+    assert(parse_companion_message(weather, message));
+    assert(message.kind == CompanionMessageKind::weather_settings);
+    assert(message.weather.metric && message.weather.location_configured);
+    auto invalid_weather = weather;
+    invalid_weather[4] = 5;
+    assert(!parse_companion_message(invalid_weather, message));
 }

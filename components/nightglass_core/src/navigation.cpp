@@ -43,6 +43,18 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
             state.route = Route::watchface_settings;
             state.overlay = Overlay::none;
             break;
+        case NavigationAction::open_activity:
+            state.route = Route::activity;
+            state.overlay = Overlay::none;
+            break;
+        case NavigationAction::open_weather:
+            state.route = Route::weather;
+            state.overlay = Overlay::none;
+            break;
+        case NavigationAction::open_connectivity:
+            state.route = Route::connectivity;
+            state.overlay = Overlay::none;
+            break;
         case NavigationAction::open_alarm:
             state.route = Route::alarm;
             state.overlay = Overlay::none;

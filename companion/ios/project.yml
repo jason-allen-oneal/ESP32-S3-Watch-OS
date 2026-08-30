@@ -1,0 +1,20 @@
+name: NightglassCompanion
+options:
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    PRODUCT_BUNDLE_IDENTIFIER: com.nightglass.companion
+    CODE_SIGN_STYLE: Automatic
+targets:
+  NightglassCompanion:
+    type: application
+    platform: iOS
+    sources:
+      - NightglassCompanion
+    info:
+      path: NightglassCompanion/Info.plist
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: NO

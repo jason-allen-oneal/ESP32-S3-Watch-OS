@@ -30,9 +30,7 @@ namespace {
 
 constexpr char kTag[] = "nightglass_net";
 constexpr char kNvsNamespace[] = "ng_network";
-constexpr char kCredentialsKey[] = "credentials";
 constexpr char kSettingsKey[] = "settings";
-constexpr std::uint32_t kCredentialMagic = 0x4E474357;  // NGCW
 constexpr std::uint32_t kSettingsMagic = 0x4E475753;    // NGWS
 constexpr std::uint8_t kStorageVersion = 1;
 constexpr std::size_t kMaxSsid = 32;
@@ -41,14 +39,10 @@ constexpr std::size_t kMaxResponse = 4096;
 constexpr std::int64_t kWorkerPeriodUs = 1'000'000;
 
 struct CredentialBlob {
-    std::uint32_t magic{kCredentialMagic};
-    std::uint8_t version{kStorageVersion};
     std::uint8_t ssid_length{0};
     std::uint8_t password_length{0};
-    std::uint8_t reserved{0};
     std::array<char, kMaxSsid + 1> ssid{};
     std::array<char, kMaxPassword + 1> password{};
-    std::uint32_t checksum{0};
 };
 
 struct SettingsBlob {
@@ -80,6 +74,7 @@ std::atomic<std::int64_t> next_connect_us{0};
 std::atomic<std::int64_t> next_fetch_us{0};
 std::int64_t last_good_us = 0;
 std::uint32_t configuration_generation = 0;
+CredentialBlob runtime_credentials{};
 std::atomic<std::uint8_t> weather_failure_attempt{0};
 esp_event_handler_instance_t wifi_handler{};
 esp_event_handler_instance_t ip_handler{};
@@ -119,36 +114,6 @@ bool valid_settings(const NetworkWeatherSettings &settings) {
            settings.refresh_minutes >= 15 && settings.refresh_minutes <= 360 &&
            (settings.units == WeatherUnits::metric ||
             settings.units == WeatherUnits::imperial);
-}
-
-bool valid_credentials(const CredentialBlob &blob) {
-    if (blob.magic != kCredentialMagic || blob.version != kStorageVersion ||
-        blob.ssid_length == 0 || blob.ssid_length > kMaxSsid ||
-        blob.password_length > kMaxPassword || blob.ssid[blob.ssid_length] != '\0' ||
-        blob.password[blob.password_length] != '\0') {
-        return false;
-    }
-    const auto expected = checksum(&blob, offsetof(CredentialBlob, checksum));
-    return expected == blob.checksum;
-}
-
-bool load_credentials(CredentialBlob &out) {
-    nvs_handle_t handle{};
-    if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
-    std::size_t length = sizeof(out);
-    const esp_err_t result = nvs_get_blob(handle, kCredentialsKey, &out, &length);
-    nvs_close(handle);
-    return result == ESP_OK && length == sizeof(out) && valid_credentials(out);
-}
-
-esp_err_t save_credentials(CredentialBlob &blob) {
-    blob.checksum = checksum(&blob, offsetof(CredentialBlob, checksum));
-    nvs_handle_t handle{};
-    esp_err_t result = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
-    if (result == ESP_OK) result = nvs_set_blob(handle, kCredentialsKey, &blob, sizeof(blob));
-    if (result == ESP_OK) result = nvs_commit(handle);
-    if (handle) nvs_close(handle);
-    return result;
 }
 
 NetworkWeatherSettings load_settings() {
@@ -286,22 +251,19 @@ esp_err_t initialize_wifi() {
 // and station start in the same transaction prevents a delayed start from
 // escaping credential clearing or light-sleep preparation.
 esp_err_t apply_credentials_locked() {
-    CredentialBlob local{};
-    if (!load_credentials(local)) {
-        wipe(&local, sizeof(local));
-        return ESP_ERR_INVALID_STATE;
-    }
+    if (runtime_credentials.ssid_length == 0) return ESP_ERR_INVALID_STATE;
     wifi_config_t config{};
-    std::memcpy(config.sta.ssid, local.ssid.data(), local.ssid_length);
-    std::memcpy(config.sta.password, local.password.data(), local.password_length);
+    std::memcpy(config.sta.ssid, runtime_credentials.ssid.data(),
+                runtime_credentials.ssid_length);
+    std::memcpy(config.sta.password, runtime_credentials.password.data(),
+                runtime_credentials.password_length);
     config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
-    config.sta.threshold.authmode = local.password_length == 0
+    config.sta.threshold.authmode = runtime_credentials.password_length == 0
                                         ? WIFI_AUTH_OPEN
                                         : WIFI_AUTH_WPA2_PSK;
     const esp_err_t result = esp_wifi_set_config(WIFI_IF_STA, &config);
     wipe(&config, sizeof(config));
-    wipe(&local, sizeof(local));
     return result;
 }
 
@@ -582,9 +544,7 @@ nightglass::core::Status NetworkWeatherService::start() {
                 "credential mutex creation failed"};
     }
     const auto settings = load_settings();
-    CredentialBlob loaded{};
-    const bool provisioned = load_credentials(loaded);
-    wipe(&loaded, sizeof(loaded));
+    const bool provisioned = false;
 
     portENTER_CRITICAL(&state_mux);
     current = {};
@@ -669,13 +629,9 @@ nightglass::core::Status NetworkWeatherService::provision_credentials(
         return {nightglass::core::StatusCode::invalid_state,
                 "credential store busy"};
     }
-    const esp_err_t result = save_credentials(candidate);
+    wipe(&runtime_credentials, sizeof(runtime_credentials));
+    runtime_credentials = candidate;
     if (credential_mutex) xSemaphoreGive(credential_mutex);
-    if (result != ESP_OK) {
-        wipe(&candidate, sizeof(candidate));
-        return {nightglass::core::StatusCode::io_error,
-                "Wi-Fi credential persistence failed"};
-    }
     wipe(&candidate, sizeof(candidate));
     credentials_dirty.store(true);
     portENTER_CRITICAL(&state_mux);
@@ -697,17 +653,7 @@ nightglass::core::Status NetworkWeatherService::clear_credentials() {
         return {nightglass::core::StatusCode::invalid_state,
                 "credential store busy"};
     }
-    nvs_handle_t handle{};
-    esp_err_t result = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
-    if (result == ESP_OK) result = nvs_erase_key(handle, kCredentialsKey);
-    if (result == ESP_ERR_NVS_NOT_FOUND) result = ESP_OK;
-    if (result == ESP_OK) result = nvs_commit(handle);
-    if (handle) nvs_close(handle);
-    if (result != ESP_OK) {
-        if (credential_mutex) xSemaphoreGive(credential_mutex);
-        return {nightglass::core::StatusCode::io_error,
-                "Wi-Fi credential removal failed"};
-    }
+    wipe(&runtime_credentials, sizeof(runtime_credentials));
     if (wifi_started.load()) esp_wifi_disconnect();
     esp_err_t driver_clear = ESP_OK;
     if (wifi_initialized.load()) {

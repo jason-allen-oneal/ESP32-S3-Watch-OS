@@ -24,6 +24,20 @@ private:
     static void clock_settings_callback(lv_event_t *event);
     static void watchface_settings_callback(lv_event_t *event);
     static void watchface_next_callback(lv_event_t *event);
+    static void activity_callback(lv_event_t *event);
+    static void activity_stride_callback(lv_event_t *event);
+    static void activity_goal_callback(lv_event_t *event);
+    static void activity_reset_callback(lv_event_t *event);
+    static void weather_callback(lv_event_t *event);
+    static void weather_toggle_callback(lv_event_t *event);
+    static void weather_units_callback(lv_event_t *event);
+    static void weather_refresh_callback(lv_event_t *event);
+    static void weather_latitude_callback(lv_event_t *event);
+    static void weather_longitude_callback(lv_event_t *event);
+    static void weather_clear_wifi_callback(lv_event_t *event);
+    static void connectivity_callback(lv_event_t *event);
+    static void connectivity_toggle_callback(lv_event_t *event);
+    static void media_callback(lv_event_t *event);
     static void alarm_callback(lv_event_t *event);
     static void countdown_callback(lv_event_t *event);
     static void stopwatch_callback(lv_event_t *event);
@@ -55,6 +69,9 @@ private:
     void render_power_settings();
     void render_clock_settings();
     void render_watchface_settings();
+    void render_activity();
+    void render_weather();
+    void render_connectivity();
     void render_classic_home();
     void render_pack_home();
     void render_alarm();
@@ -67,6 +84,9 @@ private:
     void refresh_home();
     void refresh_clock_settings();
     void refresh_watchface_settings();
+    void refresh_activity();
+    void refresh_weather();
+    void refresh_connectivity();
     void refresh_alarm();
     void refresh_countdown();
     void refresh_stopwatch();
@@ -94,6 +114,20 @@ private:
     lv_obj_t *setting_dst_{nullptr};
     lv_obj_t *clock_preview_{nullptr};
     lv_obj_t *watchface_name_{nullptr};
+    lv_obj_t *activity_steps_{nullptr};
+    lv_obj_t *activity_detail_{nullptr};
+    lv_obj_t *activity_stride_{nullptr};
+    lv_obj_t *activity_goal_{nullptr};
+    lv_obj_t *weather_state_{nullptr};
+    lv_obj_t *weather_detail_{nullptr};
+    lv_obj_t *weather_toggle_{nullptr};
+    lv_obj_t *weather_units_{nullptr};
+    lv_obj_t *weather_refresh_{nullptr};
+    lv_obj_t *weather_latitude_{nullptr};
+    lv_obj_t *weather_longitude_{nullptr};
+    lv_obj_t *connectivity_state_{nullptr};
+    lv_obj_t *connectivity_detail_{nullptr};
+    lv_obj_t *connectivity_toggle_{nullptr};
 
     // Core clock app widgets.
     lv_obj_t *alarm_time_{nullptr};
@@ -118,6 +152,9 @@ private:
     lv_obj_t *home_steps_{nullptr};
     lv_obj_t *home_alarm_{nullptr};
     lv_obj_t *home_timer_{nullptr};
+    lv_obj_t *home_distance_{nullptr};
+    lv_obj_t *home_weather_{nullptr};
+    lv_obj_t *home_notifications_{nullptr};
 
     // Diagnostics widgets exist only while that route is active.
     lv_obj_t *diagnostics_rtc_state_{nullptr};

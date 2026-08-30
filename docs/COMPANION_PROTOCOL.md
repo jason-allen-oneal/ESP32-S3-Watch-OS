@@ -24,6 +24,9 @@ companion adapter.
   a separate adapter and is not claimed by this protocol.
 - Until a phone adapter is installed, the watch truthfully reports advertising,
   paired, connected, or unavailable states; it does not fabricate content.
+- Bluetooth defaults off so the watch can enter manual light sleep. Enabling
+  companion mode keeps the display power policy active but intentionally
+  inhibits manual light sleep until the radio is disabled.
 
 ## GATT service
 
@@ -40,3 +43,11 @@ opcode `1`, notification ID, category, app/title/body lengths, then the three
 strings. Opcodes `2` and `3` remove one or clear all notifications. Outbound
 opcodes `0x10`, `0x11`, and `0x12` represent media, dismiss, and mark-read
 actions.
+
+Provisioning opcodes are accepted only on the encrypted phone-to-watch
+characteristic. `0x20` carries bounded SSID/password lengths followed by their
+bytes, `0x21` carries weather enable/location/unit/refresh settings, and `0x22`
+clears the runtime Wi-Fi credential. Credentials are never returned over GATT or
+written to logs. Just Works pairing protects against passive interception but
+does not provide MITM authentication; a passkey ceremony remains required for
+hostile-radio environments.

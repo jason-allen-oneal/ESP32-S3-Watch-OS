@@ -20,6 +20,9 @@ enum FaceComplication : std::uint16_t {
     complication_steps = 1U << 4,
     complication_alarm = 1U << 5,
     complication_timer = 1U << 6,
+    complication_distance = 1U << 7,
+    complication_weather = 1U << 8,
+    complication_notifications = 1U << 9,
 };
 
 enum class FaceAsset : std::uint8_t { none, revenant_grid_v2 };
@@ -44,6 +47,9 @@ enum class FaceField : std::uint8_t {
     motion,
     alarm,
     timer,
+    distance,
+    weather,
+    notifications,
 };
 
 enum class FaceTextStyle : std::uint8_t {

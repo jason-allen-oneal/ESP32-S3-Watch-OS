@@ -9,7 +9,8 @@ constexpr std::uint16_t kTextSafeInset = 28;
 constexpr std::uint16_t kKnownComplications =
     complication_time | complication_date | complication_battery |
     complication_motion | complication_steps | complication_alarm |
-    complication_timer;
+    complication_timer | complication_distance | complication_weather |
+    complication_notifications;
 constexpr std::uint8_t kMaxTextSlots = 24;
 constexpr std::uint8_t kMaxActionSlots = 4;
 constexpr std::uint8_t kMaxRouteBackgroundOpacity = 64;
@@ -21,7 +22,7 @@ bool valid_rect(const FaceRect &rect) {
 }
 
 bool valid_field(FaceField field) {
-    return field >= FaceField::fixed_text && field <= FaceField::timer;
+    return field >= FaceField::fixed_text && field <= FaceField::notifications;
 }
 
 bool valid_style(FaceTextStyle style) {
@@ -55,6 +56,12 @@ std::uint16_t field_complication(FaceField field) {
             return complication_alarm;
         case FaceField::timer:
             return complication_timer;
+        case FaceField::distance:
+            return complication_distance;
+        case FaceField::weather:
+            return complication_weather;
+        case FaceField::notifications:
+            return complication_notifications;
         case FaceField::fixed_text:
             return 0;
     }

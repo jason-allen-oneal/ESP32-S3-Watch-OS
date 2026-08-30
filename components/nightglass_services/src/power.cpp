@@ -12,6 +12,7 @@
 #include "nightglass/core/health.hpp"
 #include "nightglass/services/clock.hpp"
 #include "nightglass/services/network_weather.hpp"
+#include "nightglass/services/connectivity.hpp"
 
 namespace nightglass::services {
 namespace {
@@ -139,6 +140,9 @@ void apply_state(nightglass::core::PowerState target, std::int64_t observed_acti
 }
 
 void enter_light_sleep(std::int64_t observed_activity_us) {
+    // Manual light sleep is not entered while the companion radio is active.
+    // The display still blanks; disabling Bluetooth restores full sleep.
+    if (connectivity_service().snapshot().settings.enabled) return;
     if (gpio_get_level(kTouchInterruptGpio) == 0) {
         publish_activity(esp_timer_get_time(), nightglass::core::WakeReason::touch);
         return;

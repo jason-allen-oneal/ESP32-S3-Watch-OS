@@ -6,6 +6,9 @@
 #include "esp_timer.h"
 #include "lvgl.h"
 #include "nightglass/services/clock.hpp"
+#include "nightglass/services/activity.hpp"
+#include "nightglass/services/connectivity.hpp"
+#include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/watchface.hpp"
@@ -598,6 +601,113 @@ void Shell::about_callback(lv_event_t *event) {
         nightglass::core::NavigationAction::open_about);
 }
 
+void Shell::activity_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_activity);
+}
+
+void Shell::activity_stride_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::activity_service().snapshot().settings;
+    settings.stride_length_mm = static_cast<std::uint16_t>(settings.stride_length_mm + 50);
+    if (settings.stride_length_mm > 1500) settings.stride_length_mm = 300;
+    nightglass::services::activity_service().update_settings(settings);
+    self->refresh_activity();
+}
+
+void Shell::activity_goal_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::activity_service().snapshot().settings;
+    settings.daily_goal_steps += 1000;
+    if (settings.daily_goal_steps > 30000) settings.daily_goal_steps = 1000;
+    nightglass::services::activity_service().update_settings(settings);
+    self->refresh_activity();
+}
+
+void Shell::activity_reset_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::activity_service().reset_today();
+    self->refresh_activity();
+}
+
+void Shell::weather_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_weather);
+}
+
+void Shell::weather_toggle_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::network_weather_service().snapshot().settings;
+    settings.enabled = !settings.enabled;
+    nightglass::services::network_weather_service().update_settings(settings);
+    self->refresh_weather();
+}
+
+void Shell::weather_units_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::network_weather_service().snapshot().settings;
+    settings.units = settings.units == nightglass::services::WeatherUnits::metric
+                         ? nightglass::services::WeatherUnits::imperial
+                         : nightglass::services::WeatherUnits::metric;
+    nightglass::services::network_weather_service().update_settings(settings);
+    self->refresh_weather();
+}
+
+void Shell::weather_refresh_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::network_weather_service().snapshot().settings;
+    constexpr std::uint16_t values[]{15, 30, 60, 120};
+    settings.refresh_minutes = next_value(settings.refresh_minutes, values);
+    nightglass::services::network_weather_service().update_settings(settings);
+    nightglass::services::network_weather_service().request_refresh();
+    self->refresh_weather();
+}
+
+void Shell::weather_latitude_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::network_weather_service().snapshot().settings;
+    settings.location_configured = true;
+    settings.latitude_e6 += 100'000;
+    if (settings.latitude_e6 > 90'000'000) settings.latitude_e6 = -90'000'000;
+    nightglass::services::network_weather_service().update_settings(settings);
+    self->refresh_weather();
+}
+
+void Shell::weather_longitude_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::network_weather_service().snapshot().settings;
+    settings.location_configured = true;
+    settings.longitude_e6 += 100'000;
+    if (settings.longitude_e6 > 180'000'000) settings.longitude_e6 = -180'000'000;
+    nightglass::services::network_weather_service().update_settings(settings);
+    self->refresh_weather();
+}
+
+void Shell::weather_clear_wifi_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::network_weather_service().clear_credentials();
+    self->refresh_weather();
+}
+
+void Shell::connectivity_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_connectivity);
+}
+
+void Shell::connectivity_toggle_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::connectivity_service().snapshot().settings;
+    settings.enabled = !settings.enabled;
+    nightglass::services::connectivity_service().update_settings(settings);
+    self->refresh_connectivity();
+}
+
+void Shell::media_callback(lv_event_t *event) {
+    const auto command = static_cast<nightglass::services::MediaCommand>(
+        reinterpret_cast<std::uintptr_t>(lv_event_get_user_data(event)));
+    nightglass::services::connectivity_service().send_media(command);
+}
+
 void Shell::navigate(nightglass::core::NavigationAction action) {
     const auto next = nightglass::core::reduce_navigation(navigation_, action);
     if (next == navigation_) return;
@@ -643,6 +753,15 @@ void Shell::render_route() {
             break;
         case nightglass::core::Route::watchface_settings:
             render_watchface_settings();
+            break;
+        case nightglass::core::Route::activity:
+            render_activity();
+            break;
+        case nightglass::core::Route::weather:
+            render_weather();
+            break;
+        case nightglass::core::Route::connectivity:
+            render_connectivity();
             break;
         case nightglass::core::Route::alarm:
             render_alarm();
@@ -770,6 +889,15 @@ void Shell::render_pack_home() {
             case nightglass::services::FaceField::timer:
                 home_timer_ = obj;
                 break;
+            case nightglass::services::FaceField::distance:
+                home_distance_ = obj;
+                break;
+            case nightglass::services::FaceField::weather:
+                home_weather_ = obj;
+                break;
+            case nightglass::services::FaceField::notifications:
+                home_notifications_ = obj;
+                break;
             case nightglass::services::FaceField::fixed_text:
                 break;
         }
@@ -789,9 +917,15 @@ void Shell::render_launcher() {
                 kSurface, kPrimary, stopwatch_callback, this);
     make_button(scroller, 0, 3 * gap, kSafeContentWidth - 16, row_height, "SETTINGS",
                 kSurface, kPrimary, settings_callback, this);
-    make_button(scroller, 0, 4 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
+    make_button(scroller, 0, 4 * gap, kSafeContentWidth - 16, row_height, "ACTIVITY",
+                kSurface, kPrimary, activity_callback, this);
+    make_button(scroller, 0, 5 * gap, kSafeContentWidth - 16, row_height, "WEATHER",
+                kSurface, kPrimary, weather_callback, this);
+    make_button(scroller, 0, 6 * gap, kSafeContentWidth - 16, row_height, "PHONE",
+                kSurface, kPrimary, connectivity_callback, this);
+    make_button(scroller, 0, 7 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
                 kSurface, kPrimary, diagnostics_callback, this);
-    make_button(scroller, 0, 5 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
+    make_button(scroller, 0, 8 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
                 kSurface, kPrimary, about_callback, this);
 }
 
@@ -804,9 +938,15 @@ void Shell::render_settings() {
                 kSurface, kPrimary, clock_settings_callback, this);
     make_button(scroller, 0, 180, kSafeContentWidth - 16, 76, "WATCH FACE",
                 kSurface, kPrimary, watchface_settings_callback, this);
+    make_button(scroller, 0, 270, kSafeContentWidth - 16, 76, "ACTIVITY",
+                kSurface, kPrimary, activity_callback, this);
+    make_button(scroller, 0, 360, kSafeContentWidth - 16, 76, "NETWORK & WEATHER",
+                kSurface, kPrimary, weather_callback, this);
+    make_button(scroller, 0, 450, kSafeContentWidth - 16, 76, "PHONE & MEDIA",
+                kSurface, kPrimary, connectivity_callback, this);
     auto *note = label(scroller, "All settings are stored on the watch.",
                        &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(note, 8, 280);
+    lv_obj_set_pos(note, 8, 540);
     lv_obj_set_width(note, kSafeContentWidth - 32);
     lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
 }
@@ -833,6 +973,95 @@ void Shell::render_watchface_settings() {
     lv_obj_set_width(note, kSafeContentWidth);
     lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
     refresh_watchface_settings();
+}
+
+void Shell::render_activity() {
+    add_header(content_host_, "ACTIVITY", back_callback, this);
+    auto *card = make_route_card(content_host_, 112, 140);
+    activity_steps_ = label(card, "-- STEPS", &lv_font_montserrat_26, kGreen);
+    lv_obj_set_pos(activity_steps_, 0, 4);
+    activity_detail_ = label(card, "Calibrating activity sensor", &lv_font_montserrat_16,
+                             kSecondary);
+    lv_obj_set_pos(activity_detail_, 0, 52);
+    lv_obj_set_width(activity_detail_, kSafeContentWidth - 32);
+    activity_stride_ = make_button(content_host_, kSafeInset, 270, kSafeContentWidth, 58, "",
+                                   kSurface, kPrimary, activity_stride_callback, this);
+    activity_goal_ = make_button(content_host_, kSafeInset, 340, kSafeContentWidth, 58, "",
+                                 kSurface, kPrimary, activity_goal_callback, this);
+    make_button(content_host_, kSafeInset, 410, kSafeContentWidth, 58, "RESET TODAY",
+                kSurface, kAmber, activity_reset_callback, this);
+    configure_refresh_timer(1000);
+    refresh_activity();
+}
+
+void Shell::render_weather() {
+    add_header(content_host_, "NETWORK & WEATHER", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    auto *card = lv_obj_create(scroller);
+    lv_obj_set_size(card, kSafeContentWidth - 16, 150);
+    lv_obj_set_pos(card, 0, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(chrome_palette().border), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    weather_state_ = label(card, "SERVICE STARTING", &lv_font_montserrat_20, kGreen);
+    lv_obj_set_pos(weather_state_, 0, 4);
+    weather_detail_ = label(card,
+                            "Wi-Fi, location, units, and refresh controls are loading.",
+                            &lv_font_montserrat_16, kSecondary);
+    lv_obj_set_pos(weather_detail_, 0, 48);
+    lv_obj_set_width(weather_detail_, kSafeContentWidth - 48);
+    lv_label_set_long_mode(weather_detail_, LV_LABEL_LONG_MODE_WRAP);
+    weather_toggle_ = make_button(scroller, 0, 164, kSafeContentWidth - 16, 58, "",
+                                  kSurface, kPrimary, weather_toggle_callback, this);
+    weather_units_ = make_button(scroller, 0, 234, kSafeContentWidth - 16, 58, "",
+                                 kSurface, kPrimary, weather_units_callback, this);
+    weather_refresh_ = make_button(scroller, 0, 304, kSafeContentWidth - 16, 58, "",
+                                   kSurface, kPrimary, weather_refresh_callback, this);
+    weather_latitude_ = make_button(scroller, 0, 374, kSafeContentWidth - 16, 58, "",
+                                    kSurface, kPrimary, weather_latitude_callback, this);
+    weather_longitude_ = make_button(scroller, 0, 444, kSafeContentWidth - 16, 58, "",
+                                     kSurface, kPrimary, weather_longitude_callback, this);
+    make_button(scroller, 0, 514, kSafeContentWidth - 16, 58, "CLEAR WI-FI",
+                kSurface, kAmber, weather_clear_wifi_callback, this);
+    auto *note = label(scroller,
+                       "Wi-Fi credentials are provisioned through the encrypted companion link. "
+                       "Location changes by 0.1 degree per tap.",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, 4, 584);
+    lv_obj_set_width(note, kSafeContentWidth - 28);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
+    configure_refresh_timer(1000);
+    refresh_weather();
+}
+
+void Shell::render_connectivity() {
+    add_header(content_host_, "PHONE & MEDIA", back_callback, this);
+    auto *card = make_route_card(content_host_, 112, 145);
+    connectivity_state_ = label(card, "BLUETOOTH", &lv_font_montserrat_20, kGreen);
+    lv_obj_set_pos(connectivity_state_, 0, 4);
+    connectivity_detail_ = label(card, "Starting companion service", &lv_font_montserrat_16,
+                                 kSecondary);
+    lv_obj_set_pos(connectivity_detail_, 0, 44);
+    lv_obj_set_width(connectivity_detail_, kSafeContentWidth - 32);
+    lv_label_set_long_mode(connectivity_detail_, LV_LABEL_LONG_MODE_WRAP);
+    connectivity_toggle_ = make_button(content_host_, kSafeInset, 274, kSafeContentWidth, 58,
+                                       "", kSurface, kPrimary,
+                                       connectivity_toggle_callback, this);
+    make_button(content_host_, kSafeInset, 346, 108, 58, "PREV", kSurface, kPrimary,
+                media_callback,
+                reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::previous)));
+    make_button(content_host_, 151, 346, 108, 58, "PLAY", kSurface, kPrimary,
+                media_callback,
+                reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::play_pause)));
+    make_button(content_host_, 274, 346, 108, 58, "NEXT", kSurface, kPrimary,
+                media_callback,
+                reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::next)));
+    configure_refresh_timer(1000);
+    refresh_connectivity();
 }
 
 void Shell::refresh_watchface_settings() {
@@ -1053,6 +1282,15 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::watchface_settings:
             refresh_watchface_settings();
             break;
+        case nightglass::core::Route::activity:
+            refresh_activity();
+            break;
+        case nightglass::core::Route::weather:
+            refresh_weather();
+            break;
+        case nightglass::core::Route::connectivity:
+            refresh_connectivity();
+            break;
         case nightglass::core::Route::alarm:
             refresh_alarm();
             break;
@@ -1068,6 +1306,85 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::about:
             break;
     }
+}
+
+void Shell::refresh_activity() {
+    if (!activity_steps_) return;
+    const auto snapshot = nightglass::services::activity_service().snapshot();
+    char text[96]{};
+    std::snprintf(text, sizeof(text), "%lu STEPS", static_cast<unsigned long>(snapshot.steps_today));
+    lv_label_set_text(activity_steps_, text);
+    std::snprintf(text, sizeof(text), "%lu m | %u%% goal | %s",
+                  static_cast<unsigned long>(snapshot.distance_m), snapshot.goal_percent,
+                  snapshot.readiness == nightglass::services::ActivityReadiness::ready
+                      ? "READY"
+                      : snapshot.readiness == nightglass::services::ActivityReadiness::warming_up
+                            ? "CALIBRATING"
+                            : "UNAVAILABLE");
+    lv_label_set_text(activity_detail_, text);
+    std::snprintf(text, sizeof(text), "STRIDE  %u.%02u m",
+                  snapshot.settings.stride_length_mm / 1000,
+                  (snapshot.settings.stride_length_mm % 1000) / 10);
+    set_button_text(activity_stride_, text);
+    std::snprintf(text, sizeof(text), "DAILY GOAL  %lu",
+                  static_cast<unsigned long>(snapshot.settings.daily_goal_steps));
+    set_button_text(activity_goal_, text);
+}
+
+void Shell::refresh_weather() {
+    if (!weather_state_) return;
+    const auto snapshot = nightglass::services::network_weather_service().snapshot();
+    char text[128]{};
+    if (snapshot.data_valid) {
+        std::snprintf(text, sizeof(text), "%.0f%s | CODE %u", snapshot.current.temperature,
+                      snapshot.settings.units == nightglass::services::WeatherUnits::metric
+                          ? " C" : " F", snapshot.current.weather_code);
+        set_state(weather_state_, text, snapshot.stale ? kAmber : kGreen);
+        std::snprintf(text, sizeof(text), "FEELS %.0f | WIND %.0f | AGE %lu min",
+                      snapshot.current.apparent_temperature, snapshot.current.wind_speed,
+                      static_cast<unsigned long>(snapshot.age_seconds / 60));
+    } else {
+        set_state(weather_state_, snapshot.connected ? "WEATHER UNAVAILABLE" : "OFFLINE", kAmber);
+        std::snprintf(text, sizeof(text), "%s | %s",
+                      snapshot.credentials_configured ? "Wi-Fi active this boot" : "Wi-Fi setup needed",
+                      snapshot.settings.location_configured ? "location set" : "location needed");
+    }
+    lv_label_set_text(weather_detail_, text);
+    std::snprintf(text, sizeof(text), "WEATHER  %s", snapshot.settings.enabled ? "ON" : "OFF");
+    set_button_text(weather_toggle_, text);
+    set_button_text(weather_units_, snapshot.settings.units == nightglass::services::WeatherUnits::metric
+                                        ? "UNITS  METRIC" : "UNITS  IMPERIAL");
+    std::snprintf(text, sizeof(text), "REFRESH  %u MIN", snapshot.settings.refresh_minutes);
+    set_button_text(weather_refresh_, text);
+    std::snprintf(text, sizeof(text), "LAT  %.1f", snapshot.settings.latitude_e6 / 1'000'000.0);
+    set_button_text(weather_latitude_, text);
+    std::snprintf(text, sizeof(text), "LON  %.1f", snapshot.settings.longitude_e6 / 1'000'000.0);
+    set_button_text(weather_longitude_, text);
+}
+
+void Shell::refresh_connectivity() {
+    if (!connectivity_state_) return;
+    const auto snapshot = nightglass::services::connectivity_service().snapshot();
+    const char *state = snapshot.state == nightglass::services::CompanionLinkState::connected_encrypted
+                            ? "PHONE CONNECTED"
+                            : snapshot.state == nightglass::services::CompanionLinkState::advertising
+                                  ? "PAIRING READY"
+                                  : snapshot.state == nightglass::services::CompanionLinkState::disabled
+                                        ? "BLUETOOTH OFF" : "LINK UNAVAILABLE";
+    set_state(connectivity_state_, state,
+              snapshot.state == nightglass::services::CompanionLinkState::connected_encrypted
+                  ? kGreen : kAmber);
+    char text[96]{};
+    if (snapshot.notification_count && snapshot.notifications[0].valid) {
+        std::snprintf(text, sizeof(text), "%s | %s", snapshot.notifications[0].app.data(),
+                      snapshot.notifications[0].title.data());
+    } else {
+        std::snprintf(text, sizeof(text), "%s | %u notifications", snapshot.detail.data(),
+                      snapshot.notification_count);
+    }
+    lv_label_set_text(connectivity_detail_, text);
+    set_button_text(connectivity_toggle_, snapshot.settings.enabled ? "BLUETOOTH  ON"
+                                                                    : "BLUETOOTH  OFF");
 }
 
 void Shell::refresh_home() {
@@ -1167,10 +1484,40 @@ void Shell::refresh_home() {
                                                                 : "Battery data unavailable");
     }
 
+    const auto activity = nightglass::services::activity_service().snapshot();
     if (home_steps_) {
-        // The current hardware service has no validated step counter. The bay
-        // remains honest until a tested accelerometer algorithm is available.
-        set_state(home_steps_, "N/A\nNO COUNT", pack.palette.secondary);
+        if (activity.readiness == nightglass::services::ActivityReadiness::ready) {
+            std::snprintf(buffer, sizeof(buffer), "%lu",
+                          static_cast<unsigned long>(activity.steps_today));
+            set_state(home_steps_, buffer, pack.palette.accent);
+        } else {
+            set_state(home_steps_, "CAL", kAmber);
+        }
+    }
+    if (home_distance_) {
+        if (activity.readiness == nightglass::services::ActivityReadiness::ready) {
+            std::snprintf(buffer, sizeof(buffer), "%.2f KM", activity.distance_m / 1000.0);
+            lv_label_set_text(home_distance_, buffer);
+        } else {
+            lv_label_set_text(home_distance_, "CALIBRATING");
+        }
+    }
+    const auto weather = nightglass::services::network_weather_service().snapshot();
+    if (home_weather_) {
+        if (weather.data_valid) {
+            std::snprintf(buffer, sizeof(buffer), "%.0f%s", weather.current.temperature,
+                          weather.settings.units == nightglass::services::WeatherUnits::metric
+                              ? "C" : "F");
+            set_state(home_weather_, buffer, weather.stale ? kAmber : pack.palette.accent);
+        } else {
+            set_state(home_weather_, "--", pack.palette.secondary);
+        }
+    }
+    const auto connectivity = nightglass::services::connectivity_service().snapshot();
+    if (home_notifications_) {
+        std::snprintf(buffer, sizeof(buffer), "%u NEW", connectivity.notification_count);
+        set_state(home_notifications_, buffer,
+                  connectivity.notification_count ? pack.palette.accent : pack.palette.secondary);
     }
 
     const auto &motion = snapshot.motion;
@@ -1478,6 +1825,23 @@ void Shell::clear_route_objects() {
     stopwatch_toggle_ = nullptr;
     home_alarm_ = nullptr;
     home_timer_ = nullptr;
+    home_distance_ = nullptr;
+    home_weather_ = nullptr;
+    home_notifications_ = nullptr;
+    activity_steps_ = nullptr;
+    activity_detail_ = nullptr;
+    activity_stride_ = nullptr;
+    activity_goal_ = nullptr;
+    weather_state_ = nullptr;
+    weather_detail_ = nullptr;
+    weather_toggle_ = nullptr;
+    weather_units_ = nullptr;
+    weather_refresh_ = nullptr;
+    weather_latitude_ = nullptr;
+    weather_longitude_ = nullptr;
+    connectivity_state_ = nullptr;
+    connectivity_detail_ = nullptr;
+    connectivity_toggle_ = nullptr;
 }
 
 Shell &shell() { return instance; }

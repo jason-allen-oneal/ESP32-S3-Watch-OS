@@ -18,7 +18,7 @@ enum class CompanionLinkState : std::uint8_t {
 };
 
 struct ConnectivitySettings {
-    bool enabled{true};
+    bool enabled{false};
     std::array<char, 25> device_name{"Nightglass"};
 };
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -15,6 +16,7 @@
 #include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "nightglass/services/network_weather.hpp"
 
 extern "C" void ble_store_config_init(void);
 
@@ -45,13 +47,18 @@ static const ble_uuid128_t kOutboundUuid = BLE_UUID128_INIT(
 ConnectivityService instance;
 portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 ConnectivitySnapshot current{};
-std::uint16_t connection_handle = kNoConnection;
+std::atomic<std::uint16_t> connection_handle{kNoConnection};
 std::uint16_t status_handle{};
 std::uint16_t outbound_handle{};
-bool outbound_subscribed{};
+std::atomic_bool outbound_subscribed{false};
 std::uint8_t own_address_type{};
-std::uint8_t outbound_sequence{};
+std::atomic<std::uint8_t> outbound_sequence{0};
 bool host_started{};
+
+void secure_wipe(void *memory, std::size_t length) {
+    auto *bytes = static_cast<volatile std::uint8_t *>(memory);
+    while (length--) *bytes++ = 0;
+}
 
 bool enabled() {
     portENTER_CRITICAL(&state_lock);
@@ -105,7 +112,25 @@ void remove_notification_locked(std::uint32_t id) {
         [](const auto &notification) { return notification.valid; }));
 }
 
-void apply_message(const CompanionMessage &message) {
+bool apply_message(const CompanionMessage &message) {
+    if (message.kind == CompanionMessageKind::wifi_provision) {
+        return network_weather_service().provision_credentials(
+            message.wifi.ssid.data(), message.wifi.ssid_length,
+            message.wifi.password.data(), message.wifi.password_length).is_ok();
+    }
+    if (message.kind == CompanionMessageKind::wifi_clear) {
+        return network_weather_service().clear_credentials().is_ok();
+    }
+    if (message.kind == CompanionMessageKind::weather_settings) {
+        NetworkWeatherSettings settings{};
+        settings.enabled = message.weather.enabled;
+        settings.location_configured = message.weather.location_configured;
+        settings.latitude_e6 = message.weather.latitude_e6;
+        settings.longitude_e6 = message.weather.longitude_e6;
+        settings.units = message.weather.metric ? WeatherUnits::metric : WeatherUnits::imperial;
+        settings.refresh_minutes = message.weather.refresh_minutes;
+        return network_weather_service().update_settings(settings).is_ok();
+    }
     portENTER_CRITICAL(&state_lock);
     if (message.kind == CompanionMessageKind::notification_clear) {
         current.notifications = {};
@@ -124,6 +149,7 @@ void apply_message(const CompanionMessage &message) {
     }
     ++current.sequence;
     portEXIT_CRITICAL(&state_lock);
+    return true;
 }
 
 int gatt_access(std::uint16_t, std::uint16_t attr_handle, ble_gatt_access_ctxt *context,
@@ -149,10 +175,13 @@ int gatt_access(std::uint16_t, std::uint16_t attr_handle, ble_gatt_access_ctxt *
     }
     CompanionMessage message{};
     if (!parse_companion_message(std::span(frame.data(), length), message)) {
+        secure_wipe(frame.data(), frame.size());
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
-    apply_message(message);
-    return 0;
+    const bool applied = apply_message(message);
+    secure_wipe(&message, sizeof(message));
+    secure_wipe(frame.data(), frame.size());
+    return applied ? 0 : BLE_ATT_ERR_UNLIKELY;
 }
 
 const ble_gatt_chr_def gatt_characteristics[]{
@@ -193,7 +222,7 @@ int gap_event(ble_gap_event *event, void *) {
                 advertise();
             }
             return 0;
-        case BLE_GAP_EVENT_DISCONNECT:
+        case BLE_GAP_EVENT_DISCONNECT: {
             connection_handle = kNoConnection;
             outbound_subscribed = false;
             portENTER_CRITICAL(&state_lock);
@@ -206,6 +235,7 @@ int gap_event(ble_gap_event *event, void *) {
             portEXIT_CRITICAL(&state_lock);
             if (should_advertise) advertise();
             return 0;
+        }
         case BLE_GAP_EVENT_ENC_CHANGE: {
             ble_gap_conn_desc descriptor{};
             if (ble_gap_conn_find(event->enc_change.conn_handle, &descriptor) == 0) {
@@ -282,11 +312,13 @@ void host_task(void *) {
 }
 
 bool notify_outbound(const std::uint8_t *data, std::size_t length) {
-    if (connection_handle == kNoConnection || !outbound_subscribed || !current.encrypted) {
+    const auto handle = connection_handle.load();
+    const auto state = instance.snapshot();
+    if (handle == kNoConnection || !outbound_subscribed.load() || !state.encrypted) {
         return false;
     }
     auto *buffer = ble_hs_mbuf_from_flat(data, static_cast<std::uint16_t>(length));
-    return buffer && ble_gatts_notify_custom(connection_handle, outbound_handle, buffer) == 0;
+    return buffer && ble_gatts_notify_custom(handle, outbound_handle, buffer) == 0;
 }
 
 }  // namespace
@@ -355,7 +387,8 @@ nightglass::core::Status ConnectivityService::update_settings(
     ble_svc_gap_device_name_set(settings.device_name.data());
     if (!settings.enabled) {
         if (ble_gap_adv_active()) ble_gap_adv_stop();
-        if (connection_handle != kNoConnection) ble_gap_terminate(connection_handle, BLE_ERR_REM_USER_CONN_TERM);
+        const auto handle = connection_handle.load();
+        if (handle != kNoConnection) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
         portENTER_CRITICAL(&state_lock);
         current.state = CompanionLinkState::disabled;
         set_detail_locked("Bluetooth disabled");
@@ -368,13 +401,14 @@ nightglass::core::Status ConnectivityService::update_settings(
 }
 
 bool ConnectivityService::send_media(MediaCommand command) {
-    const auto frame = encode_media_command(command, ++outbound_sequence);
+    const auto frame = encode_media_command(command, outbound_sequence.fetch_add(1) + 1);
     return notify_outbound(frame.data(), frame.size());
 }
 
 bool ConnectivityService::mark_notification(std::uint32_t id, bool dismiss) {
     if (id == 0) return false;
-    const auto frame = encode_notification_action(dismiss, id, ++outbound_sequence);
+    const auto frame = encode_notification_action(dismiss, id,
+                                                   outbound_sequence.fetch_add(1) + 1);
     if (!notify_outbound(frame.data(), frame.size())) return false;
     if (dismiss) {
         portENTER_CRITICAL(&state_lock);

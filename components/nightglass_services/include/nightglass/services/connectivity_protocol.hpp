@@ -29,12 +29,31 @@ struct CompanionNotification {
 
 enum class CompanionMessageKind : std::uint8_t {
     invalid = 0, notification_upsert, notification_remove, notification_clear,
+    wifi_provision, wifi_clear, weather_settings,
+};
+
+struct CompanionWifiProvisioning {
+    std::array<char, 33> ssid{};
+    std::array<char, 65> password{};
+    std::uint8_t ssid_length{0};
+    std::uint8_t password_length{0};
+};
+
+struct CompanionWeatherSettings {
+    bool enabled{false};
+    bool location_configured{false};
+    bool metric{false};
+    std::uint16_t refresh_minutes{30};
+    std::int32_t latitude_e6{0};
+    std::int32_t longitude_e6{0};
 };
 
 struct CompanionMessage {
     CompanionMessageKind kind{CompanionMessageKind::invalid};
     CompanionNotification notification{};
     std::uint32_t notification_id{0};
+    CompanionWifiProvisioning wifi{};
+    CompanionWeatherSettings weather{};
 };
 
 [[nodiscard]] bool parse_companion_message(std::span<const std::uint8_t> frame,

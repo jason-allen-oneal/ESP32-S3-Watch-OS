@@ -10,12 +10,19 @@ constexpr std::uint8_t kClear = 0x03;
 constexpr std::uint8_t kMedia = 0x10;
 constexpr std::uint8_t kDismiss = 0x11;
 constexpr std::uint8_t kRead = 0x12;
+constexpr std::uint8_t kWifiProvision = 0x20;
+constexpr std::uint8_t kWeatherSettings = 0x21;
+constexpr std::uint8_t kWifiClear = 0x22;
 
 std::uint32_t read_u32(const std::uint8_t *data) {
     return static_cast<std::uint32_t>(data[0]) |
            (static_cast<std::uint32_t>(data[1]) << 8U) |
            (static_cast<std::uint32_t>(data[2]) << 16U) |
            (static_cast<std::uint32_t>(data[3]) << 24U);
+}
+
+std::int32_t read_i32(const std::uint8_t *data) {
+    return static_cast<std::int32_t>(read_u32(data));
 }
 
 template <std::size_t N>
@@ -51,6 +58,39 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
         message.kind = CompanionMessageKind::notification_remove;
         message.notification_id = read_u32(frame.data() + 2);
         return message.notification_id != 0;
+    }
+    if (frame[1] == kWifiClear) {
+        if (frame.size() != 2) return false;
+        message.kind = CompanionMessageKind::wifi_clear;
+        return true;
+    }
+    if (frame[1] == kWifiProvision) {
+        if (frame.size() < 4) return false;
+        const auto ssid_length = frame[2];
+        const auto password_length = frame[3];
+        if (ssid_length == 0 || ssid_length > 32 || password_length > 64 ||
+            frame.size() != 4U + ssid_length + password_length) return false;
+        copy_ascii(message.wifi.ssid, frame.data() + 4, ssid_length);
+        copy_ascii(message.wifi.password, frame.data() + 4 + ssid_length, password_length);
+        message.wifi.ssid_length = ssid_length;
+        message.wifi.password_length = password_length;
+        message.kind = CompanionMessageKind::wifi_provision;
+        return true;
+    }
+    if (frame[1] == kWeatherSettings) {
+        if (frame.size() != 14) return false;
+        const std::uint8_t flags = frame[2];
+        if ((flags & ~std::uint8_t{0x03}) != 0 || frame[3] > 1) return false;
+        message.weather.enabled = (flags & 0x01) != 0;
+        message.weather.location_configured = (flags & 0x02) != 0;
+        message.weather.metric = frame[3] != 0;
+        message.weather.refresh_minutes = static_cast<std::uint16_t>(frame[4]) |
+                                          (static_cast<std::uint16_t>(frame[5]) << 8U);
+        message.weather.latitude_e6 = read_i32(frame.data() + 6);
+        message.weather.longitude_e6 = read_i32(frame.data() + 10);
+        message.kind = CompanionMessageKind::weather_settings;
+        return message.weather.refresh_minutes >= 15 &&
+               message.weather.refresh_minutes <= 360;
     }
     if (frame[1] != kUpsert || frame.size() < 11) return false;
     const auto app_length = static_cast<std::size_t>(frame[7]);

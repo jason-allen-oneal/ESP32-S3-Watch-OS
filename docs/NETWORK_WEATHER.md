@@ -13,15 +13,12 @@ must never echo the password in UI, logs, URLs, crash reports, or diagnostics,
 and must require an explicit save action. The service exposes only the boolean
 `credentials_configured`; stored credential text never enters its snapshot.
 
-Credentials are stored as one checksummed, versioned NVS blob and copied into
-ESP-IDF Wi-Fi RAM storage only while connecting. Clearing credentials erases
-the blob, replaces the Wi-Fi driver's RAM configuration with an empty station
-record, and stops the station. This protects against torn or malformed
-settings and accidental disclosure, but it is **not encryption at rest**.
-Production devices that need resistance to physical flash extraction must
-enable ESP-IDF NVS encryption and secure boot/flash encryption as a separate
-device-provisioning policy. Nightglass does not falsely claim those fuses are
-enabled.
+Credentials remain RAM-only and are copied into ESP-IDF Wi-Fi RAM storage only
+while connecting. They must be provisioned again after reboot. Clearing them
+wipes the service copy, replaces the Wi-Fi driver's RAM configuration with an
+empty station record, and stops the station. Nightglass deliberately refuses
+to persist Wi-Fi secrets until encrypted NVS and the corresponding device-key
+policy are enabled.
 
 Location uses signed WGS84 latitude/longitude in millionths of a degree. The UI
 should offer a human-friendly location picker or manual coordinate entry, show
