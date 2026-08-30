@@ -1,19 +1,20 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 
-#include "morrow/bsp/board.hpp"
-#include "morrow/core/health.hpp"
-#include "morrow/services/hardware.hpp"
-#include "morrow/ui/shell.hpp"
+#include "nightglass/bsp/board.hpp"
+#include "nightglass/core/health.hpp"
+#include "nightglass/services/hardware.hpp"
+#include "nightglass/services/power.hpp"
+#include "nightglass/ui/shell.hpp"
 
 namespace {
-constexpr char kTag[] = "morrow_boot";
+constexpr char kTag[] = "nightglass_boot";
 }
 
 extern "C" void app_main() {
-    ESP_LOGI(kTag, "MorrowOS Milestone 2 diagnostics boot");
+    ESP_LOGI(kTag, "Nightglass shell and power-policy boot");
 
-    auto &board = morrow::bsp::board();
+    auto &board = nightglass::bsp::board();
     const auto safe_output_status = board.prepare_safe_outputs();
     if (!safe_output_status.is_ok()) {
         ESP_LOGE(kTag, "Early output fail-safe failed: %s", safe_output_status.detail);
@@ -24,10 +25,10 @@ extern "C" void app_main() {
         // Settings, alarms, and pairing state will become authoritative here.
         // Never destroy them as an automatic recovery side effect.
         ESP_LOGE(kTag, "NVS initialization failed without erase: %s", esp_err_to_name(nvs_result));
-        morrow::core::health_registry().set("nvs", morrow::core::HealthState::failed,
+        nightglass::core::health_registry().set("nvs", nightglass::core::HealthState::failed,
                                            "NVS unavailable; retained without erase");
     } else {
-        morrow::core::health_registry().set("nvs", morrow::core::HealthState::ok,
+        nightglass::core::health_registry().set("nvs", nightglass::core::HealthState::ok,
                                            "NVS initialized");
     }
 
@@ -37,23 +38,28 @@ extern "C" void app_main() {
         return;
     }
 
-    const auto hardware_status = morrow::services::hardware_service().start(board.i2c_bus());
+    const auto hardware_status = nightglass::services::hardware_service().start(board.i2c_bus());
     if (!hardware_status.is_ok()) {
         ESP_LOGW(kTag, "Hardware services degraded: %s", hardware_status.detail);
+    }
+
+    const auto power_status = nightglass::services::power_service().start();
+    if (!power_status.is_ok()) {
+        ESP_LOGW(kTag, "Power service degraded: %s", power_status.detail);
     }
 
     if (!board.lock_display(0)) {
         ESP_LOGE(kTag, "Unable to lock LVGL display");
         return;
     }
-    const auto ui_status = morrow::ui::shell().start();
+    const auto ui_status = nightglass::ui::shell().start();
     board.unlock_display();
 
     if (!ui_status.is_ok()) {
         ESP_LOGE(kTag, "System shell startup failed: %s", ui_status.detail);
         return;
     }
-    morrow::core::health_registry().set("ui", morrow::core::HealthState::ok,
-                                       "Hardware diagnostics shell active");
-    ESP_LOGI(kTag, "Milestone 2 hardware diagnostics active");
+    nightglass::core::health_registry().set("ui", nightglass::core::HealthState::ok,
+                                       "Daily watch shell active");
+    ESP_LOGI(kTag, "Nightglass daily shell active");
 }

@@ -1,4 +1,4 @@
-# MorrowOS Roadmap
+# Nightglass Roadmap
 
 1. **Foundation** — native build, 32 MB partitions, health registry, event hub,
    service/app contracts, fallback shell, deterministic artifacts.
@@ -30,3 +30,16 @@ is electrically controllable but this unit has no responding actuator; ALDO3 is
 kept off and the capability is hardware-deferred. SD and audio are assigned to
 the dedicated audio/storage milestone rather than blocking the diagnostics
 core release.
+
+## Current shell and power slice
+
+The first daily shell provides a persistent root, bounded Home/Launcher/App
+navigation, a real RTC watch face, battery/charging and motion complications,
+an About view, and lifecycle-bound diagnostics. Every surface uses the rounded
+panel safe area and lists only working features.
+
+The power supervisor requests 30% active brightness, 8% after 15 seconds, and
+a zero-brightness screen blank after 30 seconds. Any touch resets inactivity;
+the first touch while blank is consumed as wake-only. GPIO10 side-key input is
+debounced and also wakes the screen. CPU light sleep, deep sleep, motion wake,
+RTC alarm wake, and rail gating remain disabled pending isolated HIL.

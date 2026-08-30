@@ -1,4 +1,4 @@
-# MorrowOS Architecture
+# Nightglass Architecture
 
 ## Dependency direction
 
@@ -40,7 +40,7 @@ state transitions, never high-rate samples or heap-owning callbacks.
 ## Milestone 2 hardware slice
 
 The current diagnostics release adopts the I2C bus created by the Waveshare
-BSP. One pinned hardware-service task is the only MorrowOS owner of RTC, PMIC,
+BSP. One pinned hardware-service task is the only Nightglass owner of RTC, PMIC,
 and IMU transactions. UI code receives trivially copyable snapshots guarded by
 a cross-core critical section and never performs I2C or GPIO work.
 
@@ -92,15 +92,24 @@ slot until the new firmware passes its health gate.
 ## Power model
 
 ```text
-BOOT -> ACTIVE -> DIM -> AMBIENT -> DISPLAY_OFF -> LIGHT_SLEEP
-                                      |             |
-                                      +-> DEEP_SLEEP (shipping/critical battery)
+BOOT -> ACTIVE -> DIM -> SCREEN_BLANK -> LIGHT_SLEEP
+                                             |
+                                             +-> DEEP_SLEEP (later shipping mode)
 ```
 
-Normal standby begins with light sleep because touch GPIO38 and RTC GPIO39 are
-not ESP32-S3 RTC IO. QMI8658 INT1 on GPIO21 can wake deep sleep after its live
-interrupt behavior is validated. Networking, audio, amplifier, SD, display,
-and sensor features are explicitly gated by the power service.
+The first power slice keeps the CPU and touch stack awake while stepping from
+30% brightness to 8%, then to a zero-brightness screen blank. This is not
+claimed as a true panel-off state: the vendor BSP sends DCS brightness command
+0x51 and reports only its cached request, not transport acknowledgement. Every
+brightness transition therefore requires physical HIL.
+
+The side power key is GPIO10 (`SYS_OUT`, active high); GPIO0 remains the boot
+strap. Touch IRQ GPIO38 and RTC IRQ GPIO39 are digital-only and can wake light
+sleep, while GPIO10 and QMI8658 INT1 GPIO21 are RTC IO candidates for later
+deep-sleep wake. Light sleep, motion wake, RTC alarm wake, panel DCS 0x28, and
+PMIC rail gating remain disabled until their isolated wake-loop and recovery
+tests pass. Networking, audio, amplifier, SD, display, and sensor features are
+eventually gated by the power service.
 
 ## Update and recovery
 

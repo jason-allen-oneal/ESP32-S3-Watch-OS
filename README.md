@@ -1,6 +1,6 @@
-# MorrowOS
+# Nightglass
 
-MorrowOS is a modular, offline-first watch firmware for the Waveshare
+Nightglass is a modular, offline-first watch firmware for the Waveshare
 ESP32-S3 Touch AMOLED 2.06 V1.0. It is a native ESP-IDF/LVGL product, not an
 Arduino demo sketch and not a dynamically loaded desktop-style operating
 system.
@@ -25,26 +25,18 @@ system.
 
 ## Layout
 
-- `components/morrow_core`: result types, health, events, and scheduling contracts
-- `components/morrow_bsp`: board adaptation and hardware probes
-- `components/morrow_services`: single-owner hardware tasks and immutable snapshots
-- `components/morrow_ui`: Obsidian design system and system shell
+- `components/nightglass_core`: result types, health, events, and scheduling contracts
+- `components/nightglass_bsp`: board adaptation and hardware probes
+- `components/nightglass_services`: single-owner hardware tasks and immutable snapshots
+- `components/nightglass_ui`: Obsidian design system and system shell
 - `main`: bounded bootstrap only
 - `docs`: architecture, UX, hardware support, release gates
 
 ## Safety boundary
 
 The known-good Arduino firmware and the full 32 MB recovery image remain
-outside this repository. MorrowOS must compile and pass partition and artifact
+outside this repository. Nightglass must compile and pass partition and artifact
 checks before any device write.
-
-Recovery image:
-
-`__RECOVERY_IMAGE_OUTSIDE_REPOSITORY__`
-
-Checksum manifest:
-
-`__RECOVERY_CHECKSUM_OUTSIDE_REPOSITORY__`
 
 ## Build and release gate
 

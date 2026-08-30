@@ -2,12 +2,9 @@
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-idf_dir="__LOCAL_ESP_IDF_PATH__"
+idf_dir="${NIGHTGLASS_IDF_PATH:-${IDF_PATH:-${HOME}/esp/esp-idf-v5.5.5}}"
 
-if [[ ! -f "${idf_dir}/export.sh" ]]; then
-  echo "Pinned ESP-IDF v5.5.5 is not installed at ${idf_dir}" >&2
-  exit 1
-fi
+"${project_dir}/scripts/verify-idf.sh" "${idf_dir}"
 
 # The pinned absolute path is checked above.
 # shellcheck disable=SC1091

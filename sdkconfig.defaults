@@ -1,4 +1,4 @@
-# MorrowOS production geometry: Waveshare 2.06 V1.0, ESP32-S3R8, 32 MB flash.
+# Nightglass production geometry: Waveshare 2.06 V1.0, ESP32-S3R8, 32 MB flash.
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
@@ -41,7 +41,7 @@ CONFIG_LV_FONT_MONTSERRAT_32=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
 CONFIG_LV_USE_FONT_COMPRESSED=y
 CONFIG_LV_TXT_BREAK_CHARS=" ,.;:-_"
-# MorrowOS ships its own shell; upstream demo/example translation units are
+# Nightglass ships its own shell; upstream demo/example translation units are
 # development baggage and must not enter production builds.
 # CONFIG_LV_BUILD_EXAMPLES is not set
 # CONFIG_LV_BUILD_DEMOS is not set

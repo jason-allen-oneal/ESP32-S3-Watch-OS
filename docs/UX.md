@@ -1,6 +1,6 @@
 # Obsidian Interface System
 
-Obsidian is MorrowOS's AMOLED-first interface: black fields, restrained spectral
+Obsidian is Nightglass's AMOLED-first interface: black fields, restrained spectral
 accents, high legibility, and no fabricated data. Cyber-goth atmosphere is a
 texture, not an excuse for radioactive clutter.
 
