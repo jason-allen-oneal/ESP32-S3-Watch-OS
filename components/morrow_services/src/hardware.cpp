@@ -17,6 +17,12 @@ constexpr char kTag[] = "morrow_hw";
 constexpr std::uint8_t kRtcAddress = 0x51;
 constexpr std::uint8_t kPmicAddress = 0x34;
 constexpr std::uint8_t kPmicChipId = 0x4A;
+constexpr std::uint8_t kPmicLdoOnOff0 = 0x90;
+constexpr std::uint8_t kPmicAldo3Voltage = 0x94;
+constexpr std::uint8_t kPmicAldo3EnableBit = 1U << 2U;
+constexpr std::uint16_t kHapticSupplyMv = 3000;
+constexpr std::uint8_t kHapticSupplyCode =
+    static_cast<std::uint8_t>((kHapticSupplyMv - 500U) / 100U);
 constexpr std::uint8_t kImuAddress = 0x6B;
 constexpr std::uint8_t kImuChipId = 0x05;
 constexpr gpio_num_t kHapticGpio = GPIO_NUM_18;
@@ -37,6 +43,8 @@ i2c_master_dev_handle_t rtc_device = nullptr;
 i2c_master_dev_handle_t pmic_device = nullptr;
 i2c_master_dev_handle_t imu_device = nullptr;
 bool imu_ready = false;
+bool haptic_output_ready = false;
+bool haptic_supply_cleanup_verified = true;
 esp_timer_handle_t haptic_timer = nullptr;
 
 std::uint8_t from_bcd(std::uint8_t value) {
@@ -191,8 +199,118 @@ void publish_haptic_failure() {
 }
 
 void haptic_timer_callback(void *) {
-    gpio_set_level(kHapticGpio, 0);
-    set_haptic_state(false, 0, false);
+    if (gpio_set_level(kHapticGpio, 0) == ESP_OK) {
+        set_haptic_state(false, 0, false);
+        ESP_LOGI(kTag, "Haptic cutoff: GPIO18 low");
+    } else {
+        publish_haptic_failure();
+        ESP_LOGE(kTag, "Haptic cutoff failed: GPIO18 state unknown");
+    }
+}
+
+void publish_haptic_supply(bool state_known, bool enabled, std::uint16_t voltage_mv) {
+    portENTER_CRITICAL(&snapshot_mux);
+    current.haptic.supply_state_known = state_known;
+    current.haptic.supply_enabled = enabled;
+    current.haptic.supply_voltage_mv = voltage_mv;
+    portEXIT_CRITICAL(&snapshot_mux);
+}
+
+bool disable_haptic_supply(std::uint8_t cached_enable, bool cached_valid) {
+    if (gpio_set_level(kHapticGpio, 0) != ESP_OK) {
+        ESP_LOGE(kTag, "GPIO18 low could not be confirmed during ALDO3 shutdown");
+    }
+    if (!pmic_device) {
+        publish_haptic_supply(false, false, 0);
+        ESP_LOGE(kTag, "Haptic ALDO3 shutdown unavailable: PMIC handle missing");
+        return false;
+    }
+
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        std::uint8_t enable = cached_enable;
+        if (!cached_valid &&
+            read_register(pmic_device, kPmicLdoOnOff0, &enable, 1) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        const auto disabled = static_cast<std::uint8_t>(enable & ~kPmicAldo3EnableBit);
+        std::uint8_t verified_enable = 0;
+        if (write_register(pmic_device, kPmicLdoOnOff0, disabled) == ESP_OK &&
+            read_register(pmic_device, kPmicLdoOnOff0, &verified_enable, 1) == ESP_OK &&
+            (verified_enable & kPmicAldo3EnableBit) == 0) {
+            publish_haptic_supply(true, false, 0);
+            return true;
+        }
+
+        cached_valid = false;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    publish_haptic_supply(false, false, 0);
+    ESP_LOGE(kTag, "Haptic ALDO3 shutdown could not be verified");
+    return false;
+}
+
+bool configure_haptic_supply() {
+    haptic_supply_cleanup_verified = true;
+    if (!pmic_device) {
+        haptic_supply_cleanup_verified = false;
+        publish_haptic_supply(false, false, 0);
+        return false;
+    }
+    if (gpio_set_level(kHapticGpio, 0) != ESP_OK) {
+        haptic_supply_cleanup_verified = disable_haptic_supply(0, false);
+        return false;
+    }
+
+    std::uint8_t enable = 0;
+    std::uint8_t voltage = 0;
+    if (read_register(pmic_device, kPmicLdoOnOff0, &enable, 1) != ESP_OK) {
+        haptic_supply_cleanup_verified = disable_haptic_supply(0, false);
+        return false;
+    }
+    if (read_register(pmic_device, kPmicAldo3Voltage, &voltage, 1) != ESP_OK) {
+        haptic_supply_cleanup_verified = disable_haptic_supply(enable, true);
+        return false;
+    }
+
+    const bool initially_enabled = (enable & kPmicAldo3EnableBit) != 0;
+    const auto initial_mv = static_cast<std::uint16_t>((voltage & 0x1FU) * 100U + 500U);
+    ESP_LOGI(kTag, "Haptic supply before ownership: ALDO3=%s %u mV",
+             initially_enabled ? "on" : "off", initial_mv);
+
+    const std::uint8_t requested_voltage =
+        static_cast<std::uint8_t>((voltage & 0xE0U) | kHapticSupplyCode);
+    const bool voltage_written =
+        write_register(pmic_device, kPmicAldo3Voltage, requested_voltage) == ESP_OK;
+    const bool enable_written =
+        voltage_written &&
+        write_register(pmic_device, kPmicLdoOnOff0,
+                       static_cast<std::uint8_t>(enable | kPmicAldo3EnableBit)) == ESP_OK;
+
+    std::uint8_t verified_enable = 0;
+    std::uint8_t verified_voltage = 0;
+    const bool enable_read =
+        enable_written &&
+        read_register(pmic_device, kPmicLdoOnOff0, &verified_enable, 1) == ESP_OK;
+    const bool voltage_read =
+        enable_read &&
+        read_register(pmic_device, kPmicAldo3Voltage, &verified_voltage, 1) == ESP_OK;
+    const bool verified =
+        voltage_read &&
+        (verified_enable & kPmicAldo3EnableBit) != 0 &&
+        (verified_voltage & 0x1FU) == kHapticSupplyCode;
+
+    if (!verified) {
+        haptic_supply_cleanup_verified =
+            disable_haptic_supply(verified_enable, enable_read);
+    }
+
+    if (verified) publish_haptic_supply(true, true, kHapticSupplyMv);
+    ESP_LOGI(kTag, "Haptic supply ownership: ALDO3=%s %u mV",
+             verified ? "on" : "failed", verified ? kHapticSupplyMv : 0);
+    return verified;
 }
 
 void probe_devices(i2c_master_bus_handle_t bus_handle) {
@@ -222,6 +340,19 @@ void probe_devices(i2c_master_bus_handle_t bus_handle) {
                                                         : morrow::core::HealthState::failed,
                                        pmic_identified ? "AXP2101 identified; first read pending"
                                                        : "AXP2101 identification failed");
+
+    const bool haptic_supply_ready = pmic_identified && configure_haptic_supply();
+    const bool haptic_ready = haptic_output_ready && haptic_supply_ready;
+    portENTER_CRITICAL(&snapshot_mux);
+    current.haptic.ready = haptic_ready;
+    ++current.sequence;
+    portEXIT_CRITICAL(&snapshot_mux);
+    morrow::core::health_registry().set(
+        "haptic", haptic_ready ? morrow::core::HealthState::degraded
+                                : morrow::core::HealthState::failed,
+        haptic_ready ? "GPIO18 and ALDO3 ready; actuator HIL pending"
+        : !haptic_supply_cleanup_verified ? "Haptic disabled; ALDO3 state unverified"
+                                          : "Haptic GPIO or ALDO3 initialization failed");
 
     bool imu_added = add_i2c_device(bus_handle, kImuAddress, &imu_device);
     std::uint8_t imu_id = 0;
@@ -266,6 +397,8 @@ void hardware_task(void *context) {
                                      static_cast<std::uint64_t>(command.duration_ms) * 1000U) == ESP_OK &&
                 gpio_set_level(kHapticGpio, 1) == ESP_OK) {
                 set_haptic_state(true, now, true);
+                ESP_LOGI(kTag, "Haptic active: GPIO18 high for %u ms, ALDO3=%u mV",
+                         command.duration_ms, kHapticSupplyMv);
             } else {
                 esp_timer_stop(haptic_timer);
                 gpio_set_level(kHapticGpio, 0);
@@ -299,8 +432,8 @@ morrow::core::Status HardwareService::start(i2c_master_bus_handle_t bus_handle) 
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    const bool haptic_ready = gpio_config(&haptic_config) == ESP_OK &&
-                              gpio_set_level(kHapticGpio, 0) == ESP_OK;
+    const bool haptic_gpio_ready = gpio_config(&haptic_config) == ESP_OK &&
+                                   gpio_set_level(kHapticGpio, 0) == ESP_OK;
     haptic_queue = xQueueCreate(1, sizeof(HapticCommand));
     const esp_timer_create_args_t timer_config{
         .callback = haptic_timer_callback,
@@ -311,13 +444,14 @@ morrow::core::Status HardwareService::start(i2c_master_bus_handle_t bus_handle) 
     };
     const bool timer_ready = esp_timer_create(&timer_config, &haptic_timer) == ESP_OK;
     portENTER_CRITICAL(&snapshot_mux);
-    current.haptic.ready = haptic_ready && haptic_queue && timer_ready;
+    haptic_output_ready = haptic_gpio_ready && haptic_queue && timer_ready;
+    current.haptic.ready = false;
     portEXIT_CRITICAL(&snapshot_mux);
-    morrow::core::health_registry().set("haptic", current.haptic.ready
-                                                       ? morrow::core::HealthState::degraded
-                                                       : morrow::core::HealthState::failed,
-                                       current.haptic.ready ? "Output ready; actuator unverified"
-                                                            : "Haptic output initialization failed");
+    morrow::core::health_registry().set(
+        "haptic", haptic_output_ready ? morrow::core::HealthState::degraded
+                                       : morrow::core::HealthState::failed,
+        haptic_output_ready ? "GPIO18 ready; ALDO3 probe pending"
+                            : "Haptic output initialization failed");
 
     if (xTaskCreatePinnedToCore(hardware_task, "hardware_service", 6144, bus_handle,
                                4, &service_task, 0) != pdPASS) {
@@ -325,7 +459,7 @@ morrow::core::Status HardwareService::start(i2c_master_bus_handle_t bus_handle) 
         gpio_set_level(kHapticGpio, 0);
         return {morrow::core::StatusCode::no_memory, "hardware task creation failed"};
     }
-    ESP_LOGI(kTag, "Hardware service task started: haptic=%d", current.haptic.ready);
+    ESP_LOGI(kTag, "Hardware service task started: haptic_output=%d", haptic_output_ready);
     return morrow::core::Status::Ok();
 }
 

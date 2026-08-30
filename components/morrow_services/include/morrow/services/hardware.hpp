@@ -48,7 +48,10 @@ struct MotionSnapshot {
 
 struct HapticSnapshot {
     bool ready{false};
+    bool supply_state_known{false};
+    bool supply_enabled{false};
     bool pulse_active{false};
+    std::uint16_t supply_voltage_mv{0};
     std::uint32_t accepted_pulses{0};
     std::uint32_t failed_pulses{0};
     std::int64_t last_pulse_us{0};

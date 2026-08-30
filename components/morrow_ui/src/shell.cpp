@@ -119,7 +119,7 @@ morrow::core::Status Shell::start() {
     lv_obj_add_event_cb(button, haptic_callback, LV_EVENT_CLICKED, this);
     haptic_primary_ = label(button, "TEST HAPTIC", &lv_font_montserrat_18, kVoid);
     lv_obj_set_pos(haptic_primary_, 12, 7);
-    auto *haptic_secondary = label(button, "SHORT PULSE · 120 MS", &lv_font_montserrat_14, kVoid);
+    auto *haptic_secondary = label(button, "DIAGNOSTIC PULSE · 200 MS", &lv_font_montserrat_14, kVoid);
     lv_obj_set_pos(haptic_secondary, 12, 32);
     haptic_result_ = label(screen, "Physical response unverified", &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(haptic_result_, 20, 481);
@@ -154,7 +154,7 @@ void Shell::timer_callback(lv_timer_t *timer) {
 void Shell::haptic_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     if (!self->haptic_button_ || lv_obj_has_state(self->haptic_button_, LV_STATE_DISABLED)) return;
-    if (morrow::services::hardware_service().request_haptic(120)) {
+    if (morrow::services::hardware_service().request_haptic(200)) {
         self->haptic_waiting_ = true;
         lv_obj_add_state(self->haptic_button_, LV_STATE_DISABLED);
         lv_label_set_text(self->haptic_primary_, "PULSE QUEUED");
