@@ -1,0 +1,11 @@
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+.cache/
+.firecrawl/
+*.bin
+*.elf
+*.map
+*.log
