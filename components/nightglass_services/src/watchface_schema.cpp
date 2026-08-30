@@ -12,8 +12,9 @@ constexpr std::uint16_t kKnownComplications =
     complication_timer | complication_distance | complication_weather |
     complication_notifications;
 constexpr std::uint8_t kMaxTextSlots = 24;
-constexpr std::uint8_t kMaxActionSlots = 4;
+constexpr std::uint8_t kMaxActionSlots = 12;
 constexpr std::uint8_t kMaxRouteBackgroundOpacity = 64;
+constexpr std::uint16_t kMinimumTouchSize = 48;
 
 bool valid_rect(const FaceRect &rect) {
     if (rect.x < 0 || rect.y < 0 || rect.width == 0 || rect.height == 0) return false;
@@ -98,11 +99,35 @@ bool valid_chrome(const FaceChrome &chrome) {
     }
     return false;
 }
+
+bool valid_action(FaceAction action) {
+    return action >= FaceAction::open_apps && action <= FaceAction::open_clock_settings;
+}
+
+bool overlaps(const FaceRect &left, const FaceRect &right) {
+    const auto left_right = static_cast<std::int32_t>(left.x) + left.width;
+    const auto right_right = static_cast<std::int32_t>(right.x) + right.width;
+    const auto left_bottom = static_cast<std::int32_t>(left.y) + left.height;
+    const auto right_bottom = static_cast<std::int32_t>(right.y) + right.height;
+    return left.x < right_right && right.x < left_right &&
+           left.y < right_bottom && right.y < left_bottom;
+}
+
+bool valid_action_slot(const FaceActionSlot &slot) {
+    return valid_action(slot.action) && valid_rect(slot.bounds) &&
+           slot.bounds.width >= kMinimumTouchSize &&
+           slot.bounds.height >= kMinimumTouchSize &&
+           slot.bounds.x >= kTextSafeInset && slot.bounds.y >= kTextSafeInset &&
+           static_cast<std::uint32_t>(slot.bounds.x) + slot.bounds.width <=
+               kCanvasWidth - kTextSafeInset &&
+           static_cast<std::uint32_t>(slot.bounds.y) + slot.bounds.height <=
+               kCanvasHeight - kTextSafeInset;
+}
 }  // namespace
 
 bool valid_face_pack(const FacePack &pack) {
     if (!pack.slug || !pack.slug[0] || !pack.name || !pack.name[0] ||
-        pack.format_version != 3 || (pack.complications & ~kKnownComplications) != 0 ||
+        pack.format_version != 4 || (pack.complications & ~kKnownComplications) != 0 ||
         !valid_chrome(pack.chrome)) {
         return false;
     }
@@ -124,9 +149,12 @@ bool valid_face_pack(const FacePack &pack) {
         if (!valid_text_slot(pack.text_slots[index], pack.complications)) return false;
     }
     for (std::uint8_t index = 0; index < pack.action_slot_count; ++index) {
-        if (!valid_rect(pack.action_slots[index].bounds) ||
-            pack.action_slots[index].action != FaceAction::open_apps) {
-            return false;
+        if (!valid_action_slot(pack.action_slots[index])) return false;
+        for (std::uint8_t other = 0; other < index; ++other) {
+            // Slots are evaluated in declaration order, but overlap is rejected
+            // so a pack can never hide a higher-priority action underneath one.
+            if (overlaps(pack.action_slots[index].bounds,
+                         pack.action_slots[other].bounds)) return false;
         }
     }
     return true;

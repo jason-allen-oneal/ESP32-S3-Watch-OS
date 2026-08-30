@@ -45,9 +45,10 @@ routes provide a 56 px touch Back control; Diagnostics uses
 a safe-area scroller and runs its 100 ms refresh timer only while visible. A
 separate system overlay layer is reserved for future modal UI.
 
-Quick Settings, notifications, glance tiles, edge gestures, and side-button
-navigation remain roadmap behavior until their services and input contracts
-exist. They are not represented by inactive or misleading controls.
+The notification center lists the bounded companion cache, distinguishes live
+and offline-cached state, and exposes firmware-owned mark-read and dismiss
+actions. Quick Settings, glance tiles, edge gestures, and side-button navigation
+remain roadmap behavior until their services and input contracts exist.
 
 ## Classic design tokens
 
@@ -79,12 +80,13 @@ assets, and chrome. They cannot contain executable code, callbacks, filesystem
 paths, arbitrary resources, scripts, or fonts. An invalid package or stored ID
 resolves to the built-in Classic face and cyan shell.
 
-Format 3 is implemented as a built-in manifest registry with persistent NVS
+Format 4 is implemented as a built-in manifest registry with persistent NVS
 selection. Nightglass Classic is the fallback. Revenant Grid v2 adds a
 black/gunmetal shell, acid-green accents and borders, themed pressed states,
 and its compiled background at low opacity behind all non-home routes and alert
 overlays. Semantic healthy, warning, and error colors remain green, amber, and
-red. External filesystem loading remains deferred until manifest validation
+red. Its non-overlapping safe-area touch map is declarative package data; the
+shell maps only allowlisted actions to system navigation. External filesystem loading remains deferred until manifest validation
 and decoded-asset limits are enforced.
 
 ## Release UX gates

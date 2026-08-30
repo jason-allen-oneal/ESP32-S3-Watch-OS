@@ -9,7 +9,7 @@ Nightglass Classic is pack ID `0` and the guaranteed fallback. Selection is
 persisted by ID in NVS. An unknown ID, invalid schema, unsupported version, or
 unknown resource resolves to Classic.
 
-## Format 3
+## Format 4
 
 Each built-in `FacePack` declares:
 
@@ -25,9 +25,12 @@ Each built-in `FacePack` declares:
 Text slots contain a field enum, safe-area rectangle, one of four compiled
 font styles, alignment, and palette role. Fixed captions may contain text;
 live fields may not. Every text rectangle must stay inside the 28-pixel safe
-inset on the 410x502 panel. Actions and assets are enums, not callbacks,
+inset on the 410x502 panel. Action rectangles also remain inside that inset,
+are at least 48x48 px, and may not overlap. Declaration order is deterministic,
+but overlap is rejected instead of allowing one action to obscure another.
+Actions and assets are enums, not callbacks,
 scripts, module names, URLs, or filesystem paths. The validator limits packs
-to 24 text slots and four action slots. Chrome metadata cannot name fonts,
+to 24 text slots and 12 action slots. Chrome metadata cannot name fonts,
 paths, arbitrary resources, scripts, or callbacks. Classic chrome accepts no
 route asset and zero opacity. Revenant chrome accepts only the compiled
 Revenant asset at a nonzero opacity no greater than 64/255.
@@ -57,7 +60,8 @@ empty instrument bays. Native LVGL overlays provide:
   heart-rate value);
 - large local time, RTC availability, day, and date;
 - actual alarm and countdown state;
-- a full-face, firmware-owned touch target that launches Apps.
+- pack-owned touch zones for diagnostics, activity, weather, notifications,
+  clock settings, alarm, timer, and Apps, aligned to the visible instrument bays.
 
 The same pack themes Launcher, Settings, Power, Clock & Region, Watch Face,
 Alarm, Timer, Stopwatch, Diagnostics, About, and system alert overlays. Those

@@ -63,7 +63,17 @@ enum class FaceTextAlign : std::uint8_t { left, center, right };
 
 enum class FaceColorRole : std::uint8_t { primary, secondary, accent, accent_dim };
 
-enum class FaceAction : std::uint8_t { open_apps };
+enum class FaceAction : std::uint8_t {
+    open_apps,
+    open_activity,
+    open_weather,
+    open_notifications,
+    open_connectivity,
+    open_alarm,
+    open_countdown,
+    open_diagnostics,
+    open_clock_settings,
+};
 
 struct FaceRect {
     std::int16_t x;

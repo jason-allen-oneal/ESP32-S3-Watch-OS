@@ -52,17 +52,24 @@ constexpr FaceTextSlot kRevenantTextSlots[]{
 };
 
 constexpr FaceActionSlot kRevenantActions[]{
-    {FaceAction::open_apps, {0, 0, 410, 502}},
+    {FaceAction::open_diagnostics, {130, 28, 150, 56}},
+    {FaceAction::open_activity, {28, 88, 130, 164}},
+    {FaceAction::open_weather, {282, 88, 100, 100}},
+    {FaceAction::open_notifications, {252, 190, 130, 64}},
+    {FaceAction::open_clock_settings, {28, 260, 354, 112}},
+    {FaceAction::open_alarm, {28, 388, 112, 74}},
+    {FaceAction::open_countdown, {270, 388, 112, 74}},
+    {FaceAction::open_apps, {155, 426, 100, 48}},
 };
 
 constexpr FacePack kPacks[]{
-    {0, "classic", "Nightglass Classic", 3, FaceLayout::classic,
+    {0, "classic", "Nightglass Classic", 4, FaceLayout::classic,
      complication_time | complication_date | complication_battery |
          complication_motion,
      {0x000000, 0x0B0D12, 0x272D3A, 0xF4F6FA, 0xA2ABBA, 0x63DDE4, 0x274C55},
      FaceAsset::none, {ChromeTheme::classic, FaceAsset::none, 0}, nullptr, 0,
      nullptr, 0},
-    {1, "revenant-grid-v2", "Revenant Grid v2", 3, FaceLayout::full_background,
+    {1, "revenant-grid-v2", "Revenant Grid v2", 4, FaceLayout::full_background,
      complication_time | complication_date | complication_battery |
          complication_motion | complication_steps | complication_alarm |
          complication_timer | complication_distance | complication_weather |

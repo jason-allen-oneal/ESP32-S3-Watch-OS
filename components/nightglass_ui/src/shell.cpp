@@ -694,6 +694,21 @@ void Shell::connectivity_callback(lv_event_t *event) {
         nightglass::core::NavigationAction::open_connectivity);
 }
 
+void Shell::notifications_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_notifications);
+}
+
+void Shell::notification_action_callback(lv_event_t *event) {
+    auto *context = static_cast<NotificationActionContext *>(lv_event_get_user_data(event));
+    if (!context || !context->shell || context->id == 0) return;
+    const bool sent = nightglass::services::connectivity_service().mark_notification(
+        context->id, context->dismiss);
+    if (!context->dismiss || !sent) {
+        set_button_text(lv_event_get_current_target_obj(event), sent ? "SENT" : "FAILED");
+    }
+}
+
 void Shell::connectivity_toggle_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto settings = nightglass::services::connectivity_service().snapshot().settings;
@@ -706,6 +721,31 @@ void Shell::media_callback(lv_event_t *event) {
     const auto command = static_cast<nightglass::services::MediaCommand>(
         reinterpret_cast<std::uintptr_t>(lv_event_get_user_data(event)));
     nightglass::services::connectivity_service().send_media(command);
+}
+
+void Shell::face_action_callback(lv_event_t *event) {
+    auto *target = lv_event_get_current_target_obj(event);
+    auto *self = static_cast<Shell *>(lv_obj_get_user_data(target));
+    if (!self) return;
+    const auto action = static_cast<nightglass::services::FaceAction>(
+        reinterpret_cast<std::uintptr_t>(lv_event_get_user_data(event)));
+    using nightglass::core::NavigationAction;
+    using nightglass::services::FaceAction;
+    switch (action) {
+        case FaceAction::open_apps: self->navigate(NavigationAction::open_launcher); break;
+        case FaceAction::open_activity: self->navigate(NavigationAction::open_activity); break;
+        case FaceAction::open_weather: self->navigate(NavigationAction::open_weather); break;
+        case FaceAction::open_notifications:
+            self->navigate(NavigationAction::open_notifications); break;
+        case FaceAction::open_connectivity:
+            self->navigate(NavigationAction::open_connectivity); break;
+        case FaceAction::open_alarm: self->navigate(NavigationAction::open_alarm); break;
+        case FaceAction::open_countdown: self->navigate(NavigationAction::open_countdown); break;
+        case FaceAction::open_diagnostics:
+            self->navigate(NavigationAction::open_diagnostics); break;
+        case FaceAction::open_clock_settings:
+            self->navigate(NavigationAction::open_clock_settings); break;
+    }
 }
 
 void Shell::navigate(nightglass::core::NavigationAction action) {
@@ -762,6 +802,9 @@ void Shell::render_route() {
             break;
         case nightglass::core::Route::connectivity:
             render_connectivity();
+            break;
+        case nightglass::core::Route::notifications:
+            render_notifications();
             break;
         case nightglass::core::Route::alarm:
             render_alarm();
@@ -842,12 +885,17 @@ void Shell::render_pack_home() {
         lv_obj_set_pos(zone, slot.bounds.x, slot.bounds.y);
         lv_obj_set_size(zone, slot.bounds.width, slot.bounds.height);
         lv_obj_set_style_bg_opa(zone, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_bg_opa(zone, LV_OPA_TRANSP, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(zone, lv_color_hex(pack.palette.accent), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(zone, LV_OPA_30, LV_STATE_PRESSED);
         lv_obj_set_style_border_width(zone, 0, 0);
+        lv_obj_set_style_border_color(zone, lv_color_hex(pack.palette.accent),
+                                      LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(zone, 1, LV_STATE_PRESSED);
         lv_obj_set_style_shadow_width(zone, 0, 0);
-        if (slot.action == nightglass::services::FaceAction::open_apps) {
-            lv_obj_add_event_cb(zone, launcher_callback, LV_EVENT_CLICKED, this);
-        }
+        lv_obj_set_user_data(zone, this);
+        lv_obj_add_event_cb(
+            zone, face_action_callback, LV_EVENT_CLICKED,
+            reinterpret_cast<void *>(static_cast<std::uintptr_t>(slot.action)));
     }
 
     for (std::uint8_t index = 0; index < pack.text_slot_count; ++index) {
@@ -923,9 +971,11 @@ void Shell::render_launcher() {
                 kSurface, kPrimary, weather_callback, this);
     make_button(scroller, 0, 6 * gap, kSafeContentWidth - 16, row_height, "PHONE",
                 kSurface, kPrimary, connectivity_callback, this);
-    make_button(scroller, 0, 7 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
+    make_button(scroller, 0, 7 * gap, kSafeContentWidth - 16, row_height, "NOTIFICATIONS",
+                kSurface, kPrimary, notifications_callback, this);
+    make_button(scroller, 0, 8 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
                 kSurface, kPrimary, diagnostics_callback, this);
-    make_button(scroller, 0, 8 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
+    make_button(scroller, 0, 9 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
                 kSurface, kPrimary, about_callback, this);
 }
 
@@ -1048,6 +1098,8 @@ void Shell::render_connectivity() {
     connectivity_toggle_ = make_button(content_host_, kSafeInset, 274, kSafeContentWidth, 58,
                                        "", kSurface, kPrimary,
                                        connectivity_toggle_callback, this);
+    make_button(content_host_, kSafeInset, 416, kSafeContentWidth, 52, "NOTIFICATIONS",
+                kSurface, kPrimary, notifications_callback, this);
     make_button(content_host_, kSafeInset, 346, 108, 58, "PREV", kSurface, kPrimary,
                 media_callback,
                 reinterpret_cast<void *>(static_cast<std::uintptr_t>(
@@ -1062,6 +1114,80 @@ void Shell::render_connectivity() {
                     nightglass::services::MediaCommand::next)));
     configure_refresh_timer(1000);
     refresh_connectivity();
+}
+
+void Shell::render_notifications() {
+    add_header(content_host_, "NOTIFICATIONS", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    const auto snapshot = nightglass::services::connectivity_service().snapshot();
+    notification_sequence_ = snapshot.sequence;
+    notification_action_count_ = 0;
+
+    auto *status = lv_obj_create(scroller);
+    lv_obj_set_size(status, kSafeContentWidth - 16, 76);
+    lv_obj_set_pos(status, 0, 0);
+    lv_obj_set_style_radius(status, 14, 0);
+    lv_obj_set_style_bg_color(status, lv_color_hex(chrome_palette().surface), 0);
+    lv_obj_set_style_border_color(status, lv_color_hex(chrome_palette().border), 0);
+    lv_obj_set_style_border_width(status, 1, 0);
+    lv_obj_remove_flag(status, LV_OBJ_FLAG_SCROLLABLE);
+    const bool connected = snapshot.state ==
+                           nightglass::services::CompanionLinkState::connected_encrypted;
+    notification_status_ = label(status,
+        connected ? "PHONE CONNECTED" :
+                    (snapshot.notification_count ? "OFFLINE - CACHED" : "PHONE DISCONNECTED"),
+        &lv_font_montserrat_16, connected ? kGreen : kAmber);
+    lv_obj_set_pos(notification_status_, 12, 8);
+    char count_text[32]{};
+    std::snprintf(count_text, sizeof(count_text), "%u NOTIFICATION%s",
+                  snapshot.notification_count,
+                  snapshot.notification_count == 1 ? "" : "S");
+    auto *count = label(status, count_text, &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(count, 12, 38);
+
+    int y = 90;
+    for (const auto &notification : snapshot.notifications) {
+        if (!notification.valid || notification_action_count_ + 2 > 12) continue;
+        auto *card = lv_obj_create(scroller);
+        lv_obj_set_size(card, kSafeContentWidth - 16, 174);
+        lv_obj_set_pos(card, 0, y);
+        lv_obj_set_style_radius(card, 14, 0);
+        lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(chrome_palette().border), 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        auto *app = label(card, notification.app.data(), &lv_font_montserrat_14, kGreen);
+        lv_obj_set_pos(app, 12, 8);
+        auto *title = label(card, notification.title.data(), &lv_font_montserrat_16, kPrimary);
+        lv_obj_set_pos(title, 12, 34);
+        lv_obj_set_width(title, kSafeContentWidth - 56);
+        lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
+        auto *body = label(card, notification.body.data(), &lv_font_montserrat_14, kSecondary);
+        lv_obj_set_pos(body, 12, 62);
+        lv_obj_set_width(body, kSafeContentWidth - 56);
+        lv_obj_set_height(body, 46);
+        lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_DOTS);
+
+        auto &read_context = notification_actions_[notification_action_count_++];
+        read_context = {this, notification.id, false};
+        make_button(card, 12, 118, 128, 44, "MARK READ", kSurface, kPrimary,
+                    notification_action_callback, &read_context);
+        auto &dismiss_context = notification_actions_[notification_action_count_++];
+        dismiss_context = {this, notification.id, true};
+        make_button(card, 158, 118, 152, 44, "DISMISS", kSurface, kAmber,
+                    notification_action_callback, &dismiss_context);
+        y += 186;
+    }
+    if (snapshot.notification_count == 0) {
+        auto *empty = label(scroller,
+                            connected ? "NO NEW NOTIFICATIONS" :
+                                        "Connect the companion to receive notifications.",
+                            &lv_font_montserrat_16, kSecondary);
+        lv_obj_set_pos(empty, 12, 116);
+        lv_obj_set_width(empty, kSafeContentWidth - 40);
+        lv_label_set_long_mode(empty, LV_LABEL_LONG_MODE_WRAP);
+    }
+    configure_refresh_timer(500);
 }
 
 void Shell::refresh_watchface_settings() {
@@ -1291,6 +1417,9 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::connectivity:
             refresh_connectivity();
             break;
+        case nightglass::core::Route::notifications:
+            refresh_notifications();
+            break;
         case nightglass::core::Route::alarm:
             refresh_alarm();
             break;
@@ -1306,6 +1435,11 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::about:
             break;
     }
+}
+
+void Shell::refresh_notifications() {
+    const auto snapshot = nightglass::services::connectivity_service().snapshot();
+    if (snapshot.sequence != notification_sequence_) render_route();
 }
 
 void Shell::refresh_activity() {
@@ -1849,6 +1983,8 @@ void Shell::clear_route_objects() {
     connectivity_state_ = nullptr;
     connectivity_detail_ = nullptr;
     connectivity_toggle_ = nullptr;
+    notification_status_ = nullptr;
+    notification_action_count_ = 0;
 }
 
 Shell &shell() { return instance; }

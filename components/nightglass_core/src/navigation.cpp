@@ -55,6 +55,10 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
             state.route = Route::connectivity;
             state.overlay = Overlay::none;
             break;
+        case NavigationAction::open_notifications:
+            state.route = Route::notifications;
+            state.overlay = Overlay::none;
+            break;
         case NavigationAction::open_alarm:
             state.route = Route::alarm;
             state.overlay = Overlay::none;
@@ -94,6 +98,12 @@ static_assert(reduce_impl({Route::launcher, Overlay::none}, NavigationAction::ba
               NavigationState{Route::home, Overlay::none});
 static_assert(reduce_impl({Route::about, Overlay::system_modal}, NavigationAction::back) ==
               NavigationState{Route::about, Overlay::none});
+static_assert(reduce_impl({Route::home, Overlay::none},
+                          NavigationAction::open_notifications) ==
+              NavigationState{Route::notifications, Overlay::none});
+static_assert(reduce_impl({Route::notifications, Overlay::none},
+                          NavigationAction::back) ==
+              NavigationState{Route::launcher, Overlay::none});
 }  // namespace
 
 NavigationState reduce_navigation(NavigationState state, NavigationAction action) noexcept {

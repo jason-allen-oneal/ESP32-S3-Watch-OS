@@ -12,13 +12,16 @@ constexpr FaceTextSlot kText[]{
     {FaceField::time, {40, 200, 330, 60}, FaceTextStyle::time_48,
      FaceTextAlign::center, FaceColorRole::accent, nullptr},
 };
-constexpr FaceActionSlot kActions[]{{FaceAction::open_apps, {0, 0, 410, 502}}};
+constexpr FaceActionSlot kActions[]{
+    {FaceAction::open_apps, {28, 400, 100, 74}},
+    {FaceAction::open_activity, {140, 400, 100, 74}},
+};
 
 FacePack full_pack() {
     return {1,
             "test",
             "Test",
-            3,
+            4,
             FaceLayout::full_background,
             complication_time,
             kPalette,
@@ -27,12 +30,12 @@ FacePack full_pack() {
             kText,
             2,
             kActions,
-            1};
+            2};
 }
 }  // namespace
 
 int main() {
-    const FacePack classic{0, "classic", "Classic", 3, FaceLayout::classic,
+    const FacePack classic{0, "classic", "Classic", 4, FaceLayout::classic,
                            complication_time, kPalette, FaceAsset::none,
                            {ChromeTheme::classic, FaceAsset::none, 0}, nullptr, 0,
                            nullptr, 0};
@@ -73,5 +76,37 @@ int main() {
          FaceTextAlign::left, FaceColorRole::primary, "not allowed"},
     };
     pack.text_slots = executable_like_text;
+    assert(!valid_face_pack(pack));
+
+    constexpr FaceActionSlot overlapping_actions[]{
+        {FaceAction::open_apps, {28, 400, 100, 74}},
+        {FaceAction::open_weather, {100, 400, 100, 74}},
+    };
+    pack = full_pack();
+    pack.action_slots = overlapping_actions;
+    assert(!valid_face_pack(pack));
+
+    constexpr FaceActionSlot unsafe_action[]{
+        {FaceAction::open_apps, {0, 0, 100, 100}},
+    };
+    pack = full_pack();
+    pack.action_slots = unsafe_action;
+    pack.action_slot_count = 1;
+    assert(!valid_face_pack(pack));
+
+    constexpr FaceActionSlot too_small_action[]{
+        {FaceAction::open_apps, {28, 400, 47, 74}},
+    };
+    pack = full_pack();
+    pack.action_slots = too_small_action;
+    pack.action_slot_count = 1;
+    assert(!valid_face_pack(pack));
+
+    constexpr FaceActionSlot invalid_action[]{
+        {static_cast<FaceAction>(99), {28, 400, 100, 74}},
+    };
+    pack = full_pack();
+    pack.action_slots = invalid_action;
+    pack.action_slot_count = 1;
     assert(!valid_face_pack(pack));
 }
