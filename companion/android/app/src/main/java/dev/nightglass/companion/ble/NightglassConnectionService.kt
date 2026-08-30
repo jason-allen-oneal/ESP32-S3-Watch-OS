@@ -38,6 +38,10 @@ class NightglassConnectionService : Service() {
     private val writes = ArrayDeque<ByteArray>()
     private var writePending = false
     private var linkReady = false
+    private val reconnectHandler = Handler(Looper.getMainLooper())
+    private var reconnectAttempt = 0
+    private var explicitDisconnect = false
+    private val reconnect = Runnable { if (!explicitDisconnect && gatt == null) scan() }
 
     private val bondReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -48,28 +52,53 @@ class NightglassConnectionService : Service() {
         }
     }
     override fun onCreate() { super.onCreate(); current = this; createChannel(); ContextCompat.registerReceiver(this, bondReceiver, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED), ContextCompat.RECEIVER_EXPORTED) }
-    override fun onDestroy() { current = null; unregisterReceiver(bondReceiver); stopScan(); closeGatt(); super.onDestroy() }
+    override fun onDestroy() {
+        explicitDisconnect = true
+        reconnectHandler.removeCallbacks(reconnect)
+        current = null
+        unregisterReceiver(bondReceiver)
+        stopScan()
+        closeGatt()
+        super.onDestroy()
+    }
     override fun onBind(intent: Intent?) = null
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(7, connectionNotification("Searching for Nightglass"))
         when (intent?.action) {
-            ACTION_DISCONNECT -> { stopScan(); closeGatt(); stopSelf() }
+            ACTION_DISCONNECT -> { explicitDisconnect = true; reconnectHandler.removeCallbacks(reconnect); stopScan(); closeGatt(); stopSelf() }
             ACTION_WRITE -> {
+                explicitDisconnect = false
                 intent.getByteArrayExtra(EXTRA_FRAME)?.let(::write)
                 if (gatt == null) scan()
             }
-            else -> scan()
+            else -> { explicitDisconnect = false; scan() }
         }
         return START_STICKY
     }
 
     private fun scan() {
-        if (!hasConnectPermissions() || !adapter.isEnabled || scanning) return
+        if (!hasConnectPermissions()) {
+            update("Bluetooth permission unavailable; retrying")
+            scheduleReconnect()
+            return
+        }
+        if (!adapter.isEnabled) {
+            update("Bluetooth is off; retrying")
+            scheduleReconnect()
+            return
+        }
+        if (scanning) return
         scanning = true
         // Some Samsung Bluetooth stacks fail to return custom 128-bit UUID advertisements
         // through a platform ScanFilter. Scan broadly, then strictly allowlist Nightglass.
         adapter.bluetoothLeScanner?.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCallback)
-        Handler(Looper.getMainLooper()).postDelayed({ if (scanning) { stopScan(); update("Nightglass not found") } }, 15_000)
+        reconnectHandler.postDelayed({
+            if (scanning) {
+                stopScan()
+                update("Nightglass not found; retrying")
+                scheduleReconnect()
+            }
+        }, 15_000)
     }
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(type: Int, result: ScanResult) {
@@ -79,7 +108,11 @@ class NightglassConnectionService : Service() {
             stopScan()
             connect(result.device)
         }
-        override fun onScanFailed(errorCode: Int) { scanning = false; update("Bluetooth scan unavailable ($errorCode)") }
+        override fun onScanFailed(errorCode: Int) {
+            scanning = false
+            update("Bluetooth scan unavailable ($errorCode); retrying")
+            scheduleReconnect()
+        }
     }
     private fun connect(device: BluetoothDevice) {
         closeGatt()
@@ -89,11 +122,17 @@ class NightglassConnectionService : Service() {
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(client: BluetoothGatt, status: Int, state: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS && state == BluetoothProfile.STATE_CONNECTED) {
+                reconnectHandler.removeCallbacks(reconnect)
                 linkReady = false
                 update("Connected; negotiating secure transport")
                 if (!client.requestMtu(247)) client.discoverServices()
             }
-            else { client.close(); if (gatt === client) gatt = null; update("Disconnected") }
+            else {
+                client.close()
+                if (gatt === client) gatt = null
+                update("Disconnected; reconnecting")
+                scheduleReconnect()
+            }
         }
         override fun onMtuChanged(client: BluetoothGatt, mtu: Int, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS && mtu >= 182) {
@@ -112,6 +151,7 @@ class NightglassConnectionService : Service() {
         override fun onDescriptorWrite(client: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (descriptor.uuid != NightglassProtocol.CCCD) return
             if (status != BluetoothGatt.GATT_SUCCESS) return update("Could not enable Nightglass notifications")
+            reconnectAttempt = 0
             synchronized(writes) { linkReady = true; writeNextLocked() }
             update("Nightglass connected")
         }
@@ -161,6 +201,13 @@ class NightglassConnectionService : Service() {
         if (started) writes.poll()
     }
     private fun stopScan() { if (scanning && hasConnectPermissions()) adapter.bluetoothLeScanner?.stopScan(scanCallback); scanning = false }
+    private fun scheduleReconnect() {
+        if (explicitDisconnect) return
+        reconnectHandler.removeCallbacks(reconnect)
+        val delay = minOf(60_000L, 1_000L shl minOf(reconnectAttempt, 5))
+        reconnectAttempt++
+        reconnectHandler.postDelayed(reconnect, delay)
+    }
     private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false; linkReady = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
     private fun hasConnectPermissions() = Build.VERSION.SDK_INT < 31 || (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED)
     private fun createChannel() { getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "Watch connection", NotificationManager.IMPORTANCE_LOW)) }

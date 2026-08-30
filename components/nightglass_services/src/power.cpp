@@ -20,7 +20,10 @@ namespace {
 constexpr char kTag[] = "nightglass_power";
 constexpr gpio_num_t kSideKeyGpio = GPIO_NUM_10;
 constexpr gpio_num_t kTouchInterruptGpio = GPIO_NUM_38;
-constexpr TickType_t kSupervisorPeriod = pdMS_TO_TICKS(20);
+// Human-scale screen policy does not need a 50 Hz polling loop. A 50 ms cadence
+// keeps the side key responsive while leaving longer idle windows for DFS and
+// automatic light sleep between BLE connection events.
+constexpr TickType_t kSupervisorPeriod = pdMS_TO_TICKS(50);
 constexpr std::uint8_t kDebounceSamples = 2;
 constexpr char kNvsNamespace[] = "ng_power";
 
@@ -140,8 +143,10 @@ void apply_state(nightglass::core::PowerState target, std::int64_t observed_acti
 }
 
 void enter_light_sleep(std::int64_t observed_activity_us) {
-    // Manual light sleep is not entered while the companion radio is active.
-    // The display still blanks; disabling Bluetooth restores full sleep.
+    // Manual long light sleep is not entered while the companion radio is
+    // active. ESP-IDF automatic light sleep and BLE modem sleep remain active
+    // between connection events, preserving notifications without pinning the
+    // CPU and controller fully awake.
     if (connectivity_service().snapshot().settings.enabled) return;
     if (gpio_get_level(kTouchInterruptGpio) == 0) {
         publish_activity(esp_timer_get_time(), nightglass::core::WakeReason::touch);

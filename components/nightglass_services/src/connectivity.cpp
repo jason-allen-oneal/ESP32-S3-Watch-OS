@@ -212,6 +212,25 @@ int gap_event(ble_gap_event *event, void *) {
         case BLE_GAP_EVENT_CONNECT:
             if (event->connect.status == 0) {
                 connection_handle = event->connect.conn_handle;
+                // Wearable-oriented parameters: 40-60 ms connection interval
+                // with peripheral latency 4 gives a bounded ~300 ms worst-case
+                // notification delay while allowing the controller to sleep
+                // between connection events. The central may negotiate nearby
+                // values; failure is non-fatal and leaves the link usable.
+                const ble_gap_upd_params power_params{
+                    .itvl_min = 32,
+                    .itvl_max = 48,
+                    .latency = 4,
+                    .supervision_timeout = 600,
+                    .min_ce_len = 0,
+                    .max_ce_len = 0,
+                };
+                const auto update_result =
+                    ble_gap_update_params(event->connect.conn_handle, &power_params);
+                if (update_result != 0) {
+                    ESP_LOGW(kTag, "BLE low-power connection update rejected: %d",
+                             update_result);
+                }
                 portENTER_CRITICAL(&state_lock);
                 current.state = CompanionLinkState::connected_unsecured;
                 current.encrypted = false;
@@ -255,6 +274,12 @@ int gap_event(ble_gap_event *event, void *) {
         case BLE_GAP_EVENT_SUBSCRIBE:
             if (event->subscribe.attr_handle == outbound_handle) {
                 outbound_subscribed = event->subscribe.cur_notify != 0;
+            }
+            return 0;
+        case BLE_GAP_EVENT_CONN_UPDATE:
+            if (event->conn_update.status != 0) {
+                ESP_LOGW(kTag, "BLE connection parameter update failed: %d",
+                         event->conn_update.status);
             }
             return 0;
         case BLE_GAP_EVENT_REPEAT_PAIRING: {
