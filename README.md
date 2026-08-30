@@ -44,3 +44,14 @@ Recovery image:
 Checksum manifest:
 
 `__RECOVERY_CHECKSUM_OUTSIDE_REPOSITORY__`
+
+## Build and release gate
+
+```bash
+./scripts/build.sh
+./scripts/verify-release.sh
+```
+
+The release gate requires a clean tree, performs a deterministic double build,
+validates the partition and ESP32-S3 image formats, enforces the OTA-slot size
+boundary, and prints the exact flash-artifact hashes.

@@ -9,6 +9,8 @@ if [[ ! -f "${idf_dir}/export.sh" ]]; then
   exit 1
 fi
 
+# The pinned absolute path is checked above.
+# shellcheck disable=SC1091
 source "${idf_dir}/export.sh" >/dev/null
 
 # set-target performs a full clean. Only use it to seed a fresh checkout;
