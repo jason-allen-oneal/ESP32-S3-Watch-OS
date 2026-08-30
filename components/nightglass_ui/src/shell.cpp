@@ -9,7 +9,7 @@
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/watchface.hpp"
-#include "nightglass/ui/assets/revenant_skull.hpp"
+#include "nightglass/ui/assets/revenant_grid_v2.hpp"
 
 namespace nightglass::ui {
 
@@ -176,6 +176,60 @@ lv_obj_t *make_diagnostic_card(lv_obj_t *parent, int height, const char *title,
     lv_obj_set_width(*detail, kSafeContentWidth - 44);
     lv_label_set_long_mode(*detail, LV_LABEL_LONG_MODE_WRAP);
     return obj;
+}
+
+const lv_font_t *face_font(nightglass::services::FaceTextStyle style) {
+    using nightglass::services::FaceTextStyle;
+    switch (style) {
+        case FaceTextStyle::caption_14:
+            return &lv_font_montserrat_14;
+        case FaceTextStyle::body_16:
+            return &lv_font_montserrat_16;
+        case FaceTextStyle::value_20:
+            return &lv_font_montserrat_20;
+        case FaceTextStyle::time_48:
+            return &lv_font_montserrat_48;
+    }
+    return &lv_font_montserrat_14;
+}
+
+std::uint32_t face_color(const nightglass::services::FacePalette &palette,
+                         nightglass::services::FaceColorRole role) {
+    using nightglass::services::FaceColorRole;
+    switch (role) {
+        case FaceColorRole::primary:
+            return palette.primary;
+        case FaceColorRole::secondary:
+            return palette.secondary;
+        case FaceColorRole::accent:
+            return palette.accent;
+        case FaceColorRole::accent_dim:
+            return palette.accent_dim;
+    }
+    return palette.primary;
+}
+
+lv_text_align_t face_align(nightglass::services::FaceTextAlign align) {
+    using nightglass::services::FaceTextAlign;
+    switch (align) {
+        case FaceTextAlign::left:
+            return LV_TEXT_ALIGN_LEFT;
+        case FaceTextAlign::center:
+            return LV_TEXT_ALIGN_CENTER;
+        case FaceTextAlign::right:
+            return LV_TEXT_ALIGN_RIGHT;
+    }
+    return LV_TEXT_ALIGN_LEFT;
+}
+
+const lv_image_dsc_t *face_asset(nightglass::services::FaceAsset asset) {
+    switch (asset) {
+        case nightglass::services::FaceAsset::revenant_grid_v2:
+            return &revenant_grid_v2_background;
+        case nightglass::services::FaceAsset::none:
+            return nullptr;
+    }
+    return nullptr;
 }
 }  // namespace
 
@@ -522,8 +576,8 @@ void Shell::render_route() {
 
 void Shell::render_home() {
     const auto &pack = nightglass::services::watchface_service().selected();
-    if (pack.layout == nightglass::services::FaceLayout::revenant_grid) {
-        render_revenant_home();
+    if (pack.layout == nightglass::services::FaceLayout::full_background) {
+        render_pack_home();
     } else {
         render_classic_home();
     }
@@ -563,103 +617,75 @@ void Shell::render_classic_home() {
 
 }
 
-void Shell::render_revenant_home() {
-    const auto &palette = nightglass::services::watchface_service().selected().palette;
+void Shell::render_pack_home() {
+    const auto &pack = nightglass::services::watchface_service().selected();
+    const auto *asset = face_asset(pack.background_asset);
+    if (!asset || !nightglass::services::valid_face_pack(pack)) {
+        render_classic_home();
+        return;
+    }
 
-    auto *frame = lv_obj_create(content_host_);
-    lv_obj_set_size(frame, kSafeContentWidth, kSafeBottom - kSafeInset);
-    lv_obj_set_pos(frame, kSafeInset, kSafeInset);
-    lv_obj_set_style_radius(frame, 18, 0);
-    lv_obj_set_style_bg_color(frame, lv_color_hex(palette.background), 0);
-    lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(frame, lv_color_hex(palette.border), 0);
-    lv_obj_set_style_border_width(frame, 2, 0);
-    lv_obj_set_style_pad_all(frame, 0, 0);
-    lv_obj_remove_flag(frame, LV_OBJ_FLAG_SCROLLABLE);
+    auto *background = lv_image_create(content_host_);
+    lv_image_set_src(background, asset);
+    lv_obj_set_pos(background, 0, 0);
 
-    auto *top = lv_obj_create(frame);
-    lv_obj_set_size(top, kSafeContentWidth - 8, 64);
-    lv_obj_set_pos(top, 2, 2);
-    lv_obj_set_style_radius(top, 14, 0);
-    lv_obj_set_style_bg_color(top, lv_color_hex(palette.surface), 0);
-    lv_obj_set_style_bg_opa(top, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(top, lv_color_hex(palette.accent_dim), 0);
-    lv_obj_set_style_border_width(top, 1, 0);
-    lv_obj_remove_flag(top, LV_OBJ_FLAG_SCROLLABLE);
+    for (std::uint8_t index = 0; index < pack.action_slot_count; ++index) {
+        const auto &slot = pack.action_slots[index];
+        auto *zone = lv_button_create(content_host_);
+        lv_obj_set_pos(zone, slot.bounds.x, slot.bounds.y);
+        lv_obj_set_size(zone, slot.bounds.width, slot.bounds.height);
+        lv_obj_set_style_bg_opa(zone, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_bg_opa(zone, LV_OPA_TRANSP, LV_STATE_PRESSED);
+        lv_obj_set_style_border_width(zone, 0, 0);
+        lv_obj_set_style_shadow_width(zone, 0, 0);
+        if (slot.action == nightglass::services::FaceAction::open_apps) {
+            lv_obj_add_event_cb(zone, launcher_callback, LV_EVENT_CLICKED, this);
+        }
+    }
 
-    home_date_ = label(top, "--- --", &lv_font_montserrat_16, palette.secondary);
-    lv_obj_set_pos(home_date_, 12, 17);
-    home_battery_ = label(top, "--%", &lv_font_montserrat_20, palette.accent);
-    lv_obj_set_pos(home_battery_, 236, 14);
-    lv_obj_set_width(home_battery_, 84);
-    lv_obj_set_style_text_align(home_battery_, LV_TEXT_ALIGN_RIGHT, 0);
-    home_battery_detail_ = label(top, "Battery data unavailable",
-                                 &lv_font_montserrat_14, palette.secondary);
-    lv_obj_set_pos(home_battery_detail_, 128, 42);
-    lv_obj_set_width(home_battery_detail_, 192);
-    lv_obj_set_style_text_align(home_battery_detail_, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_label_set_long_mode(home_battery_detail_, LV_LABEL_LONG_MODE_DOTS);
+    for (std::uint8_t index = 0; index < pack.text_slot_count; ++index) {
+        const auto &slot = pack.text_slots[index];
+        auto *obj = label(content_host_, slot.fixed_text ? slot.fixed_text : "--",
+                          face_font(slot.style), face_color(pack.palette, slot.color));
+        lv_obj_set_pos(obj, slot.bounds.x, slot.bounds.y);
+        lv_obj_set_size(obj, slot.bounds.width, slot.bounds.height);
+        lv_obj_set_style_text_align(obj, face_align(slot.align), 0);
 
-    auto *spine = lv_obj_create(frame);
-    lv_obj_set_size(spine, 270, 252);
-    lv_obj_set_pos(spine, 40, 76);
-    lv_obj_set_style_radius(spine, 28, 0);
-    lv_obj_set_style_bg_color(spine, lv_color_hex(palette.surface), 0);
-    lv_obj_set_style_bg_opa(spine, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(spine, lv_color_hex(palette.accent_dim), 0);
-    lv_obj_set_style_border_width(spine, 2, 0);
-    lv_obj_remove_flag(spine, LV_OBJ_FLAG_SCROLLABLE);
-
-    auto *sigil = label(spine, "REVENANT // GRID",
-                        &lv_font_montserrat_14, palette.accent);
-    lv_obj_set_width(sigil, 250);
-    lv_obj_set_pos(sigil, 8, 14);
-    lv_obj_set_style_text_align(sigil, LV_TEXT_ALIGN_CENTER, 0);
-
-    auto *skull = lv_image_create(spine);
-    lv_image_set_src(skull, &revenant_skull);
-    lv_obj_set_pos(skull, 77, 30);
-    lv_obj_set_style_opa(skull, LV_OPA_60, 0);
-
-    home_time_ = label(spine, "--\n--", &lv_font_montserrat_48, palette.primary);
-    lv_obj_set_size(home_time_, 250, 168);
-    lv_obj_set_pos(home_time_, 8, 47);
-    lv_obj_set_style_text_align(home_time_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_line_space(home_time_, -5, 0);
-
-    home_time_state_ = label(spine, "TIME UNAVAILABLE", &lv_font_montserrat_14,
-                             palette.secondary);
-    lv_obj_set_width(home_time_state_, 250);
-    lv_obj_set_pos(home_time_state_, 8, 222);
-    lv_obj_set_style_text_align(home_time_state_, LV_TEXT_ALIGN_CENTER, 0);
-
-    constexpr int cell_y = 342;
-    constexpr int cell_width = 104;
-    auto make_cell = [&](int x, const char *heading, lv_obj_t **value) {
-        auto *cell = lv_obj_create(frame);
-        lv_obj_set_size(cell, cell_width, 66);
-        lv_obj_set_pos(cell, x, cell_y);
-        lv_obj_set_style_radius(cell, 12, 0);
-        lv_obj_set_style_bg_color(cell, lv_color_hex(palette.surface), 0);
-        lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(cell, lv_color_hex(palette.border), 0);
-        lv_obj_set_style_border_width(cell, 1, 0);
-        lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
-        auto *title = label(cell, heading, &lv_font_montserrat_14, palette.secondary);
-        lv_obj_set_width(title, cell_width - 16);
-        lv_obj_set_pos(title, 6, 4);
-        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
-        *value = label(cell, "--", &lv_font_montserrat_16, palette.accent);
-        lv_obj_set_width(*value, cell_width - 16);
-        lv_obj_set_pos(*value, 6, 28);
-        lv_obj_set_style_text_align(*value, LV_TEXT_ALIGN_CENTER, 0);
-    };
-    make_cell(6, "ALARM", &home_alarm_);
-    make_cell(123, "MOTION", &home_motion_);
-    make_cell(240, "TIMER", &home_timer_);
-
-    make_button(content_host_, 148, 440, 114, 34, "APPS", palette.accent_dim,
-                palette.accent, launcher_callback, this);
+        switch (slot.field) {
+            case nightglass::services::FaceField::time:
+                home_time_ = obj;
+                break;
+            case nightglass::services::FaceField::time_state:
+                home_time_state_ = obj;
+                break;
+            case nightglass::services::FaceField::day:
+                home_day_ = obj;
+                break;
+            case nightglass::services::FaceField::date:
+                home_date_ = obj;
+                break;
+            case nightglass::services::FaceField::battery:
+                home_battery_ = obj;
+                break;
+            case nightglass::services::FaceField::battery_detail:
+                home_battery_detail_ = obj;
+                break;
+            case nightglass::services::FaceField::steps:
+                home_steps_ = obj;
+                break;
+            case nightglass::services::FaceField::motion:
+                home_motion_ = obj;
+                break;
+            case nightglass::services::FaceField::alarm:
+                home_alarm_ = obj;
+                break;
+            case nightglass::services::FaceField::timer:
+                home_timer_ = obj;
+                break;
+            case nightglass::services::FaceField::fixed_text:
+                break;
+        }
+    }
 }
 
 void Shell::render_launcher() {
@@ -959,29 +985,26 @@ void Shell::refresh_home() {
     const auto snapshot = nightglass::services::hardware_service().snapshot();
     const auto clock = nightglass::services::clock_service().snapshot();
     const auto now = esp_timer_get_time();
+    const auto &pack = nightglass::services::watchface_service().selected();
+    const bool full_background = pack.layout ==
+                                 nightglass::services::FaceLayout::full_background;
     char buffer[96]{};
 
     if (clock.time_valid) {
         const char *period = "";
-        const auto layout = nightglass::services::watchface_service().selected().layout;
-        if (layout == nightglass::services::FaceLayout::revenant_grid) {
-            const auto hour = clock.settings.use_24_hour
-                                  ? static_cast<unsigned>(clock.local_time.hour)
-                                  : static_cast<unsigned>(clock.local_time.hour % 12 == 0
-                                                              ? 12
-                                                              : clock.local_time.hour % 12);
-            period = clock.settings.use_24_hour ? "" : clock.local_time.hour < 12 ? "AM" : "PM";
-            std::snprintf(buffer, sizeof(buffer), "%02u\n%02u", hour,
-                          clock.local_time.minute);
-        } else {
-            format_time(buffer, sizeof(buffer), clock.local_time,
-                        clock.settings.use_24_hour, &period);
-        }
+        format_time(buffer, sizeof(buffer), clock.local_time,
+                    clock.settings.use_24_hour, &period);
         lv_label_set_text(home_time_, buffer);
-        if (layout == nightglass::services::FaceLayout::revenant_grid) {
-            static constexpr const char *days[]{"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+        if (full_background) {
+            static constexpr const char *days[]{"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY",
+                                                "THURSDAY", "FRIDAY", "SATURDAY"};
+            static constexpr const char *months[]{"", "JAN", "FEB", "MAR", "APR", "MAY",
+                                                  "JUN", "JUL", "AUG", "SEP", "OCT", "NOV",
+                                                  "DEC"};
             const auto day_index = static_cast<unsigned>(clock.local_time.weekday % 7);
-            std::snprintf(buffer, sizeof(buffer), "%s %02u", days[day_index],
+            lv_label_set_text(home_day_, days[day_index]);
+            const auto month_index = clock.local_time.month <= 12 ? clock.local_time.month : 0;
+            std::snprintf(buffer, sizeof(buffer), "%s %02u", months[month_index],
                           clock.local_time.day);
         } else {
             std::snprintf(buffer, sizeof(buffer), "%04ld-%02u-%02u",
@@ -992,75 +1015,126 @@ void Shell::refresh_home() {
         const int effective_offset = clock.settings.utc_offset_minutes +
                                      (clock.settings.daylight_saving ? 60 : 0);
         const int offset_abs = effective_offset < 0 ? -effective_offset : effective_offset;
-        std::snprintf(buffer, sizeof(buffer), "%s%sUTC%c%d:%02d · LIVE",
-                      period, period[0] ? " · " : "", effective_offset < 0 ? '-' : '+',
-                      offset_abs / 60, offset_abs % 60);
-        set_state(home_time_state_, buffer, kGreen);
+        if (full_background) {
+            std::snprintf(buffer, sizeof(buffer), "%s%sRTC LIVE",
+                          period, period[0] ? " · " : "");
+            set_state(home_time_state_, buffer, pack.palette.accent);
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "%s%sUTC%c%d:%02d · LIVE",
+                          period, period[0] ? " · " : "", effective_offset < 0 ? '-' : '+',
+                          offset_abs / 60, offset_abs % 60);
+            set_state(home_time_state_, buffer, kGreen);
+        }
     } else {
         lv_label_set_text(home_time_, "--:--");
-        lv_label_set_text(home_date_, "DATE UNAVAILABLE");
-        set_state(home_time_state_, "TIME UNAVAILABLE", kRed);
+        lv_label_set_text(home_date_, full_background ? "NO DATE" : "DATE UNAVAILABLE");
+        if (home_day_) lv_label_set_text(home_day_, "NO DAY");
+        set_state(home_time_state_, full_background ? "NO TIME" : "TIME UNAVAILABLE", kRed);
     }
 
     const auto &battery = snapshot.battery;
     const auto battery_age = now - battery.sampled_at_us;
     if (battery.pmic_present && battery.battery_present && battery.percent_valid &&
         battery_age <= 10'000'000) {
-        std::snprintf(buffer, sizeof(buffer), "%s%u%%", battery.charging ? "CHG " : "",
-                      battery.percent);
+        if (full_background) {
+            std::snprintf(buffer, sizeof(buffer), "%u%%", battery.percent);
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "%s%u%%", battery.charging ? "CHG " : "",
+                          battery.percent);
+        }
         lv_label_set_text(home_battery_, buffer);
         if (battery.voltage_valid) {
-            std::snprintf(buffer, sizeof(buffer), "%u.%02u V · %s",
-                          battery.voltage_mv / 1000, (battery.voltage_mv % 1000) / 10,
-                          battery.charging ? "Charging" : battery.discharging ? "Battery"
-                                                                             : "State partial");
+            if (full_background) {
+                std::snprintf(buffer, sizeof(buffer), "%u.%02uV · %s",
+                              battery.voltage_mv / 1000, (battery.voltage_mv % 1000) / 10,
+                              battery.charging ? "CHARGE" : battery.discharging ? "DRAIN"
+                                                                                 : "STATE ?");
+            } else {
+                std::snprintf(buffer, sizeof(buffer), "%u.%02u V · %s",
+                              battery.voltage_mv / 1000, (battery.voltage_mv % 1000) / 10,
+                              battery.charging ? "Charging" : battery.discharging ? "Battery"
+                                                                                 : "State partial");
+            }
             lv_label_set_text(home_battery_detail_, buffer);
         } else {
-            lv_label_set_text(home_battery_detail_, battery.charging ? "Charging · voltage unavailable"
-                                                                     : "Voltage unavailable");
+            lv_label_set_text(home_battery_detail_, full_background ? "VOLTAGE N/A"
+                                      : battery.charging ? "Charging · voltage unavailable"
+                                                         : "Voltage unavailable");
         }
         lv_obj_set_style_text_color(home_battery_,
                                     lv_color_hex(battery.percent <= 10 ? kRed
                                                  : battery.percent <= 20 ? kAmber
-                                                                         : kSecondary),
+                                                 : full_background ? pack.palette.accent
+                                                                   : kSecondary),
                                     0);
     } else if (battery.pmic_present && !battery.battery_present) {
-        set_state(home_battery_, "NO BATTERY", kAmber);
-        lv_label_set_text(home_battery_detail_, "Battery not detected");
+        set_state(home_battery_, full_background ? "N/A" : "NO BATTERY", kAmber);
+        lv_label_set_text(home_battery_detail_, full_background ? "NO BATTERY"
+                                                                : "Battery not detected");
     } else {
-        set_state(home_battery_, "BATTERY --", kRed);
-        lv_label_set_text(home_battery_detail_, "Battery data unavailable");
+        set_state(home_battery_, full_background ? "N/A" : "BATTERY --", kRed);
+        lv_label_set_text(home_battery_detail_, full_background ? "NO DATA"
+                                                                : "Battery data unavailable");
+    }
+
+    if (home_steps_) {
+        // The current hardware service has no validated step counter. The bay
+        // remains honest until a tested accelerometer algorithm is available.
+        set_state(home_steps_, "N/A\nNO COUNT", pack.palette.secondary);
     }
 
     const auto &motion = snapshot.motion;
     const auto motion_age = now - motion.sampled_at_us;
     if (motion.present && motion.valid && motion_age <= 2'000'000) {
         if (!motion.gyro_calibrated) {
-            set_state(home_motion_, "MOTION · CALIBRATING", kAmber);
+            if (full_background) {
+                const unsigned progress = motion.gyro_calibration_required == 0
+                                              ? 0
+                                              : 100U * motion.gyro_calibration_samples /
+                                                    motion.gyro_calibration_required;
+                std::snprintf(buffer, sizeof(buffer), "CAL\n%u%%", progress);
+                set_state(home_motion_, buffer, kAmber);
+            } else {
+                set_state(home_motion_, "MOTION · CALIBRATING", kAmber);
+            }
         } else {
-            const bool revenant = nightglass::services::watchface_service().selected().layout ==
-                                  nightglass::services::FaceLayout::revenant_grid;
-            set_state(home_motion_, revenant ? (motion.moving ? "MOVE" : "STILL")
-                                             : (motion.moving ? "MOTION · MOVING" : "MOTION · STILL"),
-                      motion_age > 500'000 ? kAmber : motion.moving ? kCyan : kPrimary);
+            const auto color = motion_age > 500'000
+                                   ? kAmber
+                                   : full_background
+                                         ? (motion.moving ? pack.palette.accent
+                                                          : pack.palette.primary)
+                                         : (motion.moving ? kCyan : kPrimary);
+            set_state(home_motion_, full_background ? (motion.moving ? "MOVE" : "STILL")
+                                                    : (motion.moving ? "MOTION · MOVING"
+                                                                     : "MOTION · STILL"),
+                      color);
         }
     } else {
-        set_state(home_motion_, "MOTION · UNAVAILABLE", kRed);
+        set_state(home_motion_, full_background ? "N/A\nNO DATA" : "MOTION · UNAVAILABLE", kRed);
     }
 
     if (home_alarm_) {
         const auto &alarm = clock.alarm;
         if (alarm.enabled) {
-            std::snprintf(buffer, sizeof(buffer), "%02u:%02u", alarm.hour, alarm.minute);
+            std::snprintf(buffer, sizeof(buffer), full_background ? "%02u:%02u\nON" : "%02u:%02u",
+                          alarm.hour, alarm.minute);
         } else {
             std::snprintf(buffer, sizeof(buffer), "OFF");
         }
         lv_label_set_text(home_alarm_, buffer);
     }
     if (home_timer_) {
-        if (clock.timer_running) {
-            const auto minutes = (clock.timer_remaining_seconds + 59) / 60;
-            std::snprintf(buffer, sizeof(buffer), "%uM", static_cast<unsigned>(minutes));
+        if (clock.timer_ringing) {
+            std::snprintf(buffer, sizeof(buffer), "DONE");
+        } else if (clock.timer_running) {
+            if (full_background) {
+                std::snprintf(buffer, sizeof(buffer), "%02u:%02u",
+                              static_cast<unsigned>(clock.timer_remaining_seconds / 60),
+                              static_cast<unsigned>(clock.timer_remaining_seconds % 60));
+            } else {
+                const auto minutes = (clock.timer_remaining_seconds + 59) / 60;
+                std::snprintf(buffer, sizeof(buffer), "%uM", static_cast<unsigned>(minutes));
+            }
         } else {
             std::snprintf(buffer, sizeof(buffer), "IDLE");
         }
@@ -1270,10 +1344,12 @@ void Shell::refresh_diagnostics() {
 void Shell::clear_route_objects() {
     home_time_ = nullptr;
     home_time_state_ = nullptr;
+    home_day_ = nullptr;
     home_date_ = nullptr;
     home_battery_ = nullptr;
     home_battery_detail_ = nullptr;
     home_motion_ = nullptr;
+    home_steps_ = nullptr;
     diagnostics_rtc_state_ = nullptr;
     diagnostics_rtc_detail_ = nullptr;
     diagnostics_battery_state_ = nullptr;

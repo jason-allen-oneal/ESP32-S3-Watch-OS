@@ -9,15 +9,67 @@ namespace nightglass::services {
 
 enum class FaceLayout : std::uint8_t {
     classic,
-    revenant_grid,
+    full_background,
 };
 
 enum FaceComplication : std::uint16_t {
-    complication_date = 1U << 0,
-    complication_battery = 1U << 1,
-    complication_motion = 1U << 2,
-    complication_alarm = 1U << 3,
-    complication_timer = 1U << 4,
+    complication_time = 1U << 0,
+    complication_date = 1U << 1,
+    complication_battery = 1U << 2,
+    complication_motion = 1U << 3,
+    complication_steps = 1U << 4,
+    complication_alarm = 1U << 5,
+    complication_timer = 1U << 6,
+};
+
+enum class FaceAsset : std::uint8_t { none, revenant_grid_v2 };
+
+enum class FaceField : std::uint8_t {
+    fixed_text,
+    time,
+    time_state,
+    day,
+    date,
+    battery,
+    battery_detail,
+    steps,
+    motion,
+    alarm,
+    timer,
+};
+
+enum class FaceTextStyle : std::uint8_t {
+    caption_14,
+    body_16,
+    value_20,
+    time_48,
+};
+
+enum class FaceTextAlign : std::uint8_t { left, center, right };
+
+enum class FaceColorRole : std::uint8_t { primary, secondary, accent, accent_dim };
+
+enum class FaceAction : std::uint8_t { open_apps };
+
+struct FaceRect {
+    std::int16_t x;
+    std::int16_t y;
+    std::uint16_t width;
+    std::uint16_t height;
+};
+
+struct FaceTextSlot {
+    FaceField field;
+    FaceRect bounds;
+    FaceTextStyle style;
+    FaceTextAlign align;
+    FaceColorRole color;
+    const char *fixed_text;
+};
+
+struct FaceActionSlot {
+    FaceAction action;
+    FaceRect bounds;
 };
 
 struct FacePalette {
@@ -40,7 +92,16 @@ struct FacePack {
     FaceLayout layout;
     std::uint16_t complications;
     FacePalette palette;
+    FaceAsset background_asset;
+    const FaceTextSlot *text_slots;
+    std::uint8_t text_slot_count;
+    const FaceActionSlot *action_slots;
+    std::uint8_t action_slot_count;
 };
+
+// Enforces a bounded firmware schema. Resources are stable enum IDs, never
+// executable callbacks or filesystem paths.
+[[nodiscard]] bool valid_face_pack(const FacePack &pack);
 
 class WatchFaceService {
 public:

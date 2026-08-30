@@ -56,7 +56,7 @@ private:
     void render_clock_settings();
     void render_watchface_settings();
     void render_classic_home();
-    void render_revenant_home();
+    void render_pack_home();
     void render_alarm();
     void render_countdown();
     void render_stopwatch();
@@ -110,10 +110,12 @@ private:
     // Home route widgets.
     lv_obj_t *home_time_{nullptr};
     lv_obj_t *home_time_state_{nullptr};
+    lv_obj_t *home_day_{nullptr};
     lv_obj_t *home_date_{nullptr};
     lv_obj_t *home_battery_{nullptr};
     lv_obj_t *home_battery_detail_{nullptr};
     lv_obj_t *home_motion_{nullptr};
+    lv_obj_t *home_steps_{nullptr};
     lv_obj_t *home_alarm_{nullptr};
     lv_obj_t *home_timer_{nullptr};
 
