@@ -37,6 +37,30 @@ audio, SD, and nonessential apps disabled.
 Sensor and audio streams use ring buffers. The event hub carries fixed-size
 state transitions, never high-rate samples or heap-owning callbacks.
 
+## Milestone 2 hardware slice
+
+The current diagnostics release adopts the I2C bus created by the Waveshare
+BSP. One pinned hardware-service task is the only MorrowOS owner of RTC, PMIC,
+and IMU transactions. UI code receives trivially copyable snapshots guarded by
+a cross-core critical section and never performs I2C or GPIO work.
+
+- PCF85063 time is sampled once per second and validated before display.
+- AXP2101 status, battery voltage, and fuel-gauge percentage are sampled every
+  two seconds. Charge current, voltage targets, rails, and shutdown policy are
+  untouched; the only PMIC write enables its battery-voltage ADC channel with a
+  read-modify-write.
+- QMI8658 is reset into known state, identified, configured for 8 g at
+  31.25 Hz and 512 dps at 28.025 Hz, and sampled at 25 Hz. Motion is explicitly a heuristic,
+  not step count or orientation.
+- GPIO18 starts low. Haptic requests are bounded to 20–250 ms, rate-limited,
+  queue depth one, and cut off by an independent one-shot timer. UI acceptance
+  remains distinct from physical actuator confirmation.
+
+All I2C operations have a 20 ms deadline. A missing optional peripheral degrades
+its card but does not block display startup. The diagnostics view recomputes
+sample age independently of service updates so a stalled producer becomes
+visibly stale instead of freezing as apparently live data.
+
 ## Application contract
 
 Compiled applications register a descriptor containing stable ID, title, icon,

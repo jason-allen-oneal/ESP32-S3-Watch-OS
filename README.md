@@ -25,8 +25,9 @@ system.
 
 ## Layout
 
-- `components/morrow_core`: result types, health, events, scheduling, services
+- `components/morrow_core`: result types, health, events, and scheduling contracts
 - `components/morrow_bsp`: board adaptation and hardware probes
+- `components/morrow_services`: single-owner hardware tasks and immutable snapshots
 - `components/morrow_ui`: Obsidian design system and system shell
 - `main`: bounded bootstrap only
 - `docs`: architecture, UX, hardware support, release gates

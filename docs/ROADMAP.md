@@ -21,3 +21,9 @@
 Every milestone produces a tagged known-good artifact. A feature is incomplete
 until degraded hardware, restart persistence, sleep/resume, and rollback paths
 have been exercised.
+
+## Current board-diagnostics slice
+
+RTC, AXP2101 battery telemetry, QMI8658 motion telemetry, and bounded haptic
+testing are implemented behind the shared hardware service. SD and audio remain
+deliberately outside this release and keep milestone 2 open.
