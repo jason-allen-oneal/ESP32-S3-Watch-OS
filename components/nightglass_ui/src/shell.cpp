@@ -5,8 +5,11 @@
 
 #include "esp_timer.h"
 #include "lvgl.h"
+#include "nightglass/services/clock.hpp"
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/power.hpp"
+#include "nightglass/services/watchface.hpp"
+#include "nightglass/ui/assets/revenant_skull.hpp"
 
 namespace nightglass::ui {
 
@@ -107,6 +110,51 @@ lv_obj_t *make_route_card(lv_obj_t *parent, int y, int height) {
     return obj;
 }
 
+lv_obj_t *make_scroller(lv_obj_t *parent) {
+    auto *scroller = lv_obj_create(parent);
+    lv_obj_set_size(scroller, kSafeContentWidth, kSafeBottom - 100);
+    lv_obj_set_pos(scroller, kSafeInset, 96);
+    lv_obj_set_style_bg_opa(scroller, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(scroller, 0, 0);
+    lv_obj_set_style_pad_all(scroller, 4, 0);
+    lv_obj_set_scroll_dir(scroller, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(scroller, LV_SCROLLBAR_MODE_ACTIVE);
+    return scroller;
+}
+
+void format_time(char *buffer, std::size_t size,
+                 const nightglass::services::CivilTime &time, bool use_24_hour,
+                 const char **period) {
+    if (use_24_hour) {
+        std::snprintf(buffer, size, "%02u:%02u", time.hour, time.minute);
+        *period = "";
+        return;
+    }
+    const auto hour = static_cast<unsigned>(time.hour % 12 == 0 ? 12 : time.hour % 12);
+    std::snprintf(buffer, size, "%u:%02u", hour, time.minute);
+    *period = time.hour < 12 ? "AM" : "PM";
+}
+
+void format_duration(char *buffer, std::size_t size, std::uint64_t total_ms,
+                     bool tenths) {
+    const auto total_seconds = total_ms / 1000;
+    const auto hours = total_seconds / 3600;
+    const auto minutes = (total_seconds % 3600) / 60;
+    const auto seconds = total_seconds % 60;
+    if (tenths) {
+        std::snprintf(buffer, size, "%02llu:%02llu:%02llu.%llu",
+                      static_cast<unsigned long long>(hours),
+                      static_cast<unsigned long long>(minutes),
+                      static_cast<unsigned long long>(seconds),
+                      static_cast<unsigned long long>((total_ms / 100) % 10));
+    } else {
+        std::snprintf(buffer, size, "%02llu:%02llu:%02llu",
+                      static_cast<unsigned long long>(hours),
+                      static_cast<unsigned long long>(minutes),
+                      static_cast<unsigned long long>(seconds));
+    }
+}
+
 lv_obj_t *make_diagnostic_card(lv_obj_t *parent, int height, const char *title,
                                lv_obj_t **state, lv_obj_t **detail) {
     auto *obj = lv_obj_create(parent);
@@ -164,11 +212,16 @@ nightglass::core::Status Shell::start() {
         }
     }
     lv_screen_load(screen_);
+    system_timer_ = lv_timer_create(system_timer_callback, 250, this);
     return nightglass::core::Status::Ok();
 }
 
 void Shell::stop() {
     configure_refresh_timer(0);
+    if (system_timer_) {
+        lv_timer_delete(system_timer_);
+        system_timer_ = nullptr;
+    }
     if (touch_input_) {
         lv_indev_remove_event_cb_with_user_data(touch_input_, input_callback, this);
         touch_input_ = nullptr;
@@ -179,12 +232,18 @@ void Shell::stop() {
     screen_ = nullptr;
     content_host_ = nullptr;
     overlay_layer_ = nullptr;
+    alert_card_ = nullptr;
+    displayed_alert_kind_ = 0;
     clear_route_objects();
     navigation_ = {};
 }
 
 void Shell::timer_callback(lv_timer_t *timer) {
     static_cast<Shell *>(lv_timer_get_user_data(timer))->refresh_active_route();
+}
+
+void Shell::system_timer_callback(lv_timer_t *timer) {
+    static_cast<Shell *>(lv_timer_get_user_data(timer))->refresh_system_overlay();
 }
 
 void Shell::input_callback(lv_event_t *event) {
@@ -214,6 +273,51 @@ void Shell::launcher_callback(lv_event_t *event) {
 void Shell::settings_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
         nightglass::core::NavigationAction::open_settings);
+}
+
+void Shell::power_settings_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_power_settings);
+}
+
+void Shell::clock_settings_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_clock_settings);
+}
+
+void Shell::watchface_settings_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_watchface_settings);
+}
+
+void Shell::watchface_next_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto &service = nightglass::services::watchface_service();
+    const auto &selected = service.selected();
+    const auto *packs = service.packs();
+    const auto count = service.pack_count();
+    for (std::size_t index = 0; index < count; ++index) {
+        if (packs[index].id == selected.id) {
+            service.select(packs[(index + 1) % count].id);
+            break;
+        }
+    }
+    self->refresh_watchface_settings();
+}
+
+void Shell::alarm_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_alarm);
+}
+
+void Shell::countdown_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_countdown);
+}
+
+void Shell::stopwatch_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_stopwatch);
 }
 
 void Shell::active_brightness_callback(lv_event_t *event) {
@@ -269,6 +373,94 @@ void Shell::sleep_after_callback(lv_event_t *event) {
     self->refresh_settings_labels();
 }
 
+void Shell::time_format_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::clock_service().snapshot().settings;
+    settings.use_24_hour = !settings.use_24_hour;
+    nightglass::services::clock_service().update_clock_settings(settings);
+    self->refresh_clock_settings();
+}
+
+void Shell::utc_offset_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::clock_service().snapshot().settings;
+    settings.utc_offset_minutes = static_cast<std::int16_t>(settings.utc_offset_minutes + 30);
+    if (settings.utc_offset_minutes > 14 * 60) settings.utc_offset_minutes = -12 * 60;
+    nightglass::services::clock_service().update_clock_settings(settings);
+    self->refresh_clock_settings();
+}
+
+void Shell::dst_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::clock_service().snapshot().settings;
+    settings.daylight_saving = !settings.daylight_saving;
+    nightglass::services::clock_service().update_clock_settings(settings);
+    self->refresh_clock_settings();
+}
+
+void Shell::alarm_hour_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto alarm = nightglass::services::clock_service().snapshot().alarm;
+    alarm.hour = static_cast<std::uint8_t>((alarm.hour + 1) % 24);
+    nightglass::services::clock_service().update_alarm(alarm);
+    self->refresh_alarm();
+}
+
+void Shell::alarm_minute_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto alarm = nightglass::services::clock_service().snapshot().alarm;
+    alarm.minute = static_cast<std::uint8_t>((alarm.minute + 5) % 60);
+    nightglass::services::clock_service().update_alarm(alarm);
+    self->refresh_alarm();
+}
+
+void Shell::alarm_enabled_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto alarm = nightglass::services::clock_service().snapshot().alarm;
+    alarm.enabled = !alarm.enabled;
+    nightglass::services::clock_service().update_alarm(alarm);
+    self->refresh_alarm();
+}
+
+void Shell::countdown_duration_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    const auto snapshot = nightglass::services::clock_service().snapshot();
+    constexpr std::uint32_t values[]{60, 300, 600, 900, 1800, 3600};
+    nightglass::services::clock_service().set_timer_duration(
+        next_value(snapshot.timer_configured_seconds, values));
+    self->refresh_countdown();
+}
+
+void Shell::countdown_toggle_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::clock_service().toggle_timer();
+    self->refresh_countdown();
+}
+
+void Shell::countdown_reset_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::clock_service().reset_timer();
+    self->refresh_countdown();
+}
+
+void Shell::stopwatch_toggle_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::clock_service().toggle_stopwatch();
+    self->refresh_stopwatch();
+}
+
+void Shell::stopwatch_reset_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::clock_service().reset_stopwatch();
+    self->refresh_stopwatch();
+}
+
+void Shell::dismiss_alert_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::clock_service().dismiss_alerts();
+    self->refresh_system_overlay();
+}
+
 void Shell::diagnostics_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
         nightglass::core::NavigationAction::open_diagnostics);
@@ -301,6 +493,24 @@ void Shell::render_route() {
         case nightglass::core::Route::settings:
             render_settings();
             break;
+        case nightglass::core::Route::power_settings:
+            render_power_settings();
+            break;
+        case nightglass::core::Route::clock_settings:
+            render_clock_settings();
+            break;
+        case nightglass::core::Route::watchface_settings:
+            render_watchface_settings();
+            break;
+        case nightglass::core::Route::alarm:
+            render_alarm();
+            break;
+        case nightglass::core::Route::countdown:
+            render_countdown();
+            break;
+        case nightglass::core::Route::stopwatch:
+            render_stopwatch();
+            break;
         case nightglass::core::Route::diagnostics:
             render_diagnostics();
             break;
@@ -311,6 +521,17 @@ void Shell::render_route() {
 }
 
 void Shell::render_home() {
+    const auto &pack = nightglass::services::watchface_service().selected();
+    if (pack.layout == nightglass::services::FaceLayout::revenant_grid) {
+        render_revenant_home();
+    } else {
+        render_classic_home();
+    }
+    configure_refresh_timer(1000);
+    refresh_home();
+}
+
+void Shell::render_classic_home() {
     auto *brand = label(content_host_, "NIGHTGLASS", &lv_font_montserrat_16, kCyan);
     lv_obj_set_pos(brand, kSafeInset, 36);
 
@@ -340,37 +561,175 @@ void Shell::render_home() {
     make_button(content_host_, kSafeInset, 390, kSafeContentWidth, 70, "APPS", kCyan, kVoid,
                 launcher_callback, this);
 
-    configure_refresh_timer(1000);
-    refresh_home();
+}
+
+void Shell::render_revenant_home() {
+    const auto &palette = nightglass::services::watchface_service().selected().palette;
+
+    auto *frame = lv_obj_create(content_host_);
+    lv_obj_set_size(frame, kSafeContentWidth, kSafeBottom - kSafeInset);
+    lv_obj_set_pos(frame, kSafeInset, kSafeInset);
+    lv_obj_set_style_radius(frame, 18, 0);
+    lv_obj_set_style_bg_color(frame, lv_color_hex(palette.background), 0);
+    lv_obj_set_style_bg_opa(frame, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(frame, lv_color_hex(palette.border), 0);
+    lv_obj_set_style_border_width(frame, 2, 0);
+    lv_obj_set_style_pad_all(frame, 0, 0);
+    lv_obj_remove_flag(frame, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto *top = lv_obj_create(frame);
+    lv_obj_set_size(top, kSafeContentWidth - 8, 64);
+    lv_obj_set_pos(top, 2, 2);
+    lv_obj_set_style_radius(top, 14, 0);
+    lv_obj_set_style_bg_color(top, lv_color_hex(palette.surface), 0);
+    lv_obj_set_style_bg_opa(top, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(top, lv_color_hex(palette.accent_dim), 0);
+    lv_obj_set_style_border_width(top, 1, 0);
+    lv_obj_remove_flag(top, LV_OBJ_FLAG_SCROLLABLE);
+
+    home_date_ = label(top, "--- --", &lv_font_montserrat_16, palette.secondary);
+    lv_obj_set_pos(home_date_, 12, 17);
+    home_battery_ = label(top, "--%", &lv_font_montserrat_20, palette.accent);
+    lv_obj_set_pos(home_battery_, 236, 14);
+    lv_obj_set_width(home_battery_, 84);
+    lv_obj_set_style_text_align(home_battery_, LV_TEXT_ALIGN_RIGHT, 0);
+    home_battery_detail_ = label(top, "Battery data unavailable",
+                                 &lv_font_montserrat_14, palette.secondary);
+    lv_obj_set_pos(home_battery_detail_, 128, 42);
+    lv_obj_set_width(home_battery_detail_, 192);
+    lv_obj_set_style_text_align(home_battery_detail_, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(home_battery_detail_, LV_LABEL_LONG_MODE_DOTS);
+
+    auto *spine = lv_obj_create(frame);
+    lv_obj_set_size(spine, 270, 252);
+    lv_obj_set_pos(spine, 40, 76);
+    lv_obj_set_style_radius(spine, 28, 0);
+    lv_obj_set_style_bg_color(spine, lv_color_hex(palette.surface), 0);
+    lv_obj_set_style_bg_opa(spine, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(spine, lv_color_hex(palette.accent_dim), 0);
+    lv_obj_set_style_border_width(spine, 2, 0);
+    lv_obj_remove_flag(spine, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto *sigil = label(spine, "REVENANT // GRID",
+                        &lv_font_montserrat_14, palette.accent);
+    lv_obj_set_width(sigil, 250);
+    lv_obj_set_pos(sigil, 8, 14);
+    lv_obj_set_style_text_align(sigil, LV_TEXT_ALIGN_CENTER, 0);
+
+    auto *skull = lv_image_create(spine);
+    lv_image_set_src(skull, &revenant_skull);
+    lv_obj_set_pos(skull, 77, 30);
+    lv_obj_set_style_opa(skull, LV_OPA_60, 0);
+
+    home_time_ = label(spine, "--\n--", &lv_font_montserrat_48, palette.primary);
+    lv_obj_set_size(home_time_, 250, 168);
+    lv_obj_set_pos(home_time_, 8, 47);
+    lv_obj_set_style_text_align(home_time_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_line_space(home_time_, -5, 0);
+
+    home_time_state_ = label(spine, "TIME UNAVAILABLE", &lv_font_montserrat_14,
+                             palette.secondary);
+    lv_obj_set_width(home_time_state_, 250);
+    lv_obj_set_pos(home_time_state_, 8, 222);
+    lv_obj_set_style_text_align(home_time_state_, LV_TEXT_ALIGN_CENTER, 0);
+
+    constexpr int cell_y = 342;
+    constexpr int cell_width = 104;
+    auto make_cell = [&](int x, const char *heading, lv_obj_t **value) {
+        auto *cell = lv_obj_create(frame);
+        lv_obj_set_size(cell, cell_width, 66);
+        lv_obj_set_pos(cell, x, cell_y);
+        lv_obj_set_style_radius(cell, 12, 0);
+        lv_obj_set_style_bg_color(cell, lv_color_hex(palette.surface), 0);
+        lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(cell, lv_color_hex(palette.border), 0);
+        lv_obj_set_style_border_width(cell, 1, 0);
+        lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+        auto *title = label(cell, heading, &lv_font_montserrat_14, palette.secondary);
+        lv_obj_set_width(title, cell_width - 16);
+        lv_obj_set_pos(title, 6, 4);
+        lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+        *value = label(cell, "--", &lv_font_montserrat_16, palette.accent);
+        lv_obj_set_width(*value, cell_width - 16);
+        lv_obj_set_pos(*value, 6, 28);
+        lv_obj_set_style_text_align(*value, LV_TEXT_ALIGN_CENTER, 0);
+    };
+    make_cell(6, "ALARM", &home_alarm_);
+    make_cell(123, "MOTION", &home_motion_);
+    make_cell(240, "TIMER", &home_timer_);
+
+    make_button(content_host_, 148, 440, 114, 34, "APPS", palette.accent_dim,
+                palette.accent, launcher_callback, this);
 }
 
 void Shell::render_launcher() {
     add_header(content_host_, "APPS", back_callback, this);
-
-    make_button(content_host_, kSafeInset, 112, kSafeContentWidth, 76, "SETTINGS",
+    auto *scroller = make_scroller(content_host_);
+    constexpr int row_height = 64;
+    constexpr int gap = 74;
+    make_button(scroller, 0, 0 * gap, kSafeContentWidth - 16, row_height, "ALARM",
+                kSurface, kPrimary, alarm_callback, this);
+    make_button(scroller, 0, 1 * gap, kSafeContentWidth - 16, row_height, "TIMER",
+                kSurface, kPrimary, countdown_callback, this);
+    make_button(scroller, 0, 2 * gap, kSafeContentWidth - 16, row_height, "STOPWATCH",
+                kSurface, kPrimary, stopwatch_callback, this);
+    make_button(scroller, 0, 3 * gap, kSafeContentWidth - 16, row_height, "SETTINGS",
                 kSurface, kPrimary, settings_callback, this);
-    make_button(content_host_, kSafeInset, 210, kSafeContentWidth, 76, "DIAGNOSTICS",
+    make_button(scroller, 0, 4 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
                 kSurface, kPrimary, diagnostics_callback, this);
-    make_button(content_host_, kSafeInset, 308, kSafeContentWidth, 76, "ABOUT", kSurface,
-                kPrimary, about_callback, this);
-
-    auto *note = label(content_host_, "Only installed features are listed.",
-                       &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(note, kSafeInset, 424);
-    lv_obj_set_width(note, kSafeContentWidth);
-    lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
+    make_button(scroller, 0, 5 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
+                kSurface, kPrimary, about_callback, this);
 }
 
 void Shell::render_settings() {
     add_header(content_host_, "SETTINGS", back_callback, this);
-    auto *scroller = lv_obj_create(content_host_);
-    lv_obj_set_size(scroller, kSafeContentWidth, kSafeBottom - 100);
-    lv_obj_set_pos(scroller, kSafeInset, 96);
-    lv_obj_set_style_bg_opa(scroller, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(scroller, 0, 0);
-    lv_obj_set_style_pad_all(scroller, 4, 0);
-    lv_obj_set_scroll_dir(scroller, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(scroller, LV_SCROLLBAR_MODE_ACTIVE);
+    auto *scroller = make_scroller(content_host_);
+    make_button(scroller, 0, 0, kSafeContentWidth - 16, 76, "POWER",
+                kSurface, kPrimary, power_settings_callback, this);
+    make_button(scroller, 0, 90, kSafeContentWidth - 16, 76, "CLOCK & REGION",
+                kSurface, kPrimary, clock_settings_callback, this);
+    make_button(scroller, 0, 180, kSafeContentWidth - 16, 76, "WATCH FACE",
+                kSurface, kPrimary, watchface_settings_callback, this);
+    auto *note = label(scroller, "All settings are stored on the watch.",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, 8, 280);
+    lv_obj_set_width(note, kSafeContentWidth - 32);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
+}
+
+void Shell::render_watchface_settings() {
+    add_header(content_host_, "WATCH FACE", back_callback, this);
+    auto *card = make_route_card(content_host_, 118, 152);
+    auto *heading = label(card, "ACTIVE PACK", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(heading, 0, 0);
+    watchface_name_ = label(card, "", &lv_font_montserrat_26, kPrimary);
+    lv_obj_set_pos(watchface_name_, 0, 38);
+    lv_obj_set_width(watchface_name_, kSafeContentWidth - 32);
+    auto *contract = label(card, "Declarative · versioned · persistent",
+                           &lv_font_montserrat_14, kGreen);
+    lv_obj_set_pos(contract, 0, 85);
+
+    make_button(content_host_, kSafeInset, 294, kSafeContentWidth, 72, "NEXT FACE",
+                kCyan, kVoid, watchface_next_callback, this);
+    auto *note = label(content_host_,
+                       "Face packs choose a supported layout, palette, and complications. "
+                       "They cannot execute firmware code.",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, kSafeInset, 392);
+    lv_obj_set_width(note, kSafeContentWidth);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
+    refresh_watchface_settings();
+}
+
+void Shell::refresh_watchface_settings() {
+    if (!watchface_name_) return;
+    const auto &pack = nightglass::services::watchface_service().selected();
+    lv_label_set_text(watchface_name_, pack.name);
+}
+
+void Shell::render_power_settings() {
+    add_header(content_host_, "POWER", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
 
     setting_active_ = make_button(scroller, 0, 0, kSafeContentWidth - 16, 64, "", kSurface,
                                   kPrimary, active_brightness_callback, this);
@@ -383,6 +742,33 @@ void Shell::render_settings() {
     setting_sleep_after_ = make_button(scroller, 0, 296, kSafeContentWidth - 16, 64, "", kSurface,
                                        kPrimary, sleep_after_callback, this);
     refresh_settings_labels();
+}
+
+void Shell::render_clock_settings() {
+    add_header(content_host_, "CLOCK", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    auto *preview = lv_obj_create(scroller);
+    lv_obj_set_size(preview, kSafeContentWidth - 16, 98);
+    lv_obj_set_pos(preview, 0, 0);
+    lv_obj_set_style_radius(preview, 14, 0);
+    lv_obj_set_style_bg_color(preview, lv_color_hex(kSurface), 0);
+    lv_obj_set_style_bg_opa(preview, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(preview, 0, 0);
+    lv_obj_remove_flag(preview, LV_OBJ_FLAG_SCROLLABLE);
+    clock_preview_ = label(preview, "TIME UNAVAILABLE", &lv_font_montserrat_24, kPrimary);
+    lv_obj_center(clock_preview_);
+    setting_time_format_ = make_button(scroller, 0, 110, kSafeContentWidth - 16, 64, "",
+                                       kSurface, kPrimary, time_format_callback, this);
+    setting_utc_offset_ = make_button(scroller, 0, 184, kSafeContentWidth - 16, 64, "",
+                                      kSurface, kPrimary, utc_offset_callback, this);
+    setting_dst_ = make_button(scroller, 0, 258, kSafeContentWidth - 16, 64, "",
+                               kSurface, kPrimary, dst_callback, this);
+    auto *note = label(scroller, "UTC offset advances by 30 minutes per tap.",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, 8, 338);
+    lv_obj_set_width(note, kSafeContentWidth - 32);
+    configure_refresh_timer(1000);
+    refresh_clock_settings();
 }
 
 void Shell::refresh_settings_labels() {
@@ -404,6 +790,71 @@ void Shell::refresh_settings_labels() {
                       settings.sleep_after_blank_seconds);
         set_button_text(setting_sleep_after_, text);
     }
+}
+
+void Shell::render_alarm() {
+    add_header(content_host_, "ALARM", back_callback, this);
+    auto *card = make_route_card(content_host_, 110, 126);
+    auto *heading = label(card, "DAILY ALARM", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(heading, 0, 0);
+    alarm_time_ = label(card, "07:00", &lv_font_montserrat_48, kPrimary);
+    lv_obj_set_pos(alarm_time_, 0, 27);
+    alarm_state_ = label(card, "OFF", &lv_font_montserrat_16, kAmber);
+    lv_obj_align(alarm_state_, LV_ALIGN_BOTTOM_RIGHT, 0, -8);
+
+    make_button(content_host_, kSafeInset, 256, 170, 64, "HOUR +", kSurface, kPrimary,
+                alarm_hour_callback, this);
+    make_button(content_host_, 212, 256, 170, 64, "MIN +5", kSurface, kPrimary,
+                alarm_minute_callback, this);
+    alarm_toggle_ = make_button(content_host_, kSafeInset, 338, kSafeContentWidth, 70, "",
+                                kCyan, kVoid, alarm_enabled_callback, this);
+    auto *note = label(content_host_, "Visual alert only · wakes light sleep",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, kSafeInset, 430);
+    lv_obj_set_width(note, kSafeContentWidth);
+    lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
+    configure_refresh_timer(1000);
+    refresh_alarm();
+}
+
+void Shell::render_countdown() {
+    add_header(content_host_, "TIMER", back_callback, this);
+    auto *card = make_route_card(content_host_, 112, 142);
+    auto *heading = label(card, "COUNTDOWN", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(heading, 0, 0);
+    countdown_time_ = label(card, "00:05:00", &lv_font_montserrat_32, kPrimary);
+    lv_obj_set_pos(countdown_time_, 0, 42);
+
+    countdown_duration_ = make_button(content_host_, kSafeInset, 278, kSafeContentWidth, 58,
+                                      "DURATION", kSurface, kPrimary,
+                                      countdown_duration_callback, this);
+    countdown_toggle_ = make_button(content_host_, kSafeInset, 350, 220, 70, "START",
+                                    kCyan, kVoid, countdown_toggle_callback, this);
+    make_button(content_host_, 262, 350, 120, 70, "RESET", kSurface, kPrimary,
+                countdown_reset_callback, this);
+    auto *note = label(content_host_, "Visual alert only", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, kSafeInset, 440);
+    configure_refresh_timer(250);
+    refresh_countdown();
+}
+
+void Shell::render_stopwatch() {
+    add_header(content_host_, "STOPWATCH", back_callback, this);
+    auto *card = make_route_card(content_host_, 112, 166);
+    auto *heading = label(card, "ELAPSED", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(heading, 0, 0);
+    stopwatch_time_ = label(card, "00:00:00.0", &lv_font_montserrat_32, kPrimary);
+    lv_obj_set_pos(stopwatch_time_, 0, 52);
+    stopwatch_toggle_ = make_button(content_host_, kSafeInset, 310, 220, 70, "START",
+                                    kCyan, kVoid, stopwatch_toggle_callback, this);
+    make_button(content_host_, 262, 310, 120, 70, "RESET", kSurface, kPrimary,
+                stopwatch_reset_callback, this);
+    auto *note = label(content_host_, "Runs independently of this screen.",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, kSafeInset, 408);
+    lv_obj_set_width(note, kSafeContentWidth);
+    configure_refresh_timer(100);
+    refresh_stopwatch();
 }
 
 void Shell::render_diagnostics() {
@@ -480,7 +931,23 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::diagnostics:
             refresh_diagnostics();
             break;
+        case nightglass::core::Route::clock_settings:
+            refresh_clock_settings();
+            break;
+        case nightglass::core::Route::watchface_settings:
+            refresh_watchface_settings();
+            break;
+        case nightglass::core::Route::alarm:
+            refresh_alarm();
+            break;
+        case nightglass::core::Route::countdown:
+            refresh_countdown();
+            break;
+        case nightglass::core::Route::stopwatch:
+            refresh_stopwatch();
+            break;
         case nightglass::core::Route::settings:
+        case nightglass::core::Route::power_settings:
         case nightglass::core::Route::launcher:
         case nightglass::core::Route::about:
             break;
@@ -490,18 +957,45 @@ void Shell::refresh_active_route() {
 void Shell::refresh_home() {
     if (!home_time_) return;
     const auto snapshot = nightglass::services::hardware_service().snapshot();
+    const auto clock = nightglass::services::clock_service().snapshot();
     const auto now = esp_timer_get_time();
     char buffer[96]{};
 
-    const auto &rtc = snapshot.rtc;
-    const auto rtc_age = now - rtc.sampled_at_us;
-    if (rtc.present && rtc.valid && rtc_age <= 5'000'000) {
-        std::snprintf(buffer, sizeof(buffer), "%02u:%02u", rtc.hour, rtc.minute);
+    if (clock.time_valid) {
+        const char *period = "";
+        const auto layout = nightglass::services::watchface_service().selected().layout;
+        if (layout == nightglass::services::FaceLayout::revenant_grid) {
+            const auto hour = clock.settings.use_24_hour
+                                  ? static_cast<unsigned>(clock.local_time.hour)
+                                  : static_cast<unsigned>(clock.local_time.hour % 12 == 0
+                                                              ? 12
+                                                              : clock.local_time.hour % 12);
+            period = clock.settings.use_24_hour ? "" : clock.local_time.hour < 12 ? "AM" : "PM";
+            std::snprintf(buffer, sizeof(buffer), "%02u\n%02u", hour,
+                          clock.local_time.minute);
+        } else {
+            format_time(buffer, sizeof(buffer), clock.local_time,
+                        clock.settings.use_24_hour, &period);
+        }
         lv_label_set_text(home_time_, buffer);
-        std::snprintf(buffer, sizeof(buffer), "%04u-%02u-%02u", rtc.year, rtc.month, rtc.day);
+        if (layout == nightglass::services::FaceLayout::revenant_grid) {
+            static constexpr const char *days[]{"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+            const auto day_index = static_cast<unsigned>(clock.local_time.weekday % 7);
+            std::snprintf(buffer, sizeof(buffer), "%s %02u", days[day_index],
+                          clock.local_time.day);
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "%04ld-%02u-%02u",
+                          static_cast<long>(clock.local_time.year), clock.local_time.month,
+                          clock.local_time.day);
+        }
         lv_label_set_text(home_date_, buffer);
-        set_state(home_time_state_, rtc_age > 2'000'000 ? "TIME STALE" : "RTC · LIVE",
-                  rtc_age > 2'000'000 ? kAmber : kGreen);
+        const int effective_offset = clock.settings.utc_offset_minutes +
+                                     (clock.settings.daylight_saving ? 60 : 0);
+        const int offset_abs = effective_offset < 0 ? -effective_offset : effective_offset;
+        std::snprintf(buffer, sizeof(buffer), "%s%sUTC%c%d:%02d · LIVE",
+                      period, period[0] ? " · " : "", effective_offset < 0 ? '-' : '+',
+                      offset_abs / 60, offset_abs % 60);
+        set_state(home_time_state_, buffer, kGreen);
     } else {
         lv_label_set_text(home_time_, "--:--");
         lv_label_set_text(home_date_, "DATE UNAVAILABLE");
@@ -544,12 +1038,142 @@ void Shell::refresh_home() {
         if (!motion.gyro_calibrated) {
             set_state(home_motion_, "MOTION · CALIBRATING", kAmber);
         } else {
-            set_state(home_motion_, motion.moving ? "MOTION · MOVING" : "MOTION · STILL",
+            const bool revenant = nightglass::services::watchface_service().selected().layout ==
+                                  nightglass::services::FaceLayout::revenant_grid;
+            set_state(home_motion_, revenant ? (motion.moving ? "MOVE" : "STILL")
+                                             : (motion.moving ? "MOTION · MOVING" : "MOTION · STILL"),
                       motion_age > 500'000 ? kAmber : motion.moving ? kCyan : kPrimary);
         }
     } else {
         set_state(home_motion_, "MOTION · UNAVAILABLE", kRed);
     }
+
+    if (home_alarm_) {
+        const auto &alarm = clock.alarm;
+        if (alarm.enabled) {
+            std::snprintf(buffer, sizeof(buffer), "%02u:%02u", alarm.hour, alarm.minute);
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "OFF");
+        }
+        lv_label_set_text(home_alarm_, buffer);
+    }
+    if (home_timer_) {
+        if (clock.timer_running) {
+            const auto minutes = (clock.timer_remaining_seconds + 59) / 60;
+            std::snprintf(buffer, sizeof(buffer), "%uM", static_cast<unsigned>(minutes));
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "IDLE");
+        }
+        lv_label_set_text(home_timer_, buffer);
+    }
+}
+
+void Shell::refresh_clock_settings() {
+    if (!setting_time_format_) return;
+    const auto snapshot = nightglass::services::clock_service().snapshot();
+    set_button_text(setting_time_format_, snapshot.settings.use_24_hour
+                                             ? "TIME FORMAT · 24 HOUR"
+                                             : "TIME FORMAT · 12 HOUR");
+    const int offset = snapshot.settings.utc_offset_minutes;
+    const int offset_abs = offset < 0 ? -offset : offset;
+    char buffer[96]{};
+    std::snprintf(buffer, sizeof(buffer), "UTC OFFSET · %c%d:%02d",
+                  offset < 0 ? '-' : '+', offset_abs / 60, offset_abs % 60);
+    set_button_text(setting_utc_offset_, buffer);
+    set_button_text(setting_dst_, snapshot.settings.daylight_saving
+                                      ? "DAYLIGHT SAVING · ON"
+                                      : "DAYLIGHT SAVING · OFF");
+    if (snapshot.time_valid && clock_preview_) {
+        const char *period = "";
+        format_time(buffer, sizeof(buffer), snapshot.local_time,
+                    snapshot.settings.use_24_hour, &period);
+        char preview[96]{};
+        std::snprintf(preview, sizeof(preview), "%s%s%s\n%04ld-%02u-%02u",
+                      buffer, period[0] ? " " : "", period,
+                      static_cast<long>(snapshot.local_time.year), snapshot.local_time.month,
+                      snapshot.local_time.day);
+        lv_label_set_text(clock_preview_, preview);
+        lv_obj_set_style_text_align(clock_preview_, LV_TEXT_ALIGN_CENTER, 0);
+    } else if (clock_preview_) {
+        lv_label_set_text(clock_preview_, "TIME UNAVAILABLE");
+    }
+}
+
+void Shell::refresh_alarm() {
+    if (!alarm_time_) return;
+    const auto snapshot = nightglass::services::clock_service().snapshot();
+    nightglass::services::CivilTime alarm_time{};
+    alarm_time.hour = snapshot.alarm.hour;
+    alarm_time.minute = snapshot.alarm.minute;
+    char buffer[64]{};
+    const char *period = "";
+    format_time(buffer, sizeof(buffer), alarm_time, snapshot.settings.use_24_hour, &period);
+    char display[64]{};
+    std::snprintf(display, sizeof(display), "%s%s%s", buffer, period[0] ? " " : "", period);
+    lv_label_set_text(alarm_time_, display);
+    set_state(alarm_state_, snapshot.alarm_ringing ? "RINGING"
+                           : snapshot.alarm.enabled ? "ON" : "OFF",
+              snapshot.alarm_ringing ? kRed : snapshot.alarm.enabled ? kGreen : kAmber);
+    if (alarm_toggle_) {
+        set_button_text(alarm_toggle_, snapshot.alarm.enabled ? "DISABLE" : "ENABLE");
+    }
+}
+
+void Shell::refresh_countdown() {
+    if (!countdown_time_) return;
+    const auto snapshot = nightglass::services::clock_service().snapshot();
+    char buffer[64]{};
+    format_duration(buffer, sizeof(buffer),
+                    static_cast<std::uint64_t>(snapshot.timer_remaining_seconds) * 1000, false);
+    lv_label_set_text(countdown_time_, buffer);
+    std::snprintf(buffer, sizeof(buffer), "DURATION · %u MIN",
+                  static_cast<unsigned>(snapshot.timer_configured_seconds / 60));
+    set_button_text(countdown_duration_, buffer);
+    set_button_text(countdown_toggle_, snapshot.timer_running ? "PAUSE" : "START");
+}
+
+void Shell::refresh_stopwatch() {
+    if (!stopwatch_time_) return;
+    const auto snapshot = nightglass::services::clock_service().snapshot();
+    char buffer[64]{};
+    format_duration(buffer, sizeof(buffer), snapshot.stopwatch_elapsed_ms, true);
+    lv_label_set_text(stopwatch_time_, buffer);
+    set_button_text(stopwatch_toggle_, snapshot.stopwatch_running ? "PAUSE" : "START");
+}
+
+void Shell::refresh_system_overlay() {
+    if (!overlay_layer_) return;
+    const auto kind = nightglass::services::clock_service().active_alert();
+    const auto encoded = static_cast<std::uint8_t>(kind);
+    if (kind == nightglass::services::AlertKind::none) {
+        if (alert_card_) {
+            lv_obj_clean(overlay_layer_);
+            lv_obj_add_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
+            alert_card_ = nullptr;
+            displayed_alert_kind_ = 0;
+        }
+        return;
+    }
+    if (alert_card_ && displayed_alert_kind_ == encoded) return;
+
+    lv_obj_clean(overlay_layer_);
+    lv_obj_set_style_bg_color(overlay_layer_, lv_color_hex(kVoid), 0);
+    lv_obj_set_style_bg_opa(overlay_layer_, LV_OPA_90, 0);
+    lv_obj_remove_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(overlay_layer_);
+    alert_card_ = make_route_card(overlay_layer_, 112, 230);
+    const char *title = kind == nightglass::services::AlertKind::alarm ? "ALARM"
+                        : kind == nightglass::services::AlertKind::countdown ? "TIMER COMPLETE"
+                                                                           : "ALARMS DUE";
+    auto *heading = label(alert_card_, title, &lv_font_montserrat_32, kPrimary);
+    lv_obj_align(heading, LV_ALIGN_TOP_MID, 0, 18);
+    auto *note = label(alert_card_, "Visual alert\nAudio and haptics unavailable",
+                       &lv_font_montserrat_16, kSecondary);
+    lv_obj_align(note, LV_ALIGN_CENTER, 0, 16);
+    lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
+    make_button(overlay_layer_, kSafeInset, 370, kSafeContentWidth, 70, "DISMISS",
+                kCyan, kVoid, dismiss_alert_callback, this);
+    displayed_alert_kind_ = encoded;
 }
 
 void Shell::refresh_diagnostics() {
@@ -663,6 +1287,21 @@ void Shell::clear_route_objects() {
     setting_dim_after_ = nullptr;
     setting_blank_after_ = nullptr;
     setting_sleep_after_ = nullptr;
+    setting_time_format_ = nullptr;
+    setting_utc_offset_ = nullptr;
+    setting_dst_ = nullptr;
+    clock_preview_ = nullptr;
+    watchface_name_ = nullptr;
+    alarm_time_ = nullptr;
+    alarm_state_ = nullptr;
+    alarm_toggle_ = nullptr;
+    countdown_time_ = nullptr;
+    countdown_duration_ = nullptr;
+    countdown_toggle_ = nullptr;
+    stopwatch_time_ = nullptr;
+    stopwatch_toggle_ = nullptr;
+    home_alarm_ = nullptr;
+    home_timer_ = nullptr;
 }
 
 Shell &shell() { return instance; }

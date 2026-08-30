@@ -4,7 +4,9 @@
 #include "nightglass/bsp/board.hpp"
 #include "nightglass/core/health.hpp"
 #include "nightglass/services/hardware.hpp"
+#include "nightglass/services/clock.hpp"
 #include "nightglass/services/power.hpp"
+#include "nightglass/services/watchface.hpp"
 #include "nightglass/ui/shell.hpp"
 
 namespace {
@@ -46,6 +48,16 @@ extern "C" void app_main() {
     const auto power_status = nightglass::services::power_service().start();
     if (!power_status.is_ok()) {
         ESP_LOGW(kTag, "Power service degraded: %s", power_status.detail);
+    }
+
+    const auto clock_status = nightglass::services::clock_service().start();
+    if (!clock_status.is_ok()) {
+        ESP_LOGW(kTag, "Clock service degraded: %s", clock_status.detail);
+    }
+
+    const auto face_status = nightglass::services::watchface_service().start();
+    if (!face_status.is_ok()) {
+        ESP_LOGW(kTag, "Watch face service degraded: %s", face_status.detail);
     }
 
     if (!board.lock_display(0)) {

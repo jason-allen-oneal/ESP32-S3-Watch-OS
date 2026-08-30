@@ -37,10 +37,11 @@ never appear as plausible placeholders.
 
 ### Current shell slice
 
-The first daily-use shell keeps one LVGL screen alive and swaps route content
-inside a system-owned host. Home shows live RTC time/date, battery state, and
-the motion heuristic. Its launcher lists only the installed Diagnostics and
-About routes. Both routes provide a 56 px touch Back control; Diagnostics uses
+The daily-use shell keeps one LVGL screen alive and swaps route content inside
+a system-owned host. Home renders the selected built-in face pack with live
+RTC time/date, battery, alarm, timer, and motion complications. The launcher
+provides Alarm, Timer, Stopwatch, Settings, Diagnostics, and About. Application
+routes provide a 56 px touch Back control; Diagnostics uses
 a safe-area scroller and runs its 100 ms refresh timer only while visible. A
 separate system overlay layer is reserved for future modal UI.
 
@@ -74,6 +75,11 @@ gestures, sound/haptic profile, AOD, and notification privacy without flashing.
 Watch faces and themes are validated data packs with format version, resource
 limits, compatible complications, and checksums. They cannot contain executable
 code. A built-in fallback face and theme always remain available.
+
+Format 1 is implemented as a built-in manifest registry with persistent NVS
+selection. Nightglass Classic is the fallback; Revenant Grid is the first
+original themed pack. External filesystem loading remains deferred until
+manifest validation and decoded-asset limits are enforced.
 
 ## Release UX gates
 

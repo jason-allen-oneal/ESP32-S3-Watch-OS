@@ -13,7 +13,11 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
         case NavigationAction::back:
             state.route = state.route == Route::home ? Route::home
                           : state.route == Route::launcher ? Route::home
-                                                          : Route::launcher;
+                          : state.route == Route::power_settings ||
+                                state.route == Route::clock_settings ||
+                                state.route == Route::watchface_settings
+                              ? Route::settings
+                              : Route::launcher;
             break;
         case NavigationAction::home:
             state.route = Route::home;
@@ -25,6 +29,30 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
             break;
         case NavigationAction::open_settings:
             state.route = Route::settings;
+            state.overlay = Overlay::none;
+            break;
+        case NavigationAction::open_power_settings:
+            state.route = Route::power_settings;
+            state.overlay = Overlay::none;
+            break;
+        case NavigationAction::open_clock_settings:
+            state.route = Route::clock_settings;
+            state.overlay = Overlay::none;
+            break;
+        case NavigationAction::open_watchface_settings:
+            state.route = Route::watchface_settings;
+            state.overlay = Overlay::none;
+            break;
+        case NavigationAction::open_alarm:
+            state.route = Route::alarm;
+            state.overlay = Overlay::none;
+            break;
+        case NavigationAction::open_countdown:
+            state.route = Route::countdown;
+            state.overlay = Overlay::none;
+            break;
+        case NavigationAction::open_stopwatch:
+            state.route = Route::stopwatch;
             state.overlay = Overlay::none;
             break;
         case NavigationAction::open_diagnostics:

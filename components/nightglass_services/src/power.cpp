@@ -9,6 +9,7 @@
 #include "nvs.h"
 #include "nightglass/bsp/board.hpp"
 #include "nightglass/core/health.hpp"
+#include "nightglass/services/clock.hpp"
 
 namespace nightglass::services {
 namespace {
@@ -172,18 +173,37 @@ void enter_light_sleep(std::int64_t observed_activity_us) {
         return;
     }
 
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+    const auto deadline_wake_us = clock_service().next_wake_delay_us();
+    if (deadline_wake_us > 0 && esp_sleep_enable_timer_wakeup(deadline_wake_us) != ESP_OK) {
+        gpio_wakeup_disable(kTouchInterruptGpio);
+        gpio_set_intr_type(kTouchInterruptGpio, GPIO_INTR_NEGEDGE);
+        gpio_intr_enable(kTouchInterruptGpio);
+        portENTER_CRITICAL(&snapshot_mux);
+        current.state = nightglass::core::PowerState::screen_blank;
+        current.sleeping = false;
+        ++current.sequence;
+        portEXIT_CRITICAL(&snapshot_mux);
+        nightglass::core::health_registry().set("power", nightglass::core::HealthState::failed,
+                                               "Deadline wake setup failed; sleep skipped");
+        return;
+    }
+
     const auto started_us = esp_timer_get_time();
     ESP_LOGI(kTag, "Entering light sleep");
     const esp_err_t result = esp_light_sleep_start();
     const auto woke_us = esp_timer_get_time();
     const auto cause = esp_sleep_get_wakeup_cause();
     gpio_wakeup_disable(kTouchInterruptGpio);
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
     gpio_set_intr_type(kTouchInterruptGpio, GPIO_INTR_NEGEDGE);
     gpio_intr_enable(kTouchInterruptGpio);
     const auto wake_reason = cause == ESP_SLEEP_WAKEUP_GPIO
                                  ? nightglass::core::WakeReason::touch
                              : cause == ESP_SLEEP_WAKEUP_EXT1
                                  ? nightglass::core::WakeReason::button
+                             : cause == ESP_SLEEP_WAKEUP_TIMER
+                                 ? nightglass::core::WakeReason::timer
                                  : nightglass::core::WakeReason::unknown;
 
     portENTER_CRITICAL(&snapshot_mux);

@@ -86,10 +86,10 @@ survive view destruction.
 
 ## Persistence
 
-Settings use two versioned NVS slots per namespace with generation number,
-payload length, and CRC32. The inactive slot is written and verified before the
-active generation changes. Migrations are sequential and preserve the previous
-slot until the new firmware passes its health gate.
+Power, clock, alarm, timer, and selected-face state are currently stored in
+bounded NVS namespaces with validation and safe defaults. Two-slot generation
+records with CRC32 remain the hardening target before external face imports or
+signed OTA depend on schema migration.
 
 - NVS: authoritative settings, alarms, deadlines, boot state.
 - LittleFS: validated faces, themes, assets, cached weather.
@@ -104,17 +104,17 @@ BOOT -> ACTIVE -> DIM -> SCREEN_BLANK -> LIGHT_SLEEP
                                              +-> DEEP_SLEEP (later shipping mode)
 ```
 
-The first power slice keeps the CPU and touch stack awake while stepping from
-30% brightness to 8%, then to a zero-brightness screen blank. This is not
-claimed as a true panel-off state: the vendor BSP sends DCS brightness command
-0x51 and reports only its cached request, not transport acknowledgement. Every
-brightness transition therefore requires physical HIL.
+The power supervisor steps through configurable active, dim, blank, and light-
+sleep states. GPIO38 touch wake and GPIO10 EXT1 side-key wake are armed only
+around sleep, then normal touch interrupt behavior is restored after resume.
+The first wake touch is consumed before object events. Alarm and countdown
+deadlines also arm timer wake.
 
 The side power key is GPIO10 (`SYS_OUT`, active high); GPIO0 remains the boot
 strap. Touch IRQ GPIO38 and RTC IRQ GPIO39 are digital-only and can wake light
 sleep, while GPIO10 and QMI8658 INT1 GPIO21 are RTC IO candidates for later
-deep-sleep wake. Light sleep, motion wake, RTC alarm wake, panel DCS 0x28, and
-PMIC rail gating remain disabled until their isolated wake-loop and recovery
+deep-sleep wake. Motion wake, direct RTC alarm wake, panel DCS 0x28, deep sleep,
+and PMIC rail gating remain disabled until their isolated wake-loop and recovery
 tests pass. Networking, audio, amplifier, SD, display, and sensor features are
 eventually gated by the power service.
 

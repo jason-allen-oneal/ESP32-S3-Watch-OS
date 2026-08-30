@@ -7,14 +7,15 @@
 3. **Modern shell** — Obsidian components, navigation, launcher, quick settings,
    notification shell, fallback watch face.
 4. **Watch essentials** — timezone/DST, alarms, persistent timers, stopwatch,
-   sound/haptic feedback.
+   and visual system alerts. Sound/haptic feedback remains hardware-dependent.
 5. **Power and activity** — measured sleep/wake, battery policy, steps,
    tap/raise wake, activity summaries.
 6. **Connectivity** — BLE provisioning and companion protocol, asynchronous
    Wi-Fi/SNTP/weather, notifications and media controls.
 7. **Audio and storage** — alarms, recorder, playback, SD browser, privacy.
-8. **Customization** — complications, watch-face manifests, themes, glance
-   tiles, import/export.
+8. **Customization** — external face-pack loading, complication assignment,
+   themes, glance tiles, and import/export. The built-in manifest registry and
+   persistent face selection already ship in the daily-use slice.
 9. **Release hardening** — signed OTA, rollback, safe mode, soak tests,
    diagnostic export, optional secure-boot plan.
 
@@ -33,13 +34,14 @@ core release.
 
 ## Current shell and power slice
 
-The first daily shell provides a persistent root, bounded Home/Launcher/App
-navigation, a real RTC watch face, battery/charging and motion complications,
-an About view, and lifecycle-bound diagnostics. Every surface uses the rounded
-panel safe area and lists only working features.
+The daily shell provides a persistent root, bounded Home/Launcher/App
+navigation, timezone/DST and 12/24-hour settings, a daily alarm, countdown,
+stopwatch, visual system alerts, lifecycle-bound diagnostics, and persistent
+selection between built-in declarative watch-face packs. Every surface uses
+the rounded panel safe area and lists only working features.
 
-The power supervisor requests 30% active brightness, 8% after 15 seconds, and
-a zero-brightness screen blank after 30 seconds. Any touch resets inactivity;
-the first touch while blank is consumed as wake-only. GPIO10 side-key input is
-debounced and also wakes the screen. CPU light sleep, deep sleep, motion wake,
-RTC alarm wake, and rail gating remain disabled pending isolated HIL.
+Brightness, dim, blank, and light-sleep delays are configurable and persisted.
+Any touch resets inactivity; the first touch while blank is consumed as
+wake-only. GPIO38 touch and GPIO10 side-key wake have passed physical light-
+sleep validation. Timer/alarm deadlines arm timer wake. Deep sleep, motion
+wake, direct RTC-alarm wake, and rail gating remain deferred.
