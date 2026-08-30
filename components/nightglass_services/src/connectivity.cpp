@@ -269,23 +269,36 @@ void advertise() {
     if (!snapshot.settings.enabled || ble_gap_adv_active()) return;
     ble_hs_adv_fields fields{};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.name = reinterpret_cast<const std::uint8_t *>(snapshot.settings.device_name.data());
-    fields.name_len = static_cast<std::uint8_t>(strlen(snapshot.settings.device_name.data()));
-    fields.name_is_complete = 1;
     fields.uuids128 = const_cast<ble_uuid128_t *>(&kServiceUuid);
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
-    if (ble_gap_adv_set_fields(&fields) != 0) return;
+    const auto adv_result = ble_gap_adv_set_fields(&fields);
+    if (adv_result != 0) {
+        ESP_LOGE(kTag, "Unable to configure BLE advertisement: %d", adv_result);
+        return;
+    }
+    ble_hs_adv_fields response{};
+    response.name = reinterpret_cast<const std::uint8_t *>(snapshot.settings.device_name.data());
+    response.name_len = static_cast<std::uint8_t>(strlen(snapshot.settings.device_name.data()));
+    response.name_is_complete = 1;
+    const auto response_result = ble_gap_adv_rsp_set_fields(&response);
+    if (response_result != 0) {
+        ESP_LOGE(kTag, "Unable to configure BLE scan response: %d", response_result);
+        return;
+    }
     ble_gap_adv_params parameters{};
     parameters.conn_mode = BLE_GAP_CONN_MODE_UND;
     parameters.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    if (ble_gap_adv_start(own_address_type, nullptr, BLE_HS_FOREVER, &parameters, gap_event,
-                          nullptr) == 0) {
+    const auto start_result = ble_gap_adv_start(own_address_type, nullptr, BLE_HS_FOREVER,
+                                                &parameters, gap_event, nullptr);
+    if (start_result == 0) {
         portENTER_CRITICAL(&state_lock);
         current.state = CompanionLinkState::advertising;
         set_detail_locked("Advertising");
         ++current.sequence;
         portEXIT_CRITICAL(&state_lock);
+    } else {
+        ESP_LOGE(kTag, "Unable to start BLE advertisement: %d", start_result);
     }
 }
 
