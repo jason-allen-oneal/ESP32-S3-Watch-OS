@@ -21,6 +21,14 @@ constexpr std::uint32_t kCyan = 0x63DDE4;
 constexpr std::uint32_t kGreen = 0x50D890;
 constexpr std::uint32_t kAmber = 0xFFB454;
 constexpr std::uint32_t kRed = 0xFF5C70;
+constexpr int kPanelWidth = 410;
+constexpr int kPanelHeight = 502;
+// The glass is rectangular, but the visible panel corners are rounded. Keep
+// persistent text and controls inside this conservative interaction-safe area.
+constexpr int kSafeInsetX = 28;
+constexpr int kSafeInsetTop = 28;
+constexpr int kSafeInsetBottom = 28;
+constexpr int kSafeContentWidth = kPanelWidth - (2 * kSafeInsetX);
 
 lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
                 std::uint32_t color) {
@@ -33,8 +41,8 @@ lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
 
 lv_obj_t *card(lv_obj_t *parent, int y, int height) {
     auto *obj = lv_obj_create(parent);
-    lv_obj_set_size(obj, 370, height);
-    lv_obj_set_pos(obj, 20, y);
+    lv_obj_set_size(obj, kSafeContentWidth, height);
+    lv_obj_set_pos(obj, kSafeInsetX, y);
     lv_obj_set_style_radius(obj, 12, 0);
     lv_obj_set_style_bg_color(obj, lv_color_hex(kSurface), 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
@@ -62,9 +70,9 @@ morrow::core::Status Shell::start() {
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
     auto *title = label(screen, "HARDWARE", &lv_font_montserrat_26, kPrimary);
-    lv_obj_set_pos(title, 20, 20);
+    lv_obj_set_pos(title, kSafeInsetX, kSafeInsetTop);
     auto *subtitle = label(screen, "LIVE DIAGNOSTICS", &lv_font_montserrat_14, kCyan);
-    lv_obj_align(subtitle, LV_ALIGN_TOP_RIGHT, -20, 27);
+    lv_obj_align(subtitle, LV_ALIGN_TOP_RIGHT, -kSafeInsetX, kSafeInsetTop + 7);
 
     auto *rtc = card(screen, 72, 76);
     auto *rtc_title = label(rtc, "RTC", &lv_font_montserrat_14, kSecondary);
@@ -88,7 +96,7 @@ morrow::core::Status Shell::start() {
     battery_voltage_ = label(battery, "-.-- V", &lv_font_montserrat_20, kPrimary);
     lv_obj_align(battery_voltage_, LV_ALIGN_TOP_RIGHT, 0, 28);
     battery_bar_ = lv_bar_create(battery);
-    lv_obj_set_size(battery_bar_, 344, 7);
+    lv_obj_set_size(battery_bar_, kSafeContentWidth - 24, 7);
     lv_obj_set_pos(battery_bar_, 0, 58);
     lv_bar_set_range(battery_bar_, 0, 100);
     lv_bar_set_value(battery_bar_, 0, LV_ANIM_OFF);
@@ -111,18 +119,17 @@ morrow::core::Status Shell::start() {
 
     auto *button = lv_button_create(screen);
     haptic_button_ = button;
-    lv_obj_set_size(button, 370, 64);
-    lv_obj_set_pos(button, 20, 410);
+    lv_obj_set_size(button, kSafeContentWidth, 62);
+    lv_obj_set_pos(button, kSafeInsetX,
+                   kPanelHeight - kSafeInsetBottom - 62 - 6);
     lv_obj_set_style_radius(button, 12, 0);
     lv_obj_set_style_bg_color(button, lv_color_hex(kCyan), 0);
     lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
     lv_obj_add_event_cb(button, haptic_callback, LV_EVENT_CLICKED, this);
     haptic_primary_ = label(button, "TEST HAPTIC", &lv_font_montserrat_18, kVoid);
-    lv_obj_set_pos(haptic_primary_, 12, 7);
-    auto *haptic_secondary = label(button, "DIAGNOSTIC PULSE · 200 MS", &lv_font_montserrat_14, kVoid);
-    lv_obj_set_pos(haptic_secondary, 12, 32);
-    haptic_result_ = label(screen, "Physical response unverified", &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(haptic_result_, 20, 481);
+    lv_obj_set_pos(haptic_primary_, 12, 5);
+    haptic_result_ = label(button, "Physical response unverified", &lv_font_montserrat_14, kVoid);
+    lv_obj_set_pos(haptic_result_, 12, 31);
 
     lv_screen_load(screen);
     timer_ = lv_timer_create(timer_callback, 100, this);
@@ -263,7 +270,15 @@ void Shell::refresh() {
         lv_label_set_text(motion_gyro_, buffer);
     }
 
-    if (!snapshot.haptic.ready) {
+    if (!snapshot.haptic.actuator_present) {
+        lv_obj_add_state(haptic_button_, LV_STATE_DISABLED);
+        lv_label_set_text(haptic_primary_, "HAPTIC DEFERRED");
+        if (snapshot.haptic.supply_state_known && !snapshot.haptic.supply_enabled) {
+            set_state(haptic_result_, "Actuator not fitted · ALDO3 off", kSecondary);
+        } else {
+            set_state(haptic_result_, "Actuator absent · ALDO3 state unverified", kRed);
+        }
+    } else if (!snapshot.haptic.ready) {
         lv_obj_add_state(haptic_button_, LV_STATE_DISABLED);
         set_state(haptic_result_, "Haptic service unavailable", kRed);
     } else if (snapshot.haptic.failed_pulses > observed_failed_pulses_) {

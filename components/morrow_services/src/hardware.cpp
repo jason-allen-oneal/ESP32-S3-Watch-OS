@@ -20,6 +20,9 @@ constexpr std::uint8_t kPmicChipId = 0x4A;
 constexpr std::uint8_t kPmicLdoOnOff0 = 0x90;
 constexpr std::uint8_t kPmicAldo3Voltage = 0x94;
 constexpr std::uint8_t kPmicAldo3EnableBit = 1U << 2U;
+// This physical unit completed GPIO18/ALDO3 HIL with no mechanical response.
+// Waveshare exposes P1/P2 motor pads but does not list an installed actuator.
+constexpr bool kHapticActuatorPresent = false;
 constexpr std::uint16_t kHapticSupplyMv = 3000;
 constexpr std::uint8_t kHapticSupplyCode =
     static_cast<std::uint8_t>((kHapticSupplyMv - 500U) / 100U);
@@ -341,16 +344,32 @@ void probe_devices(i2c_master_bus_handle_t bus_handle) {
                                        pmic_identified ? "AXP2101 identified; first read pending"
                                                        : "AXP2101 identification failed");
 
-    const bool haptic_supply_ready = pmic_identified && configure_haptic_supply();
-    const bool haptic_ready = haptic_output_ready && haptic_supply_ready;
+    bool haptic_supply_ready = false;
+    if (pmic_identified) {
+        if constexpr (kHapticActuatorPresent) {
+            haptic_supply_ready = configure_haptic_supply();
+        } else {
+            haptic_supply_cleanup_verified = disable_haptic_supply(0, false);
+        }
+    } else {
+        haptic_supply_cleanup_verified = false;
+        publish_haptic_supply(false, false, 0);
+    }
+    const bool haptic_ready = kHapticActuatorPresent && haptic_output_ready &&
+                              haptic_supply_ready;
     portENTER_CRITICAL(&snapshot_mux);
+    current.haptic.actuator_present = kHapticActuatorPresent;
     current.haptic.ready = haptic_ready;
     ++current.sequence;
     portEXIT_CRITICAL(&snapshot_mux);
     morrow::core::health_registry().set(
-        "haptic", haptic_ready ? morrow::core::HealthState::degraded
-                                : morrow::core::HealthState::failed,
-        haptic_ready ? "GPIO18 and ALDO3 ready; actuator HIL pending"
+        "haptic", haptic_ready ? morrow::core::HealthState::ok
+        : !kHapticActuatorPresent && haptic_supply_cleanup_verified
+            ? morrow::core::HealthState::ok
+            : morrow::core::HealthState::failed,
+        haptic_ready ? "GPIO18 and ALDO3 ready; actuator verified"
+        : !kHapticActuatorPresent && haptic_supply_cleanup_verified
+            ? "Actuator not fitted; ALDO3 disabled"
         : !haptic_supply_cleanup_verified ? "Haptic disabled; ALDO3 state unverified"
                                           : "Haptic GPIO or ALDO3 initialization failed");
 

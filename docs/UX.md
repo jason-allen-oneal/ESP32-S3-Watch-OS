@@ -4,6 +4,10 @@ Obsidian is MorrowOS's AMOLED-first interface: black fields, restrained spectral
 accents, high legibility, and no fabricated data. Cyber-goth atmosphere is a
 texture, not an excuse for radioactive clutter.
 
+The 410×502 panel has rounded visible corners. Persistent text and interactive
+controls stay inside a conservative 28 px top, bottom, and horizontal safe
+inset; only full-bleed backgrounds may extend into the clipped corner regions.
+
 ## Global navigation
 
 - Watch face is Home.
@@ -45,7 +49,7 @@ never appear as plausible placeholders.
 - Warning `#FFB454`
 - Error `#FF6174`
 
-Grid is 4 px, side gutter 20 px, standard gaps 8/12/16/24 px, and cards use
+Grid is 4 px, safe-area side gutter 28 px, standard gaps 8/12/16/24 px, and cards use
 12/16 px radii. Shadows and continuous decorative animation are forbidden.
 
 ## Customization

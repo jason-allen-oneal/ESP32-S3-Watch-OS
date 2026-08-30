@@ -52,9 +52,11 @@ a cross-core critical section and never performs I2C or GPIO work.
 - QMI8658 is reset into known state, identified, configured for 8 g at
   31.25 Hz and 512 dps at 28.025 Hz, and sampled at 25 Hz. Motion is explicitly a heuristic,
   not step count or orientation.
-- GPIO18 starts low. Haptic requests are bounded to 20–250 ms, rate-limited,
-  queue depth one, and cut off by an independent one-shot timer. UI acceptance
-  remains distinct from physical actuator confirmation.
+- GPIO18 starts low. The schematic's P1/P2 motor path and its ALDO3 supply were
+  electrically exercised, but this physical unit produced no mechanical
+  response and Waveshare does not list an installed actuator. Haptics are
+  therefore hardware-deferred and ALDO3 remains disabled. The bounded pulse
+  implementation stays dormant for a future fitted actuator.
 
 All I2C operations have a 20 ms deadline. A missing optional peripheral degrades
 its card but does not block display startup. The diagnostics view recomputes

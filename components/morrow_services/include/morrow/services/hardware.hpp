@@ -47,6 +47,7 @@ struct MotionSnapshot {
 };
 
 struct HapticSnapshot {
+    bool actuator_present{false};
     bool ready{false};
     bool supply_state_known{false};
     bool supply_enabled{false};
