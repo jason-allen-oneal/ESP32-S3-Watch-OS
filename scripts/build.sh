@@ -10,5 +10,10 @@ if [[ ! -f "${idf_dir}/export.sh" ]]; then
 fi
 
 source "${idf_dir}/export.sh" >/dev/null
-idf.py -C "${project_dir}" set-target esp32s3
+
+# set-target performs a full clean. Only use it to seed a fresh checkout;
+# subsequent builds retain the verified sdkconfig and incremental cache.
+if [[ ! -f "${project_dir}/sdkconfig" ]]; then
+  idf.py -C "${project_dir}" set-target esp32s3
+fi
 idf.py -C "${project_dir}" build
