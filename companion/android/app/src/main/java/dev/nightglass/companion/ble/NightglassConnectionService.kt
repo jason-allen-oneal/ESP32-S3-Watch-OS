@@ -37,6 +37,7 @@ class NightglassConnectionService : Service() {
     private var negotiatedPayload = 20
     private val writes = ArrayDeque<ByteArray>()
     private var writePending = false
+    private var linkReady = false
 
     private val bondReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -80,6 +81,7 @@ class NightglassConnectionService : Service() {
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(client: BluetoothGatt, status: Int, state: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS && state == BluetoothProfile.STATE_CONNECTED) {
+                linkReady = false
                 update("Connected; negotiating secure transport")
                 if (!client.requestMtu(247)) client.discoverServices()
             }
@@ -96,7 +98,13 @@ class NightglassConnectionService : Service() {
             if (negotiatedPayload < 179) { client.requestMtu(247); return }
             if (status != BluetoothGatt.GATT_SUCCESS || client.device.bondState != BluetoothDevice.BOND_BONDED) { update("Pairing required; accept the system prompt"); return }
             val service = client.getService(NightglassProtocol.SERVICE) ?: return update("Incompatible Nightglass service")
-            subscribe(client, service.getCharacteristic(NightglassProtocol.WATCH_TO_PHONE))
+            if (!subscribe(client, service.getCharacteristic(NightglassProtocol.WATCH_TO_PHONE)))
+                update("Could not enable Nightglass notifications")
+        }
+        override fun onDescriptorWrite(client: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (descriptor.uuid != NightglassProtocol.CCCD) return
+            if (status != BluetoothGatt.GATT_SUCCESS) return update("Could not enable Nightglass notifications")
+            synchronized(writes) { linkReady = true; writeNextLocked() }
             update("Nightglass connected")
         }
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
@@ -107,13 +115,13 @@ class NightglassConnectionService : Service() {
         override fun onCharacteristicChanged(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic) { receive(characteristic.value) }
         override fun onCharacteristicChanged(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) { receive(value) }
     }
-    private fun subscribe(client: BluetoothGatt, c: BluetoothGattCharacteristic?) {
-        c ?: return
-        client.setCharacteristicNotification(c, true)
-        c.getDescriptor(NightglassProtocol.CCCD)?.let { descriptor ->
-            if (Build.VERSION.SDK_INT >= 33) client.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-            else { @Suppress("DEPRECATION") descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; @Suppress("DEPRECATION") client.writeDescriptor(descriptor) }
-        }
+    private fun subscribe(client: BluetoothGatt, c: BluetoothGattCharacteristic?): Boolean {
+        c ?: return false
+        if (!client.setCharacteristicNotification(c, true)) return false
+        val descriptor = c.getDescriptor(NightglassProtocol.CCCD) ?: return false
+        return if (Build.VERSION.SDK_INT >= 33)
+            client.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
+        else { @Suppress("DEPRECATION") descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; @Suppress("DEPRECATION") client.writeDescriptor(descriptor) }
     }
     private fun receive(frame: ByteArray) { when (val action = NightglassProtocol.parseAction(frame)) {
         is NightglassProtocol.WatchAction.Media -> handleMedia(action.command)
@@ -129,11 +137,12 @@ class NightglassConnectionService : Service() {
         synchronized(writes) { if (writes.size >= 32) writes.removeFirst(); writes.add(frame.copyOf()); writeNextLocked() }
     }
     private fun writeNextLocked() {
-        if (writePending) return
+        if (writePending || !linkReady) return
         val client = gatt ?: return
         val c = client.getService(NightglassProtocol.SERVICE)?.getCharacteristic(NightglassProtocol.PHONE_TO_WATCH) ?: return
-        val frame = writes.poll() ?: return
+        val frame = writes.peek() ?: return
         if (frame.size > negotiatedPayload) {
+            writes.poll()
             update("Nightglass frame exceeds negotiated MTU")
             writeNextLocked()
             return
@@ -141,10 +150,10 @@ class NightglassConnectionService : Service() {
         val started = if (Build.VERSION.SDK_INT >= 33) client.writeCharacteristic(c, frame, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
         else { @Suppress("DEPRECATION") c.value = frame; @Suppress("DEPRECATION") client.writeCharacteristic(c) }
         writePending = started
-        if (!started) writeNextLocked()
+        if (started) writes.poll()
     }
     private fun stopScan() { if (scanning && hasConnectPermissions()) adapter.bluetoothLeScanner?.stopScan(scanCallback); scanning = false }
-    private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
+    private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false; linkReady = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
     private fun hasConnectPermissions() = Build.VERSION.SDK_INT < 31 || (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED)
     private fun createChannel() { getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "Watch connection", NotificationManager.IMPORTANCE_LOW)) }
     private fun update(text: String) { getSystemService(NotificationManager::class.java).notify(7, connectionNotification(text)) }
