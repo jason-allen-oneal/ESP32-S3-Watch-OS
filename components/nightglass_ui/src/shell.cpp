@@ -32,6 +32,20 @@ constexpr int kSafeRight = kPanelWidth - kSafeInset;
 constexpr int kSafeBottom = kPanelHeight - kSafeInset;
 constexpr int kSafeContentWidth = kPanelWidth - (2 * kSafeInset);
 
+template <typename T, std::size_t N>
+T next_value(T current, const T (&values)[N]) {
+    for (std::size_t i = 0; i < N; ++i) {
+        if (values[i] == current) return values[(i + 1) % N];
+    }
+    return values[0];
+}
+
+void set_button_text(lv_obj_t *button, const char *text) {
+    if (button && lv_obj_get_child_count(button) > 0) {
+        lv_label_set_text(lv_obj_get_child(button, 0), text);
+    }
+}
+
 lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
                 std::uint32_t color) {
     auto *obj = lv_label_create(parent);
@@ -177,7 +191,8 @@ void Shell::input_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     const auto before = nightglass::services::power_service().snapshot();
     nightglass::services::power_service().note_activity(nightglass::core::WakeReason::touch);
-    if (before.state == nightglass::core::PowerState::screen_blank && self->touch_input_) {
+    if ((before.state == nightglass::core::PowerState::screen_blank || before.wake_touch_pending) &&
+        self->touch_input_) {
         // The first contact on a black screen is wake-only. LVGL sends indev
         // events before object events, so this prevents click-through and then
         // ignores the remainder of the same physical touch until release.
@@ -194,6 +209,64 @@ void Shell::back_callback(lv_event_t *event) {
 void Shell::launcher_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
         nightglass::core::NavigationAction::open_launcher);
+}
+
+void Shell::settings_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_settings);
+}
+
+void Shell::active_brightness_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::power_service().snapshot().settings;
+    constexpr std::uint8_t values[]{20, 30, 50, 75, 100};
+    settings.active_brightness = next_value(settings.active_brightness, values);
+    if (settings.dim_brightness >= settings.active_brightness) settings.dim_brightness = 8;
+    nightglass::services::power_service().update_settings(settings);
+    self->refresh_settings_labels();
+}
+
+void Shell::dim_brightness_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::power_service().snapshot().settings;
+    constexpr std::uint8_t values[]{0, 4, 8, 12, 20};
+    settings.dim_brightness = next_value(settings.dim_brightness, values);
+    if (settings.dim_brightness >= settings.active_brightness) settings.dim_brightness = 0;
+    nightglass::services::power_service().update_settings(settings);
+    self->refresh_settings_labels();
+}
+
+void Shell::dim_after_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::power_service().snapshot().settings;
+    constexpr std::uint16_t values[]{10, 15, 30, 60, 120};
+    settings.dim_after_seconds = next_value(settings.dim_after_seconds, values);
+    if (settings.blank_after_seconds <= settings.dim_after_seconds) {
+        settings.blank_after_seconds = settings.dim_after_seconds + 30;
+    }
+    nightglass::services::power_service().update_settings(settings);
+    self->refresh_settings_labels();
+}
+
+void Shell::blank_after_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::power_service().snapshot().settings;
+    constexpr std::uint16_t values[]{20, 30, 60, 120, 300};
+    settings.blank_after_seconds = next_value(settings.blank_after_seconds, values);
+    if (settings.blank_after_seconds <= settings.dim_after_seconds) {
+        settings.blank_after_seconds = settings.dim_after_seconds + 15;
+    }
+    nightglass::services::power_service().update_settings(settings);
+    self->refresh_settings_labels();
+}
+
+void Shell::sleep_after_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::power_service().snapshot().settings;
+    constexpr std::uint16_t values[]{0, 5, 15, 30, 60};
+    settings.sleep_after_blank_seconds = next_value(settings.sleep_after_blank_seconds, values);
+    nightglass::services::power_service().update_settings(settings);
+    self->refresh_settings_labels();
 }
 
 void Shell::diagnostics_callback(lv_event_t *event) {
@@ -224,6 +297,9 @@ void Shell::render_route() {
             break;
         case nightglass::core::Route::launcher:
             render_launcher();
+            break;
+        case nightglass::core::Route::settings:
+            render_settings();
             break;
         case nightglass::core::Route::diagnostics:
             render_diagnostics();
@@ -271,23 +347,63 @@ void Shell::render_home() {
 void Shell::render_launcher() {
     add_header(content_host_, "APPS", back_callback, this);
 
-    make_button(content_host_, kSafeInset, 112, kSafeContentWidth, 76, "DIAGNOSTICS",
+    make_button(content_host_, kSafeInset, 112, kSafeContentWidth, 76, "SETTINGS",
+                kSurface, kPrimary, settings_callback, this);
+    make_button(content_host_, kSafeInset, 210, kSafeContentWidth, 76, "DIAGNOSTICS",
                 kSurface, kPrimary, diagnostics_callback, this);
-    auto *diagnostics_hint = label(content_host_, "Live board telemetry", &lv_font_montserrat_14,
-                                   kSecondary);
-    lv_obj_set_pos(diagnostics_hint, 50, 168);
-
-    make_button(content_host_, kSafeInset, 212, kSafeContentWidth, 76, "ABOUT", kSurface,
+    make_button(content_host_, kSafeInset, 308, kSafeContentWidth, 76, "ABOUT", kSurface,
                 kPrimary, about_callback, this);
-    auto *about_hint = label(content_host_, "System and hardware identity",
-                             &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(about_hint, 50, 268);
 
     auto *note = label(content_host_, "Only installed features are listed.",
                        &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(note, kSafeInset, 424);
     lv_obj_set_width(note, kSafeContentWidth);
     lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+void Shell::render_settings() {
+    add_header(content_host_, "SETTINGS", back_callback, this);
+    auto *scroller = lv_obj_create(content_host_);
+    lv_obj_set_size(scroller, kSafeContentWidth, kSafeBottom - 100);
+    lv_obj_set_pos(scroller, kSafeInset, 96);
+    lv_obj_set_style_bg_opa(scroller, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(scroller, 0, 0);
+    lv_obj_set_style_pad_all(scroller, 4, 0);
+    lv_obj_set_scroll_dir(scroller, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(scroller, LV_SCROLLBAR_MODE_ACTIVE);
+
+    setting_active_ = make_button(scroller, 0, 0, kSafeContentWidth - 16, 64, "", kSurface,
+                                  kPrimary, active_brightness_callback, this);
+    setting_dim_ = make_button(scroller, 0, 74, kSafeContentWidth - 16, 64, "", kSurface,
+                               kPrimary, dim_brightness_callback, this);
+    setting_dim_after_ = make_button(scroller, 0, 148, kSafeContentWidth - 16, 64, "", kSurface,
+                                     kPrimary, dim_after_callback, this);
+    setting_blank_after_ = make_button(scroller, 0, 222, kSafeContentWidth - 16, 64, "", kSurface,
+                                       kPrimary, blank_after_callback, this);
+    setting_sleep_after_ = make_button(scroller, 0, 296, kSafeContentWidth - 16, 64, "", kSurface,
+                                       kPrimary, sleep_after_callback, this);
+    refresh_settings_labels();
+}
+
+void Shell::refresh_settings_labels() {
+    if (!setting_active_) return;
+    const auto settings = nightglass::services::power_service().snapshot().settings;
+    char text[64]{};
+    std::snprintf(text, sizeof(text), "ACTIVE BRIGHTNESS · %u%%", settings.active_brightness);
+    set_button_text(setting_active_, text);
+    std::snprintf(text, sizeof(text), "DIM BRIGHTNESS · %u%%", settings.dim_brightness);
+    set_button_text(setting_dim_, text);
+    std::snprintf(text, sizeof(text), "DIM AFTER · %u SEC", settings.dim_after_seconds);
+    set_button_text(setting_dim_after_, text);
+    std::snprintf(text, sizeof(text), "SCREEN OFF · %u SEC", settings.blank_after_seconds);
+    set_button_text(setting_blank_after_, text);
+    if (settings.sleep_after_blank_seconds == 0) {
+        set_button_text(setting_sleep_after_, "LIGHT SLEEP · OFF");
+    } else {
+        std::snprintf(text, sizeof(text), "LIGHT SLEEP · +%u SEC",
+                      settings.sleep_after_blank_seconds);
+        set_button_text(setting_sleep_after_, text);
+    }
 }
 
 void Shell::render_diagnostics() {
@@ -364,6 +480,7 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::diagnostics:
             refresh_diagnostics();
             break;
+        case nightglass::core::Route::settings:
         case nightglass::core::Route::launcher:
         case nightglass::core::Route::about:
             break;
@@ -541,6 +658,11 @@ void Shell::clear_route_objects() {
     diagnostics_motion_detail_ = nullptr;
     diagnostics_haptic_state_ = nullptr;
     diagnostics_haptic_detail_ = nullptr;
+    setting_active_ = nullptr;
+    setting_dim_ = nullptr;
+    setting_dim_after_ = nullptr;
+    setting_blank_after_ = nullptr;
+    setting_sleep_after_ = nullptr;
 }
 
 Shell &shell() { return instance; }

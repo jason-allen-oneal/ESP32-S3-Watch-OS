@@ -18,6 +18,12 @@ private:
     static void input_callback(lv_event_t *event);
     static void back_callback(lv_event_t *event);
     static void launcher_callback(lv_event_t *event);
+    static void settings_callback(lv_event_t *event);
+    static void active_brightness_callback(lv_event_t *event);
+    static void dim_brightness_callback(lv_event_t *event);
+    static void dim_after_callback(lv_event_t *event);
+    static void blank_after_callback(lv_event_t *event);
+    static void sleep_after_callback(lv_event_t *event);
     static void diagnostics_callback(lv_event_t *event);
     static void about_callback(lv_event_t *event);
 
@@ -25,6 +31,7 @@ private:
     void render_route();
     void render_home();
     void render_launcher();
+    void render_settings();
     void render_diagnostics();
     void render_about();
     void configure_refresh_timer(std::uint32_t period_ms);
@@ -32,6 +39,7 @@ private:
     void refresh_home();
     void refresh_diagnostics();
     void clear_route_objects();
+    void refresh_settings_labels();
 
     nightglass::core::NavigationState navigation_{};
     lv_obj_t *screen_{nullptr};
@@ -39,6 +47,13 @@ private:
     lv_obj_t *overlay_layer_{nullptr};
     lv_indev_t *touch_input_{nullptr};
     lv_timer_t *timer_{nullptr};
+
+    // Settings route widgets.
+    lv_obj_t *setting_active_{nullptr};
+    lv_obj_t *setting_dim_{nullptr};
+    lv_obj_t *setting_dim_after_{nullptr};
+    lv_obj_t *setting_blank_after_{nullptr};
+    lv_obj_t *setting_sleep_after_{nullptr};
 
     // Home route widgets.
     lv_obj_t *home_time_{nullptr};

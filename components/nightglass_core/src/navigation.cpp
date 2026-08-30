@@ -23,6 +23,10 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
             state.route = Route::launcher;
             state.overlay = Overlay::none;
             break;
+        case NavigationAction::open_settings:
+            state.route = Route::settings;
+            state.overlay = Overlay::none;
+            break;
         case NavigationAction::open_diagnostics:
             state.route = Route::diagnostics;
             state.overlay = Overlay::none;

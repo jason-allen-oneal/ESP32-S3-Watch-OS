@@ -7,6 +7,7 @@ namespace nightglass::core {
 enum class Route : std::uint8_t {
     home,
     launcher,
+    settings,
     diagnostics,
     about,
 };
@@ -20,6 +21,7 @@ enum class NavigationAction : std::uint8_t {
     back,
     home,
     open_launcher,
+    open_settings,
     open_diagnostics,
     open_about,
     show_system_modal,
