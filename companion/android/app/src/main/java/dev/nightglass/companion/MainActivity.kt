@@ -39,8 +39,8 @@ class MainActivity : AppCompatActivity() {
             try {
                 val lat = ((latitude.text.toString().toDouble()) * 1_000_000).toInt()
                 val lon = ((longitude.text.toString().toDouble()) * 1_000_000).toInt()
-                val wifiQueued = NightglassConnectionService.send(this, NightglassProtocol.provisionWifi(ssid.text.toString(), secret))
-                val weatherQueued = NightglassConnectionService.send(this, NightglassProtocol.configureWeather(true, true, metric.isChecked, refresh.text.toString().toInt(), lat, lon))
+                val wifiQueued = NightglassConnectionService.send(this@MainActivity, NightglassProtocol.provisionWifi(ssid.text.toString(), secret))
+                val weatherQueued = NightglassConnectionService.send(this@MainActivity, NightglassProtocol.configureWeather(true, true, metric.isChecked, refresh.text.toString().toInt(), lat, lon))
                 Toast.makeText(this@MainActivity, if (wifiQueued && weatherQueued) "Wi-Fi and weather settings queued" else "Unable to start Nightglass link", Toast.LENGTH_SHORT).show()
             } catch (_: Exception) { Toast.makeText(this@MainActivity, "Check network name and coordinates", Toast.LENGTH_LONG).show() }
             finally { secret.fill('\u0000'); password.text?.clear() }

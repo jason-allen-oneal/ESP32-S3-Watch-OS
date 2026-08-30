@@ -43,7 +43,7 @@ class NightglassConnectionService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED || !hasConnectPermissions()) return
             val device = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java) else @Suppress("DEPRECATION") intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-            if (device?.address == gatt?.device?.address && device.bondState == BluetoothDevice.BOND_BONDED) gatt?.requestMtu(247)
+            if (device != null && device.address == gatt?.device?.address && device.bondState == BluetoothDevice.BOND_BONDED) gatt?.requestMtu(247)
         }
     }
     override fun onCreate() { super.onCreate(); current = this; createChannel(); ContextCompat.registerReceiver(this, bondReceiver, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED), ContextCompat.RECEIVER_EXPORTED) }
