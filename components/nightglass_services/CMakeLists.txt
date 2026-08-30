@@ -1,5 +1,6 @@
 idf_component_register(
-    SRCS "src/gyro_processor.cpp" "src/hardware.cpp" "src/power.cpp"
+    SRCS "src/activity.cpp" "src/activity_day.cpp" "src/activity_processor.cpp"
+         "src/gyro_processor.cpp" "src/hardware.cpp" "src/power.cpp"
          "src/time_math.cpp" "src/clock.cpp" "src/watchface.cpp"
          "src/watchface_schema.cpp"
     INCLUDE_DIRS "include"

@@ -3,6 +3,7 @@
 
 #include "nightglass/bsp/board.hpp"
 #include "nightglass/core/health.hpp"
+#include "nightglass/services/activity.hpp"
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/clock.hpp"
 #include "nightglass/services/power.hpp"
@@ -53,6 +54,11 @@ extern "C" void app_main() {
     const auto clock_status = nightglass::services::clock_service().start();
     if (!clock_status.is_ok()) {
         ESP_LOGW(kTag, "Clock service degraded: %s", clock_status.detail);
+    }
+
+    const auto activity_status = nightglass::services::activity_service().start();
+    if (!activity_status.is_ok()) {
+        ESP_LOGW(kTag, "Activity service degraded: %s", activity_status.detail);
     }
 
     const auto face_status = nightglass::services::watchface_service().start();
