@@ -35,6 +35,19 @@ The launcher defaults to a labeled vertical list with configurable favorites.
 Unavailable hardware-dependent features are disabled with an explanation; they
 never appear as plausible placeholders.
 
+### Current shell slice
+
+The first daily-use shell keeps one LVGL screen alive and swaps route content
+inside a system-owned host. Home shows live RTC time/date, battery state, and
+the motion heuristic. Its launcher lists only the installed Diagnostics and
+About routes. Both routes provide a 56 px touch Back control; Diagnostics uses
+a safe-area scroller and runs its 100 ms refresh timer only while visible. A
+separate system overlay layer is reserved for future modal UI.
+
+Quick Settings, notifications, glance tiles, edge gestures, and side-button
+navigation remain roadmap behavior until their services and input contracts
+exist. They are not represented by inactive or misleading controls.
+
 ## Design tokens
 
 - Background `#000000`

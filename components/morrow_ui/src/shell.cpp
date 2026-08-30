@@ -14,21 +14,22 @@ Shell instance;
 
 constexpr std::uint32_t kVoid = 0x000000;
 constexpr std::uint32_t kSurface = 0x0B0D12;
+constexpr std::uint32_t kElevated = 0x141824;
 constexpr std::uint32_t kDivider = 0x272D3A;
 constexpr std::uint32_t kPrimary = 0xF4F6FA;
 constexpr std::uint32_t kSecondary = 0xA2ABBA;
 constexpr std::uint32_t kCyan = 0x63DDE4;
+constexpr std::uint32_t kViolet = 0xA78BFA;
 constexpr std::uint32_t kGreen = 0x50D890;
 constexpr std::uint32_t kAmber = 0xFFB454;
-constexpr std::uint32_t kRed = 0xFF5C70;
+constexpr std::uint32_t kRed = 0xFF6174;
+
 constexpr int kPanelWidth = 410;
 constexpr int kPanelHeight = 502;
-// The glass is rectangular, but the visible panel corners are rounded. Keep
-// persistent text and controls inside this conservative interaction-safe area.
-constexpr int kSafeInsetX = 28;
-constexpr int kSafeInsetTop = 28;
-constexpr int kSafeInsetBottom = 28;
-constexpr int kSafeContentWidth = kPanelWidth - (2 * kSafeInsetX);
+constexpr int kSafeInset = 28;
+constexpr int kSafeRight = kPanelWidth - kSafeInset;
+constexpr int kSafeBottom = kPanelHeight - kSafeInset;
+constexpr int kSafeContentWidth = kPanelWidth - (2 * kSafeInset);
 
 lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
                 std::uint32_t color) {
@@ -39,265 +40,465 @@ lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
     return obj;
 }
 
-lv_obj_t *card(lv_obj_t *parent, int y, int height) {
+void set_state(lv_obj_t *target, const char *text, std::uint32_t color) {
+    if (!target) return;
+    lv_label_set_text(target, text);
+    lv_obj_set_style_text_color(target, lv_color_hex(color), 0);
+}
+
+lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int width, int height,
+                      const char *text, std::uint32_t background,
+                      std::uint32_t foreground, lv_event_cb_t callback,
+                      void *user_data) {
+    auto *button = lv_button_create(parent);
+    lv_obj_set_size(button, width, height);
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_style_radius(button, 14, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(background), 0);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(button, 0, 0);
+    lv_obj_set_style_shadow_width(button, 0, 0);
+    lv_obj_set_style_bg_color(button,
+                              lv_color_hex(background == kCyan ? kViolet : kElevated),
+                              LV_STATE_PRESSED);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
+
+    auto *button_label = label(button, text, &lv_font_montserrat_18, foreground);
+    lv_obj_center(button_label);
+    return button;
+}
+
+void add_header(lv_obj_t *parent, const char *title, lv_event_cb_t back_callback,
+                void *user_data) {
+    make_button(parent, kSafeInset, kSafeInset, 56, 56, "<", kSurface, kPrimary,
+                back_callback, user_data);
+    auto *heading = label(parent, title, &lv_font_montserrat_26, kPrimary);
+    lv_obj_set_pos(heading, 100, 39);
+    lv_obj_set_width(heading, kSafeRight - 100);
+    lv_label_set_long_mode(heading, LV_LABEL_LONG_MODE_DOTS);
+}
+
+lv_obj_t *make_route_card(lv_obj_t *parent, int y, int height) {
     auto *obj = lv_obj_create(parent);
     lv_obj_set_size(obj, kSafeContentWidth, height);
-    lv_obj_set_pos(obj, kSafeInsetX, y);
-    lv_obj_set_style_radius(obj, 12, 0);
+    lv_obj_set_pos(obj, kSafeInset, y);
+    lv_obj_set_style_radius(obj, 16, 0);
     lv_obj_set_style_bg_color(obj, lv_color_hex(kSurface), 0);
     lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(obj, lv_color_hex(kDivider), 0);
     lv_obj_set_style_border_width(obj, 1, 0);
-    lv_obj_set_style_pad_all(obj, 12, 0);
-    lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_pad_all(obj, 16, 0);
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     return obj;
 }
 
-void set_state(lv_obj_t *target, const char *text, std::uint32_t color) {
-    lv_label_set_text(target, text);
-    lv_obj_set_style_text_color(target, lv_color_hex(color), 0);
+lv_obj_t *make_diagnostic_card(lv_obj_t *parent, int height, const char *title,
+                               lv_obj_t **state, lv_obj_t **detail) {
+    auto *obj = lv_obj_create(parent);
+    lv_obj_set_size(obj, kSafeContentWidth - 8, height);
+    lv_obj_set_style_radius(obj, 14, 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(kSurface), 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(kDivider), 0);
+    lv_obj_set_style_border_width(obj, 1, 0);
+    lv_obj_set_style_pad_all(obj, 14, 0);
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+
+    auto *heading = label(obj, title, &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(heading, 0, 0);
+    *state = label(obj, "WAIT", &lv_font_montserrat_14, kAmber);
+    lv_obj_align(*state, LV_ALIGN_TOP_RIGHT, 0, 0);
+    *detail = label(obj, "Awaiting first sample", &lv_font_montserrat_16, kPrimary);
+    lv_obj_set_pos(*detail, 0, 28);
+    lv_obj_set_width(*detail, kSafeContentWidth - 44);
+    lv_label_set_long_mode(*detail, LV_LABEL_LONG_MODE_WRAP);
+    return obj;
 }
 }  // namespace
 
 morrow::core::Status Shell::start() {
     if (screen_) return morrow::core::Status::Ok();
 
-    auto *screen = lv_obj_create(nullptr);
-    screen_ = screen;
-    lv_obj_remove_style_all(screen);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(kVoid), 0);
-    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    screen_ = lv_obj_create(nullptr);
+    lv_obj_remove_style_all(screen_);
+    lv_obj_set_style_bg_color(screen_, lv_color_hex(kVoid), 0);
+    lv_obj_set_style_bg_opa(screen_, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(screen_, LV_OBJ_FLAG_SCROLLABLE);
 
-    auto *title = label(screen, "HARDWARE", &lv_font_montserrat_26, kPrimary);
-    lv_obj_set_pos(title, kSafeInsetX, kSafeInsetTop);
-    auto *subtitle = label(screen, "LIVE DIAGNOSTICS", &lv_font_montserrat_14, kCyan);
-    lv_obj_align(subtitle, LV_ALIGN_TOP_RIGHT, -kSafeInsetX, kSafeInsetTop + 7);
+    content_host_ = lv_obj_create(screen_);
+    lv_obj_remove_style_all(content_host_);
+    lv_obj_set_size(content_host_, kPanelWidth, kPanelHeight);
+    lv_obj_set_pos(content_host_, 0, 0);
+    lv_obj_remove_flag(content_host_, LV_OBJ_FLAG_SCROLLABLE);
 
-    auto *rtc = card(screen, 72, 76);
-    auto *rtc_title = label(rtc, "RTC", &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(rtc_title, 0, -2);
-    rtc_status_ = label(rtc, "WAIT", &lv_font_montserrat_14, kAmber);
-    lv_obj_align(rtc_status_, LV_ALIGN_TOP_RIGHT, 0, -2);
-    rtc_time_ = label(rtc, "--:--:--", &lv_font_montserrat_26, kPrimary);
-    lv_obj_set_pos(rtc_time_, 0, 18);
-    rtc_detail_ = label(rtc, "PCF85063 · awaiting first read", &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(rtc_detail_, 152, 24);
-    lv_obj_set_width(rtc_detail_, 192);
-    lv_label_set_long_mode(rtc_detail_, LV_LABEL_LONG_MODE_DOTS);
+    // Reserved system-owned layer. Future modals render here without replacing
+    // the persistent screen or allowing applications to cover system chrome.
+    overlay_layer_ = lv_obj_create(screen_);
+    lv_obj_remove_style_all(overlay_layer_);
+    lv_obj_set_size(overlay_layer_, kPanelWidth, kPanelHeight);
+    lv_obj_set_pos(overlay_layer_, 0, 0);
+    lv_obj_add_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
 
-    auto *battery = card(screen, 156, 110);
-    auto *battery_title = label(battery, "BATTERY", &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(battery_title, 0, -2);
-    battery_status_ = label(battery, "WAIT", &lv_font_montserrat_14, kAmber);
-    lv_obj_align(battery_status_, LV_ALIGN_TOP_RIGHT, 0, -2);
-    battery_percent_ = label(battery, "--%", &lv_font_montserrat_32, kPrimary);
-    lv_obj_set_pos(battery_percent_, 0, 20);
-    battery_voltage_ = label(battery, "-.-- V", &lv_font_montserrat_20, kPrimary);
-    lv_obj_align(battery_voltage_, LV_ALIGN_TOP_RIGHT, 0, 28);
-    battery_bar_ = lv_bar_create(battery);
-    lv_obj_set_size(battery_bar_, kSafeContentWidth - 24, 7);
-    lv_obj_set_pos(battery_bar_, 0, 58);
-    lv_bar_set_range(battery_bar_, 0, 100);
-    lv_bar_set_value(battery_bar_, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(battery_bar_, lv_color_hex(kDivider), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(battery_bar_, lv_color_hex(kCyan), LV_PART_INDICATOR);
-    battery_detail_ = label(battery, "AXP2101 · awaiting first read", &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(battery_detail_, 0, 72);
-
-    auto *motion = card(screen, 274, 120);
-    auto *motion_title = label(motion, "MOTION", &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(motion_title, 0, -2);
-    motion_status_ = label(motion, "WAIT", &lv_font_montserrat_14, kAmber);
-    lv_obj_align(motion_status_, LV_ALIGN_TOP_RIGHT, 0, -2);
-    motion_state_ = label(motion, "Unknown", &lv_font_montserrat_20, kPrimary);
-    lv_obj_set_pos(motion_state_, 0, 20);
-    motion_accel_ = label(motion, "ACC g  X --.--  Y --.--  Z --.--", &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(motion_accel_, 0, 53);
-    motion_gyro_ = label(motion, "GYR d/s X --.-   Y --.-   Z --.-", &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(motion_gyro_, 0, 77);
-
-    auto *button = lv_button_create(screen);
-    haptic_button_ = button;
-    lv_obj_set_size(button, kSafeContentWidth, 62);
-    lv_obj_set_pos(button, kSafeInsetX,
-                   kPanelHeight - kSafeInsetBottom - 62 - 6);
-    lv_obj_set_style_radius(button, 12, 0);
-    lv_obj_set_style_bg_color(button, lv_color_hex(kCyan), 0);
-    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
-    lv_obj_add_event_cb(button, haptic_callback, LV_EVENT_CLICKED, this);
-    haptic_primary_ = label(button, "TEST HAPTIC", &lv_font_montserrat_18, kVoid);
-    lv_obj_set_pos(haptic_primary_, 12, 5);
-    haptic_result_ = label(button, "Physical response unverified", &lv_font_montserrat_14, kVoid);
-    lv_obj_set_pos(haptic_result_, 12, 31);
-
-    lv_screen_load(screen);
-    timer_ = lv_timer_create(timer_callback, 100, this);
-    refresh();
+    navigation_ = {};
+    render_route();
+    lv_screen_load(screen_);
     return morrow::core::Status::Ok();
 }
 
 void Shell::stop() {
+    configure_refresh_timer(0);
+    if (screen_) {
+        lv_obj_delete(screen_);
+    }
+    screen_ = nullptr;
+    content_host_ = nullptr;
+    overlay_layer_ = nullptr;
+    clear_route_objects();
+    navigation_ = {};
+}
+
+void Shell::timer_callback(lv_timer_t *timer) {
+    static_cast<Shell *>(lv_timer_get_user_data(timer))->refresh_active_route();
+}
+
+void Shell::back_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        morrow::core::NavigationAction::back);
+}
+
+void Shell::launcher_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        morrow::core::NavigationAction::open_launcher);
+}
+
+void Shell::diagnostics_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        morrow::core::NavigationAction::open_diagnostics);
+}
+
+void Shell::about_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        morrow::core::NavigationAction::open_about);
+}
+
+void Shell::navigate(morrow::core::NavigationAction action) {
+    const auto next = morrow::core::reduce_navigation(navigation_, action);
+    if (next == navigation_) return;
+    navigation_ = next;
+    render_route();
+}
+
+void Shell::render_route() {
+    configure_refresh_timer(0);
+    clear_route_objects();
+    lv_obj_clean(content_host_);
+
+    switch (navigation_.route) {
+        case morrow::core::Route::home:
+            render_home();
+            break;
+        case morrow::core::Route::launcher:
+            render_launcher();
+            break;
+        case morrow::core::Route::diagnostics:
+            render_diagnostics();
+            break;
+        case morrow::core::Route::about:
+            render_about();
+            break;
+    }
+}
+
+void Shell::render_home() {
+    auto *brand = label(content_host_, "MORROW", &lv_font_montserrat_16, kCyan);
+    lv_obj_set_pos(brand, kSafeInset, 36);
+
+    home_battery_ = label(content_host_, "BATTERY --", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(home_battery_, 252, 36);
+    lv_obj_set_width(home_battery_, kSafeRight - 252);
+    lv_obj_set_style_text_align(home_battery_, LV_TEXT_ALIGN_RIGHT, 0);
+
+    home_time_ = label(content_host_, "--:--", &lv_font_montserrat_48, kPrimary);
+    lv_obj_set_pos(home_time_, kSafeInset, 100);
+    home_time_state_ = label(content_host_, "TIME UNAVAILABLE", &lv_font_montserrat_14, kRed);
+    lv_obj_set_pos(home_time_state_, kSafeInset, 166);
+    home_date_ = label(content_host_, "DATE UNAVAILABLE", &lv_font_montserrat_20, kSecondary);
+    lv_obj_set_pos(home_date_, kSafeInset, 194);
+
+    auto *status_card = make_route_card(content_host_, 246, 116);
+    auto *glance = label(status_card, "AT A GLANCE", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(glance, 0, 0);
+    home_motion_ = label(status_card, "MOTION · UNAVAILABLE", &lv_font_montserrat_20, kPrimary);
+    lv_obj_set_pos(home_motion_, 0, 29);
+    home_battery_detail_ = label(status_card, "Battery data unavailable", &lv_font_montserrat_14,
+                                 kSecondary);
+    lv_obj_set_pos(home_battery_detail_, 0, 67);
+    lv_obj_set_width(home_battery_detail_, kSafeContentWidth - 32);
+    lv_label_set_long_mode(home_battery_detail_, LV_LABEL_LONG_MODE_DOTS);
+
+    make_button(content_host_, kSafeInset, 390, kSafeContentWidth, 70, "APPS", kCyan, kVoid,
+                launcher_callback, this);
+
+    configure_refresh_timer(1000);
+    refresh_home();
+}
+
+void Shell::render_launcher() {
+    add_header(content_host_, "APPS", back_callback, this);
+
+    make_button(content_host_, kSafeInset, 112, kSafeContentWidth, 76, "DIAGNOSTICS",
+                kSurface, kPrimary, diagnostics_callback, this);
+    auto *diagnostics_hint = label(content_host_, "Live board telemetry", &lv_font_montserrat_14,
+                                   kSecondary);
+    lv_obj_set_pos(diagnostics_hint, 50, 168);
+
+    make_button(content_host_, kSafeInset, 212, kSafeContentWidth, 76, "ABOUT", kSurface,
+                kPrimary, about_callback, this);
+    auto *about_hint = label(content_host_, "System and hardware identity",
+                             &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(about_hint, 50, 268);
+
+    auto *note = label(content_host_, "Only installed features are listed.",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, kSafeInset, 424);
+    lv_obj_set_width(note, kSafeContentWidth);
+    lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+void Shell::render_diagnostics() {
+    add_header(content_host_, "DIAGNOSTICS", back_callback, this);
+
+    auto *scroller = lv_obj_create(content_host_);
+    lv_obj_set_size(scroller, kSafeContentWidth, kSafeBottom - 100);
+    lv_obj_set_pos(scroller, kSafeInset, 96);
+    lv_obj_set_style_bg_opa(scroller, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(scroller, 0, 0);
+    lv_obj_set_style_pad_all(scroller, 0, 0);
+    lv_obj_set_style_pad_row(scroller, 10, 0);
+    lv_obj_set_scroll_dir(scroller, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(scroller, LV_SCROLLBAR_MODE_ACTIVE);
+    lv_obj_set_style_bg_color(scroller, lv_color_hex(kDivider), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(scroller, LV_OPA_70, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(scroller, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(scroller, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+
+    make_diagnostic_card(scroller, 106, "RTC · PCF85063", &diagnostics_rtc_state_,
+                         &diagnostics_rtc_detail_);
+    make_diagnostic_card(scroller, 126, "POWER · AXP2101", &diagnostics_battery_state_,
+                         &diagnostics_battery_detail_);
+    make_diagnostic_card(scroller, 152, "MOTION · QMI8658", &diagnostics_motion_state_,
+                         &diagnostics_motion_detail_);
+    make_diagnostic_card(scroller, 116, "HAPTIC · GPIO18", &diagnostics_haptic_state_,
+                         &diagnostics_haptic_detail_);
+
+    // High-rate board refresh belongs exclusively to this active route.
+    configure_refresh_timer(100);
+    refresh_diagnostics();
+}
+
+void Shell::render_about() {
+    add_header(content_host_, "ABOUT", back_callback, this);
+
+    auto *identity = make_route_card(content_host_, 112, 142);
+    auto *name = label(identity, "MorrowOS", &lv_font_montserrat_32, kPrimary);
+    lv_obj_set_pos(name, 0, 0);
+    auto *kind = label(identity, "Native watch system", &lv_font_montserrat_16, kCyan);
+    lv_obj_set_pos(kind, 0, 44);
+    auto *version = label(identity, "ESP-IDF 5.5.5 · LVGL 9.5", &lv_font_montserrat_14,
+                          kSecondary);
+    lv_obj_set_pos(version, 0, 78);
+
+    auto *hardware = make_route_card(content_host_, 270, 154);
+    auto *heading = label(hardware, "HARDWARE", &lv_font_montserrat_14, kViolet);
+    lv_obj_set_pos(heading, 0, 0);
+    auto *detail = label(hardware,
+                         "ESP32-S3 · 8 MB PSRAM\n32 MB flash · 410 x 502 AMOLED\n"
+                         "Waveshare Touch AMOLED 2.06",
+                         &lv_font_montserrat_16, kPrimary);
+    lv_obj_set_pos(detail, 0, 29);
+    lv_obj_set_width(detail, kSafeContentWidth - 32);
+    lv_obj_set_style_text_line_space(detail, 8, 0);
+}
+
+void Shell::configure_refresh_timer(std::uint32_t period_ms) {
     if (timer_) {
         lv_timer_delete(timer_);
         timer_ = nullptr;
     }
-    if (screen_) {
-        lv_obj_delete(screen_);
-        screen_ = nullptr;
-    }
-    rtc_time_ = rtc_status_ = rtc_detail_ = nullptr;
-    battery_percent_ = battery_voltage_ = battery_status_ = battery_detail_ = nullptr;
-    battery_bar_ = nullptr;
-    motion_state_ = motion_status_ = motion_accel_ = motion_gyro_ = nullptr;
-    haptic_button_ = haptic_primary_ = haptic_result_ = nullptr;
-    haptic_waiting_ = false;
-}
-
-void Shell::timer_callback(lv_timer_t *timer) {
-    static_cast<Shell *>(lv_timer_get_user_data(timer))->refresh();
-}
-
-void Shell::haptic_callback(lv_event_t *event) {
-    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    if (!self->haptic_button_ || lv_obj_has_state(self->haptic_button_, LV_STATE_DISABLED)) return;
-    if (morrow::services::hardware_service().request_haptic(200)) {
-        self->haptic_waiting_ = true;
-        lv_obj_add_state(self->haptic_button_, LV_STATE_DISABLED);
-        lv_label_set_text(self->haptic_primary_, "PULSE QUEUED");
-        set_state(self->haptic_result_, "Waiting for hardware acceptance", kAmber);
-    } else {
-        set_state(self->haptic_result_, "Pulse unavailable or rate limited", kRed);
+    if (period_ms > 0) {
+        timer_ = lv_timer_create(timer_callback, period_ms, this);
     }
 }
 
-void Shell::refresh() {
+void Shell::refresh_active_route() {
+    switch (navigation_.route) {
+        case morrow::core::Route::home:
+            refresh_home();
+            break;
+        case morrow::core::Route::diagnostics:
+            refresh_diagnostics();
+            break;
+        case morrow::core::Route::launcher:
+        case morrow::core::Route::about:
+            break;
+    }
+}
+
+void Shell::refresh_home() {
+    if (!home_time_) return;
     const auto snapshot = morrow::services::hardware_service().snapshot();
     const auto now = esp_timer_get_time();
     char buffer[96]{};
 
     const auto &rtc = snapshot.rtc;
-    if (rtc.present) {
-        std::snprintf(buffer, sizeof(buffer), "%02u:%02u:%02u", rtc.hour, rtc.minute, rtc.second);
-        lv_label_set_text(rtc_time_, buffer);
-        if (rtc.valid && now - rtc.sampled_at_us > 5'000'000) {
-            lv_label_set_text(rtc_time_, "--:--:--");
-            set_state(rtc_status_, "NO DATA", kRed);
-            lv_label_set_text(rtc_detail_, "RTC updates stopped");
-        } else if (rtc.valid) {
-            set_state(rtc_status_, now - rtc.sampled_at_us > 2'000'000 ? "STALE" : "LIVE",
-                      now - rtc.sampled_at_us > 2'000'000 ? kAmber : kGreen);
-            std::snprintf(buffer, sizeof(buffer), "%04u-%02u-%02u · PCF85063",
-                          rtc.year, rtc.month, rtc.day);
-            lv_label_set_text(rtc_detail_, buffer);
-        } else {
-            set_state(rtc_status_, "CHECK", kAmber);
-            lv_label_set_text(rtc_detail_, "RTC oscillator or date invalid");
-        }
+    const auto rtc_age = now - rtc.sampled_at_us;
+    if (rtc.present && rtc.valid && rtc_age <= 5'000'000) {
+        std::snprintf(buffer, sizeof(buffer), "%02u:%02u", rtc.hour, rtc.minute);
+        lv_label_set_text(home_time_, buffer);
+        std::snprintf(buffer, sizeof(buffer), "%04u-%02u-%02u", rtc.year, rtc.month, rtc.day);
+        lv_label_set_text(home_date_, buffer);
+        set_state(home_time_state_, rtc_age > 2'000'000 ? "TIME STALE" : "RTC · LIVE",
+                  rtc_age > 2'000'000 ? kAmber : kGreen);
     } else {
-        lv_label_set_text(rtc_time_, "--:--:--");
-        set_state(rtc_status_, "NO DATA", kRed);
-        lv_label_set_text(rtc_detail_, "PCF85063 read failed");
+        lv_label_set_text(home_time_, "--:--");
+        lv_label_set_text(home_date_, "DATE UNAVAILABLE");
+        set_state(home_time_state_, "TIME UNAVAILABLE", kRed);
     }
 
     const auto &battery = snapshot.battery;
-    if (battery.pmic_present && now - battery.sampled_at_us > 10'000'000) {
-        lv_label_set_text(battery_percent_, "--%");
-        lv_label_set_text(battery_voltage_, "-.-- V");
-        set_state(battery_status_, "NO DATA", kRed);
-        lv_label_set_text(battery_detail_, "PMIC updates stopped");
-        lv_bar_set_value(battery_bar_, 0, LV_ANIM_OFF);
-    } else if (!battery.pmic_present) {
-        lv_label_set_text(battery_percent_, "--%");
-        lv_label_set_text(battery_voltage_, "-.-- V");
-        set_state(battery_status_, "NO DATA", kRed);
-        lv_label_set_text(battery_detail_, "AXP2101 read failed");
-        lv_bar_set_value(battery_bar_, 0, LV_ANIM_OFF);
-    } else if (!battery.battery_present) {
-        lv_label_set_text(battery_percent_, "--%");
-        lv_label_set_text(battery_voltage_, "-.-- V");
-        set_state(battery_status_, "NO BATTERY", kAmber);
-        lv_label_set_text(battery_detail_, "Battery not detected");
-        lv_bar_set_value(battery_bar_, 0, LV_ANIM_OFF);
-    } else {
-        if (battery.percent_valid) {
-            std::snprintf(buffer, sizeof(buffer), "%u%%", battery.percent);
-            lv_label_set_text(battery_percent_, buffer);
-            lv_bar_set_value(battery_bar_, battery.percent, LV_ANIM_OFF);
-            lv_obj_set_style_text_color(battery_percent_, lv_color_hex(
-                battery.percent <= 10 ? kRed : battery.percent <= 20 ? kAmber : kPrimary), 0);
-        } else {
-            lv_label_set_text(battery_percent_, "--%");
-            lv_bar_set_value(battery_bar_, 0, LV_ANIM_OFF);
-        }
+    const auto battery_age = now - battery.sampled_at_us;
+    if (battery.pmic_present && battery.battery_present && battery.percent_valid &&
+        battery_age <= 10'000'000) {
+        std::snprintf(buffer, sizeof(buffer), "%s%u%%", battery.charging ? "CHG " : "",
+                      battery.percent);
+        lv_label_set_text(home_battery_, buffer);
         if (battery.voltage_valid) {
-            std::snprintf(buffer, sizeof(buffer), "%u.%02u V", battery.voltage_mv / 1000,
-                          (battery.voltage_mv % 1000) / 10);
-            lv_label_set_text(battery_voltage_, buffer);
+            std::snprintf(buffer, sizeof(buffer), "%u.%02u V · %s",
+                          battery.voltage_mv / 1000, (battery.voltage_mv % 1000) / 10,
+                          battery.charging ? "Charging" : battery.discharging ? "Battery"
+                                                                             : "State partial");
+            lv_label_set_text(home_battery_detail_, buffer);
         } else {
-            lv_label_set_text(battery_voltage_, "-.-- V");
+            lv_label_set_text(home_battery_detail_, battery.charging ? "Charging · voltage unavailable"
+                                                                     : "Voltage unavailable");
         }
-        if (now - battery.sampled_at_us > 5'000'000) {
-            set_state(battery_status_, "STALE", kAmber);
-            lv_label_set_text(battery_detail_, "Last PMIC read is stale");
-        } else if (battery.charging) {
-            set_state(battery_status_, "CHARGING", kAmber);
-            lv_label_set_text(battery_detail_, "Charging · PMIC state");
-        } else if (battery.discharging) {
-            set_state(battery_status_, "BATTERY", kGreen);
-            lv_label_set_text(battery_detail_, "Discharging");
-        } else {
-            set_state(battery_status_, "PARTIAL", kAmber);
-            lv_label_set_text(battery_detail_, "Charge state unavailable");
-        }
+        lv_obj_set_style_text_color(home_battery_,
+                                    lv_color_hex(battery.percent <= 10 ? kRed
+                                                 : battery.percent <= 20 ? kAmber
+                                                                         : kSecondary),
+                                    0);
+    } else if (battery.pmic_present && !battery.battery_present) {
+        set_state(home_battery_, "NO BATTERY", kAmber);
+        lv_label_set_text(home_battery_detail_, "Battery not detected");
+    } else {
+        set_state(home_battery_, "BATTERY --", kRed);
+        lv_label_set_text(home_battery_detail_, "Battery data unavailable");
     }
 
     const auto &motion = snapshot.motion;
-    if (!motion.present || !motion.valid || now - motion.sampled_at_us > 2'000'000) {
-        set_state(motion_status_, "NO DATA", kRed);
-        lv_label_set_text(motion_state_, "Unknown");
-        lv_label_set_text(motion_accel_, "ACC g  X --.--  Y --.--  Z --.--");
-        lv_label_set_text(motion_gyro_, "GYR d/s X --.-   Y --.-   Z --.-");
+    const auto motion_age = now - motion.sampled_at_us;
+    if (motion.present && motion.valid && motion_age <= 2'000'000) {
+        set_state(home_motion_, motion.moving ? "MOTION · MOVING" : "MOTION · STILL",
+                  motion_age > 500'000 ? kAmber : motion.moving ? kCyan : kPrimary);
     } else {
-        set_state(motion_status_, now - motion.sampled_at_us > 500'000 ? "STALE" : "LIVE",
-                  now - motion.sampled_at_us > 500'000 ? kAmber : kGreen);
-        lv_label_set_text(motion_state_, motion.moving ? "Moving" : "Still");
-        std::snprintf(buffer, sizeof(buffer), "ACC g  X %+.2f  Y %+.2f  Z %+.2f",
-                      motion.accel_x_g, motion.accel_y_g, motion.accel_z_g);
-        lv_label_set_text(motion_accel_, buffer);
-        std::snprintf(buffer, sizeof(buffer), "GYR d/s X %+.1f  Y %+.1f  Z %+.1f",
-                      motion.gyro_x_dps, motion.gyro_y_dps, motion.gyro_z_dps);
-        lv_label_set_text(motion_gyro_, buffer);
+        set_state(home_motion_, "MOTION · UNAVAILABLE", kRed);
+    }
+}
+
+void Shell::refresh_diagnostics() {
+    if (!diagnostics_rtc_state_) return;
+    const auto snapshot = morrow::services::hardware_service().snapshot();
+    const auto now = esp_timer_get_time();
+    char buffer[192]{};
+
+    const auto &rtc = snapshot.rtc;
+    const auto rtc_age = now - rtc.sampled_at_us;
+    if (rtc.present && rtc.valid && rtc_age <= 5'000'000) {
+        set_state(diagnostics_rtc_state_, rtc_age > 2'000'000 ? "STALE" : "LIVE",
+                  rtc_age > 2'000'000 ? kAmber : kGreen);
+        std::snprintf(buffer, sizeof(buffer), "%02u:%02u:%02u\n%04u-%02u-%02u",
+                      rtc.hour, rtc.minute, rtc.second, rtc.year, rtc.month, rtc.day);
+        lv_label_set_text(diagnostics_rtc_detail_, buffer);
+    } else {
+        set_state(diagnostics_rtc_state_, "NO DATA", kRed);
+        lv_label_set_text(diagnostics_rtc_detail_, rtc.present ? "RTC value invalid or stale"
+                                                               : "RTC read failed");
     }
 
-    if (!snapshot.haptic.actuator_present) {
-        lv_obj_add_state(haptic_button_, LV_STATE_DISABLED);
-        lv_label_set_text(haptic_primary_, "HAPTIC DEFERRED");
-        if (snapshot.haptic.supply_state_known && !snapshot.haptic.supply_enabled) {
-            set_state(haptic_result_, "Actuator not fitted · ALDO3 off", kSecondary);
+    const auto &battery = snapshot.battery;
+    const auto battery_age = now - battery.sampled_at_us;
+    if (!battery.pmic_present || battery_age > 10'000'000) {
+        set_state(diagnostics_battery_state_, "NO DATA", kRed);
+        lv_label_set_text(diagnostics_battery_detail_, "AXP2101 telemetry unavailable");
+    } else if (!battery.battery_present) {
+        set_state(diagnostics_battery_state_, "NO BATTERY", kAmber);
+        lv_label_set_text(diagnostics_battery_detail_, "PMIC live · battery not detected");
+    } else {
+        set_state(diagnostics_battery_state_, battery_age > 5'000'000 ? "STALE" : "LIVE",
+                  battery_age > 5'000'000 ? kAmber : kGreen);
+        const char *charge = battery.charging ? "Charging"
+                             : battery.discharging ? "Discharging"
+                                                  : "Charge state partial";
+        if (battery.percent_valid && battery.voltage_valid) {
+            std::snprintf(buffer, sizeof(buffer), "%u%% · %u.%02u V\n%s", battery.percent,
+                          battery.voltage_mv / 1000, (battery.voltage_mv % 1000) / 10, charge);
         } else {
-            set_state(haptic_result_, "Actuator absent · ALDO3 state unverified", kRed);
+            std::snprintf(buffer, sizeof(buffer), "Battery detected\n%s · metrics partial", charge);
         }
-    } else if (!snapshot.haptic.ready) {
-        lv_obj_add_state(haptic_button_, LV_STATE_DISABLED);
-        set_state(haptic_result_, "Haptic service unavailable", kRed);
-    } else if (snapshot.haptic.failed_pulses > observed_failed_pulses_) {
-        observed_failed_pulses_ = snapshot.haptic.failed_pulses;
-        haptic_waiting_ = false;
-        lv_obj_remove_state(haptic_button_, LV_STATE_DISABLED);
-        lv_label_set_text(haptic_primary_, "TEST HAPTIC");
-        set_state(haptic_result_, "Pulse activation failed", kRed);
-    } else if (snapshot.haptic.pulse_active) {
-        lv_label_set_text(haptic_primary_, "PULSE ACTIVE");
-    } else if (snapshot.haptic.accepted_pulses > observed_accepted_pulses_) {
-        observed_accepted_pulses_ = snapshot.haptic.accepted_pulses;
-        haptic_waiting_ = false;
-        lv_obj_remove_state(haptic_button_, LV_STATE_DISABLED);
-        lv_label_set_text(haptic_primary_, "TEST HAPTIC");
-        set_state(haptic_result_, "Pulse sent · confirm response by feel", kAmber);
-    } else if (!haptic_waiting_) {
-        lv_obj_remove_state(haptic_button_, LV_STATE_DISABLED);
+        lv_label_set_text(diagnostics_battery_detail_, buffer);
     }
+
+    const auto &motion = snapshot.motion;
+    const auto motion_age = now - motion.sampled_at_us;
+    if (!motion.present || !motion.valid || motion_age > 2'000'000) {
+        set_state(diagnostics_motion_state_, "NO DATA", kRed);
+        lv_label_set_text(diagnostics_motion_detail_, "QMI8658 sample unavailable");
+    } else {
+        set_state(diagnostics_motion_state_, motion_age > 500'000 ? "STALE" : "LIVE",
+                  motion_age > 500'000 ? kAmber : kGreen);
+        std::snprintf(buffer, sizeof(buffer),
+                      "%s\nACC %+.2f  %+.2f  %+.2f g\nGYR %+.1f  %+.1f  %+.1f d/s",
+                      motion.moving ? "Moving" : "Still", motion.accel_x_g, motion.accel_y_g,
+                      motion.accel_z_g, motion.gyro_x_dps, motion.gyro_y_dps,
+                      motion.gyro_z_dps);
+        lv_label_set_text(diagnostics_motion_detail_, buffer);
+    }
+
+    const auto &haptic = snapshot.haptic;
+    if (!haptic.actuator_present) {
+        set_state(diagnostics_haptic_state_, "DEFERRED", kAmber);
+        if (haptic.supply_state_known && !haptic.supply_enabled) {
+            lv_label_set_text(diagnostics_haptic_detail_,
+                              "No fitted actuator detected\nALDO3 verified off");
+        } else {
+            lv_label_set_text(diagnostics_haptic_detail_,
+                              "No fitted actuator detected\nALDO3 state unverified");
+        }
+    } else if (haptic.ready) {
+        set_state(diagnostics_haptic_state_, "READY", kGreen);
+        lv_label_set_text(diagnostics_haptic_detail_, "Actuator service available");
+    } else {
+        set_state(diagnostics_haptic_state_, "UNAVAILABLE", kRed);
+        lv_label_set_text(diagnostics_haptic_detail_, "Actuator present · service unavailable");
+    }
+}
+
+void Shell::clear_route_objects() {
+    home_time_ = nullptr;
+    home_time_state_ = nullptr;
+    home_date_ = nullptr;
+    home_battery_ = nullptr;
+    home_battery_detail_ = nullptr;
+    home_motion_ = nullptr;
+    diagnostics_rtc_state_ = nullptr;
+    diagnostics_rtc_detail_ = nullptr;
+    diagnostics_battery_state_ = nullptr;
+    diagnostics_battery_detail_ = nullptr;
+    diagnostics_motion_state_ = nullptr;
+    diagnostics_motion_detail_ = nullptr;
+    diagnostics_haptic_state_ = nullptr;
+    diagnostics_haptic_detail_ = nullptr;
 }
 
 Shell &shell() { return instance; }
