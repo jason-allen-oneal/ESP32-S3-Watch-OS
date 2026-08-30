@@ -43,7 +43,8 @@ class NightglassConnectionService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED || !hasConnectPermissions()) return
             val device = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java) else @Suppress("DEPRECATION") intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-            if (device != null && device.address == gatt?.device?.address && device.bondState == BluetoothDevice.BOND_BONDED) gatt?.requestMtu(247)
+            if (device != null && device.address == gatt?.device?.address &&
+                device.bondState == BluetoothDevice.BOND_BONDED) gatt?.requestMtu(247)
         }
     }
     override fun onCreate() { super.onCreate(); current = this; createChannel(); ContextCompat.registerReceiver(this, bondReceiver, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED), ContextCompat.RECEIVER_EXPORTED) }
@@ -64,19 +65,26 @@ class NightglassConnectionService : Service() {
 
     private fun scan() {
         if (!hasConnectPermissions() || !adapter.isEnabled || scanning) return
-        val filter = ScanFilter.Builder().setServiceUuid(android.os.ParcelUuid(NightglassProtocol.SERVICE)).build()
         scanning = true
-        adapter.bluetoothLeScanner?.startScan(listOf(filter), ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCallback)
+        // Some Samsung Bluetooth stacks fail to return custom 128-bit UUID advertisements
+        // through a platform ScanFilter. Scan broadly, then strictly allowlist Nightglass.
+        adapter.bluetoothLeScanner?.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCallback)
         Handler(Looper.getMainLooper()).postDelayed({ if (scanning) { stopScan(); update("Nightglass not found") } }, 15_000)
     }
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(type: Int, result: ScanResult) {
+            val advertisedServices = result.scanRecord?.serviceUuids.orEmpty()
+            val advertisedName = result.scanRecord?.deviceName ?: runCatching { result.device.name }.getOrNull()
+            if (advertisedServices.none { it.uuid == NightglassProtocol.SERVICE } && advertisedName != "Nightglass") return
             stopScan()
-            if (result.device.bondState == BluetoothDevice.BOND_NONE) result.device.createBond()
-            gatt = result.device.connectGatt(this@NightglassConnectionService, false, callback, BluetoothDevice.TRANSPORT_LE)
-            update("Connecting")
+            connect(result.device)
         }
         override fun onScanFailed(errorCode: Int) { scanning = false; update("Bluetooth scan unavailable ($errorCode)") }
+    }
+    private fun connect(device: BluetoothDevice) {
+        closeGatt()
+        gatt = device.connectGatt(this, false, callback, BluetoothDevice.TRANSPORT_LE)
+        update("Connecting")
     }
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(client: BluetoothGatt, status: Int, state: Int) {

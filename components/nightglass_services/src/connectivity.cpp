@@ -8,6 +8,7 @@
 
 #include "esp_log.h"
 #include "host/ble_hs.h"
+#include "host/ble_store.h"
 #include "host/util/util.h"
 #include "nimble/ble.h"
 #include "nimble/nimble_port.h"
@@ -256,6 +257,25 @@ int gap_event(ble_gap_event *event, void *) {
                 outbound_subscribed = event->subscribe.cur_notify != 0;
             }
             return 0;
+        case BLE_GAP_EVENT_REPEAT_PAIRING: {
+            // The peer has forgotten or replaced its keys while Nightglass
+            // still has the previous bond. Delete only that peer's stale bond
+            // and let NimBLE restart secure pairing on the existing link.
+            ble_gap_conn_desc descriptor{};
+            const auto find_result =
+                ble_gap_conn_find(event->repeat_pairing.conn_handle, &descriptor);
+            if (find_result != 0) {
+                ESP_LOGE(kTag, "Unable to resolve repeat-pairing peer: %d", find_result);
+                return BLE_GAP_REPEAT_PAIRING_IGNORE;
+            }
+            const auto delete_result = ble_store_util_delete_peer(&descriptor.peer_id_addr);
+            if (delete_result != 0) {
+                ESP_LOGE(kTag, "Unable to remove stale companion bond: %d", delete_result);
+                return BLE_GAP_REPEAT_PAIRING_IGNORE;
+            }
+            ESP_LOGI(kTag, "Removed stale companion bond; retrying secure pairing");
+            return BLE_GAP_REPEAT_PAIRING_RETRY;
+        }
         case BLE_GAP_EVENT_ADV_COMPLETE:
             if (enabled()) advertise();
             return 0;
