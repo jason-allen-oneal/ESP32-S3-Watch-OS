@@ -1462,11 +1462,14 @@ void Shell::refresh_home() {
                               battery.charging ? "Charging" : battery.discharging ? "Battery"
                                                                                  : "State partial");
             }
-            lv_label_set_text(home_battery_detail_, buffer);
+            if (home_battery_detail_) lv_label_set_text(home_battery_detail_, buffer);
         } else {
-            lv_label_set_text(home_battery_detail_, full_background ? "VOLTAGE N/A"
-                                      : battery.charging ? "Charging | voltage unavailable"
-                                                         : "Voltage unavailable");
+            if (home_battery_detail_) {
+                lv_label_set_text(home_battery_detail_,
+                                  full_background ? "VOLTAGE N/A"
+                                  : battery.charging ? "Charging | voltage unavailable"
+                                                     : "Voltage unavailable");
+            }
         }
         lv_obj_set_style_text_color(home_battery_,
                                     lv_color_hex(battery.percent <= 10 ? kRed
@@ -1476,12 +1479,16 @@ void Shell::refresh_home() {
                                     0);
     } else if (battery.pmic_present && !battery.battery_present) {
         set_state(home_battery_, full_background ? "N/A" : "NO BATTERY", kAmber);
-        lv_label_set_text(home_battery_detail_, full_background ? "NO BATTERY"
-                                                                : "Battery not detected");
+        if (home_battery_detail_) {
+            lv_label_set_text(home_battery_detail_,
+                              full_background ? "NO BATTERY" : "Battery not detected");
+        }
     } else {
         set_state(home_battery_, full_background ? "N/A" : "BATTERY --", kRed);
-        lv_label_set_text(home_battery_detail_, full_background ? "NO DATA"
-                                                                : "Battery data unavailable");
+        if (home_battery_detail_) {
+            lv_label_set_text(home_battery_detail_,
+                              full_background ? "NO DATA" : "Battery data unavailable");
+        }
     }
 
     const auto activity = nightglass::services::activity_service().snapshot();
