@@ -11,6 +11,7 @@
 #include "nightglass/bsp/board.hpp"
 #include "nightglass/core/health.hpp"
 #include "nightglass/services/clock.hpp"
+#include "nightglass/services/network_weather.hpp"
 
 namespace nightglass::services {
 namespace {
@@ -190,10 +191,26 @@ void enter_light_sleep(std::int64_t observed_activity_us) {
         return;
     }
 
+    if (!network_weather_service().prepare_for_light_sleep()) {
+        gpio_wakeup_disable(kTouchInterruptGpio);
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+        gpio_set_intr_type(kTouchInterruptGpio, GPIO_INTR_NEGEDGE);
+        gpio_intr_enable(kTouchInterruptGpio);
+        portENTER_CRITICAL(&snapshot_mux);
+        current.state = nightglass::core::PowerState::screen_blank;
+        current.sleeping = false;
+        ++current.sequence;
+        portEXIT_CRITICAL(&snapshot_mux);
+        nightglass::core::health_registry().set(
+            "power", nightglass::core::HealthState::degraded,
+            "Wi-Fi stop failed; light sleep skipped");
+        return;
+    }
     const auto started_us = esp_timer_get_time();
     ESP_LOGI(kTag, "Entering light sleep");
     const esp_err_t result = esp_light_sleep_start();
     const auto woke_us = esp_timer_get_time();
+    network_weather_service().resume_from_light_sleep();
     const auto cause = esp_sleep_get_wakeup_cause();
     gpio_wakeup_disable(kTouchInterruptGpio);
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);

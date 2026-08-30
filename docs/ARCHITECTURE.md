@@ -34,6 +34,12 @@ audio, SD, and nonessential apps disabled.
 - Storage/logger: coalesced writes, diagnostics, SD operations.
 - Audio task: created only while capturing or playing.
 
+The current network worker is implemented by `NetworkWeatherService`. It owns
+Wi-Fi station lifecycle, credential provisioning, reconnect policy, verified
+HTTPS transport, weather decoding, and last-good cache state. It publishes
+trivially-copyable snapshots; UI code must not call ESP-IDF Wi-Fi or HTTP APIs
+directly. See `docs/NETWORK_WEATHER.md`.
+
 Sensor and audio streams use ring buffers. The event hub carries fixed-size
 state transitions, never high-rate samples or heap-owning callbacks.
 

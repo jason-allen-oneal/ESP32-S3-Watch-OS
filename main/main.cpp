@@ -7,6 +7,7 @@
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/clock.hpp"
 #include "nightglass/services/connectivity.hpp"
+#include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/watchface.hpp"
 #include "nightglass/ui/shell.hpp"
@@ -70,6 +71,11 @@ extern "C" void app_main() {
     const auto connectivity_status = nightglass::services::connectivity_service().start();
     if (!connectivity_status.is_ok()) {
         ESP_LOGW(kTag, "Connectivity service degraded: %s", connectivity_status.detail);
+    }
+
+    const auto network_status = nightglass::services::network_weather_service().start();
+    if (!network_status.is_ok()) {
+        ESP_LOGW(kTag, "Network/weather service degraded: %s", network_status.detail);
     }
 
     if (!board.lock_display(0)) {
