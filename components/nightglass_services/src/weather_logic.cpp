@@ -161,4 +161,19 @@ bool weather_cache_is_usable(WeatherUnits cached_units, WeatherUnits requested_u
                                    ignored_age);
 }
 
+WeatherIcon weather_icon_for_code(std::uint16_t code, bool is_day) {
+    if (code == 0) return is_day ? WeatherIcon::clear_day : WeatherIcon::clear_night;
+    if (code <= 2) return WeatherIcon::partly_cloudy;
+    if (code == 3) return WeatherIcon::cloudy;
+    if (code == 45 || code == 48) return WeatherIcon::fog;
+    if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
+        return WeatherIcon::rain;
+    }
+    if ((code >= 71 && code <= 77) || code == 85 || code == 86) {
+        return WeatherIcon::snow;
+    }
+    if (code >= 95 && code <= 99) return WeatherIcon::storm;
+    return WeatherIcon::cloudy;
+}
+
 }  // namespace nightglass::services

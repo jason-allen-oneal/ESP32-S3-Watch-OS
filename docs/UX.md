@@ -80,13 +80,14 @@ assets, and chrome. They cannot contain executable code, callbacks, filesystem
 paths, arbitrary resources, scripts, or fonts. An invalid package or stored ID
 resolves to the built-in Classic face and cyan shell.
 
-Format 4 is implemented as a built-in manifest registry with persistent NVS
+Format 5 is implemented as a built-in manifest registry with persistent NVS
 selection. Nightglass Classic is the fallback. Revenant Grid v2 adds a
 black/gunmetal shell, acid-green accents and borders, themed pressed states,
 and its compiled background at low opacity behind all non-home routes and alert
 overlays. Semantic healthy, warning, and error colors remain green, amber, and
 red. Its non-overlapping safe-area touch map is declarative package data; the
-shell maps only allowlisted actions to system navigation. External filesystem loading remains deferred until manifest validation
+shell maps only allowlisted actions to system navigation. Declarative weather
+icon fields render bounded native shapes rather than font glyphs. External filesystem loading remains deferred until manifest validation
 and decoded-asset limits are enforced.
 
 ## Release UX gates

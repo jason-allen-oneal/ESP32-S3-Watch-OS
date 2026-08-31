@@ -7,10 +7,11 @@ time_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-time-test.XXXXXX")"
 face_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-face-test.XXXXXX")"
 connectivity_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-connectivity-test.XXXXXX")"
 activity_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-test.XXXXXX")"
+activity_units_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-units-test.XXXXXX")"
 day_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-day-test.XXXXXX")"
 weather_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-weather-test.XXXXXX")"
 navigation_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-navigation-test.XXXXXX")"
-trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${activity_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}"' EXIT
+trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}"' EXIT
 
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
 
@@ -49,6 +50,13 @@ python3 "${project_dir}/scripts/check-runtime-glyphs.py"
   "${project_dir}/tests/activity_processor_test.cpp" \
   -o "${activity_binary}"
 "${activity_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/activity_units.cpp" \
+  "${project_dir}/tests/activity_units_test.cpp" \
+  -o "${activity_units_binary}"
+"${activity_units_binary}"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \

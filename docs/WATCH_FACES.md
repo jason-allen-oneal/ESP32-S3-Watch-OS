@@ -9,7 +9,7 @@ Nightglass Classic is pack ID `0` and the guaranteed fallback. Selection is
 persisted by ID in NVS. An unknown ID, invalid schema, unsupported version, or
 unknown resource resolves to Classic.
 
-## Format 4
+## Format 5
 
 Each built-in `FacePack` declares:
 
@@ -21,6 +21,11 @@ Each built-in `FacePack` declares:
   firmware-known route-background asset, and a bounded opacity;
 - bounded `FaceTextSlot` records for fixed captions and live system fields;
 - bounded `FaceActionSlot` records for firmware-known actions.
+
+Weather packs may declare a `weather_icon` field. The renderer maps validated
+WMO codes to native LVGL geometry for clear day/night, partly cloudy, cloudy,
+fog, rain, snow, and storm states. Icons never depend on font glyph coverage or
+pack-supplied executable drawing code.
 
 Text slots contain a field enum, safe-area rectangle, one of four compiled
 font styles, alignment, and palette role. Fixed captions may contain text;
@@ -54,14 +59,19 @@ The approved full mechanical skull/chassis image is a 410x502 background with
 empty instrument bays. Native LVGL overlays provide:
 
 - battery percentage in the top arc and voltage/charge state in the power bay;
-- a steps bay that explicitly reads `N/A / NO COUNT` because Nightglass has no
-  validated step-counter implementation;
+- live IMU-backed steps and an estimated distance bay using the persisted
+  stride calibration and unit preference;
 - current QMI8658 movement/calibration state in the activity bay (never a fake
   heart-rate value);
 - large local time, RTC availability, day, and date;
-- actual alarm and countdown state;
+- actual alarm state and encrypted phone-link status;
 - pack-owned touch zones for diagnostics, activity, weather, notifications,
-  clock settings, alarm, timer, and Apps, aligned to the visible instrument bays.
+  clock settings, alarm, phone/media, and Apps, aligned to the visible
+  instrument bays. Timer remains available in Launcher.
+
+The activity bay formats distance in the persisted Activity unit preference.
+Fresh installs default to imperial; users can select metric and tune stride in
+inches or metres from Activity settings.
 
 The same pack themes Launcher, Settings, Power, Clock & Region, Watch Face,
 Alarm, Timer, Stopwatch, Diagnostics, About, and system alert overlays. Those

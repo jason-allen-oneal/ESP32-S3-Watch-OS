@@ -11,6 +11,8 @@ constexpr FaceTextSlot kText[]{
      FaceTextAlign::left, FaceColorRole::primary, "SAFE"},
     {FaceField::time, {40, 200, 330, 60}, FaceTextStyle::time_48,
      FaceTextAlign::center, FaceColorRole::accent, nullptr},
+    {FaceField::weather_icon, {300, 100, 50, 50}, FaceTextStyle::caption_14,
+     FaceTextAlign::center, FaceColorRole::accent, nullptr},
 };
 constexpr FaceActionSlot kActions[]{
     {FaceAction::open_apps, {28, 400, 100, 74}},
@@ -21,21 +23,21 @@ FacePack full_pack() {
     return {1,
             "test",
             "Test",
-            4,
+            5,
             FaceLayout::full_background,
-            complication_time,
+            complication_time | complication_weather,
             kPalette,
             FaceAsset::revenant_grid_v2,
             {ChromeTheme::revenant, FaceAsset::revenant_grid_v2, 36},
             kText,
-            2,
+            3,
             kActions,
             2};
 }
 }  // namespace
 
 int main() {
-    const FacePack classic{0, "classic", "Classic", 4, FaceLayout::classic,
+    const FacePack classic{0, "classic", "Classic", 5, FaceLayout::classic,
                            complication_time, kPalette, FaceAsset::none,
                            {ChromeTheme::classic, FaceAsset::none, 0}, nullptr, 0,
                            nullptr, 0};

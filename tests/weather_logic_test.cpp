@@ -67,4 +67,12 @@ int main() {
                                     100, 120, 5));
     assert(!weather_cache_is_usable(WeatherUnits::metric, WeatherUnits::metric,
                                     126, 120, 5));
+    assert(weather_icon_for_code(0, true) == WeatherIcon::clear_day);
+    assert(weather_icon_for_code(0, false) == WeatherIcon::clear_night);
+    assert(weather_icon_for_code(2, true) == WeatherIcon::partly_cloudy);
+    assert(weather_icon_for_code(3, true) == WeatherIcon::cloudy);
+    assert(weather_icon_for_code(45, true) == WeatherIcon::fog);
+    assert(weather_icon_for_code(61, true) == WeatherIcon::rain);
+    assert(weather_icon_for_code(75, true) == WeatherIcon::snow);
+    assert(weather_icon_for_code(95, true) == WeatherIcon::storm);
 }

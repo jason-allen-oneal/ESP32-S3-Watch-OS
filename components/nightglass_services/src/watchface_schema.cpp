@@ -10,7 +10,7 @@ constexpr std::uint16_t kKnownComplications =
     complication_time | complication_date | complication_battery |
     complication_motion | complication_steps | complication_alarm |
     complication_timer | complication_distance | complication_weather |
-    complication_notifications;
+    complication_notifications | complication_connectivity;
 constexpr std::uint8_t kMaxTextSlots = 24;
 constexpr std::uint8_t kMaxActionSlots = 12;
 constexpr std::uint8_t kMaxRouteBackgroundOpacity = 64;
@@ -23,7 +23,7 @@ bool valid_rect(const FaceRect &rect) {
 }
 
 bool valid_field(FaceField field) {
-    return field >= FaceField::fixed_text && field <= FaceField::notifications;
+    return field >= FaceField::fixed_text && field <= FaceField::connectivity;
 }
 
 bool valid_style(FaceTextStyle style) {
@@ -60,9 +60,12 @@ std::uint16_t field_complication(FaceField field) {
         case FaceField::distance:
             return complication_distance;
         case FaceField::weather:
+        case FaceField::weather_icon:
             return complication_weather;
         case FaceField::notifications:
             return complication_notifications;
+        case FaceField::connectivity:
+            return complication_connectivity;
         case FaceField::fixed_text:
             return 0;
     }
@@ -127,7 +130,7 @@ bool valid_action_slot(const FaceActionSlot &slot) {
 
 bool valid_face_pack(const FacePack &pack) {
     if (!pack.slug || !pack.slug[0] || !pack.name || !pack.name[0] ||
-        pack.format_version != 4 || (pack.complications & ~kKnownComplications) != 0 ||
+        pack.format_version != 5 || (pack.complications & ~kKnownComplications) != 0 ||
         !valid_chrome(pack.chrome)) {
         return false;
     }

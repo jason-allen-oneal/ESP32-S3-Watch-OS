@@ -26,6 +26,7 @@ private:
     static void watchface_next_callback(lv_event_t *event);
     static void activity_callback(lv_event_t *event);
     static void activity_stride_callback(lv_event_t *event);
+    static void activity_units_callback(lv_event_t *event);
     static void activity_goal_callback(lv_event_t *event);
     static void activity_reset_callback(lv_event_t *event);
     static void weather_callback(lv_event_t *event);
@@ -122,6 +123,7 @@ private:
     lv_obj_t *activity_steps_{nullptr};
     lv_obj_t *activity_detail_{nullptr};
     lv_obj_t *activity_stride_{nullptr};
+    lv_obj_t *activity_units_{nullptr};
     lv_obj_t *activity_goal_{nullptr};
     lv_obj_t *weather_state_{nullptr};
     lv_obj_t *weather_detail_{nullptr};
@@ -167,8 +169,10 @@ private:
     lv_obj_t *home_steps_{nullptr};
     lv_obj_t *home_alarm_{nullptr};
     lv_obj_t *home_timer_{nullptr};
+    lv_obj_t *home_connectivity_{nullptr};
     lv_obj_t *home_distance_{nullptr};
     lv_obj_t *home_weather_{nullptr};
+    lv_obj_t *home_weather_icon_{nullptr};
     lv_obj_t *home_notifications_{nullptr};
 
     // Diagnostics widgets exist only while that route is active.

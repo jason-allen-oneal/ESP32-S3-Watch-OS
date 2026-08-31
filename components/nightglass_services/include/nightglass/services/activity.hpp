@@ -4,6 +4,7 @@
 #include <type_traits>
 
 #include "nightglass/core/status.hpp"
+#include "nightglass/services/activity_units.hpp"
 
 namespace nightglass::services {
 
@@ -17,6 +18,7 @@ enum class ActivityReadiness : std::uint8_t {
 struct ActivitySettings {
     std::uint16_t stride_length_mm{750};
     std::uint32_t daily_goal_steps{10'000};
+    ActivityUnits units{ActivityUnits::imperial};
 };
 
 struct ActivitySnapshot {
@@ -30,6 +32,7 @@ struct ActivitySnapshot {
     std::uint32_t calibration_restarts{0};
     std::uint32_t steps_today{0};
     std::uint32_t distance_m{0};
+    std::uint64_t distance_mm{0};
     std::uint8_t goal_percent{0};
     ActivitySettings settings{};
     bool date_valid{false};

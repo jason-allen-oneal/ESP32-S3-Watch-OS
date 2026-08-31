@@ -51,6 +51,8 @@ enum class NavigationAction : std::uint8_t {
 struct NavigationState {
     Route route{Route::home};
     Overlay overlay{Overlay::none};
+    Route back_route{Route::home};
+    Route back_back_route{Route::home};
 
     friend constexpr bool operator==(const NavigationState &, const NavigationState &) = default;
 };

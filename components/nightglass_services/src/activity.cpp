@@ -54,12 +54,15 @@ bool valid_settings(const ActivitySettings &settings) {
     return settings.stride_length_mm >= kMinimumStrideMm &&
            settings.stride_length_mm <= kMaximumStrideMm &&
            settings.daily_goal_steps >= kMinimumGoal &&
-           settings.daily_goal_steps <= kMaximumGoal;
+           settings.daily_goal_steps <= kMaximumGoal &&
+           (settings.units == ActivityUnits::imperial ||
+            settings.units == ActivityUnits::metric);
 }
 
 void update_derived(ActivitySnapshot &snapshot) {
     const auto distance_mm = static_cast<std::uint64_t>(snapshot.steps_today) *
                              snapshot.settings.stride_length_mm;
+    snapshot.distance_mm = distance_mm;
     snapshot.distance_m = static_cast<std::uint32_t>(std::min<std::uint64_t>(
         distance_mm / 1000U, std::numeric_limits<std::uint32_t>::max()));
     snapshot.goal_percent = static_cast<std::uint8_t>(std::min<std::uint64_t>(
@@ -78,6 +81,7 @@ bool save_state() {
     if (result != ESP_OK) return false;
     if ((result = nvs_set_u8(handle, "version", 1)) == ESP_OK &&
         (result = nvs_set_u16(handle, "stride_mm", copy.settings.stride_length_mm)) == ESP_OK &&
+        (result = nvs_set_u8(handle, "units", static_cast<std::uint8_t>(copy.settings.units))) == ESP_OK &&
         (result = nvs_set_u32(handle, "goal", copy.settings.daily_goal_steps)) == ESP_OK &&
         (result = nvs_set_u32(handle, "steps", copy.steps_today)) == ESP_OK &&
         (result = nvs_set_i64(handle, "local_day", day_state.tracked_local_day)) == ESP_OK) {
@@ -118,6 +122,11 @@ void load_state() {
         std::int64_t local_day{};
         if (nvs_get_u16(handle, "stride_mm", &stride) == ESP_OK) {
             loaded.settings.stride_length_mm = stride;
+        }
+        std::uint8_t units{};
+        if (nvs_get_u8(handle, "units", &units) == ESP_OK) {
+            loaded.settings.units = units == static_cast<std::uint8_t>(ActivityUnits::metric)
+                                        ? ActivityUnits::metric : ActivityUnits::imperial;
         }
         if (nvs_get_u32(handle, "goal", &value) == ESP_OK) loaded.settings.daily_goal_steps = value;
         if (nvs_get_u32(handle, "steps", &value) == ESP_OK) loaded.steps_today = value;

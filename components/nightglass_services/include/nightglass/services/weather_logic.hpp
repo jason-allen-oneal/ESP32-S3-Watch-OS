@@ -8,6 +8,16 @@ namespace nightglass::services {
 
 enum class WeatherUnits : std::uint8_t { metric, imperial };
 enum class WeatherCandidateSource : std::uint8_t { none, cache, direct, phone };
+enum class WeatherIcon : std::uint8_t {
+    clear_day,
+    clear_night,
+    partly_cloudy,
+    cloudy,
+    fog,
+    rain,
+    snow,
+    storm,
+};
 
 struct DecodedWeather {
     float temperature{0.0F};
@@ -37,5 +47,7 @@ struct DecodedWeather {
                                            std::uint32_t observed_epoch,
                                            std::uint32_t now_epoch,
                                            std::uint32_t maximum_future_skew);
+[[nodiscard]] WeatherIcon weather_icon_for_code(std::uint16_t weather_code,
+                                                bool is_day);
 
 }  // namespace nightglass::services

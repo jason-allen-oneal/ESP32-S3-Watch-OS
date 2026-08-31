@@ -2,13 +2,16 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 
 #include "esp_timer.h"
 #include "lvgl.h"
 #include "nightglass/services/clock.hpp"
 #include "nightglass/services/activity.hpp"
+#include "nightglass/services/activity_units.hpp"
 #include "nightglass/services/connectivity.hpp"
 #include "nightglass/services/network_weather.hpp"
+#include "nightglass/services/weather_logic.hpp"
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/watchface.hpp"
@@ -110,6 +113,70 @@ void set_state(lv_obj_t *target, const char *text, std::uint32_t color) {
     if (!target) return;
     lv_label_set_text(target, text);
     lv_obj_set_style_text_color(target, lv_color_hex(color), 0);
+}
+
+lv_obj_t *weather_shape(lv_obj_t *parent, int x, int y, int width, int height,
+                        std::uint32_t color, int radius = 0) {
+    auto *shape = lv_obj_create(parent);
+    lv_obj_remove_style_all(shape);
+    lv_obj_set_pos(shape, x, y);
+    lv_obj_set_size(shape, width, height);
+    lv_obj_set_style_bg_color(shape, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(shape, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(shape, radius, 0);
+    lv_obj_remove_flag(shape, LV_OBJ_FLAG_CLICKABLE);
+    return shape;
+}
+
+void draw_weather_icon(lv_obj_t *parent, nightglass::services::WeatherIcon icon,
+                       std::uint32_t color) {
+    if (!parent) return;
+    lv_obj_clean(parent);
+    constexpr std::uint32_t shadow = 0x101413;
+    auto cloud = [parent, color]() {
+        weather_shape(parent, 8, 13, 28, 10, color, 5);
+        weather_shape(parent, 13, 8, 13, 13, color, 7);
+        weather_shape(parent, 23, 10, 10, 10, color, 5);
+    };
+    using nightglass::services::WeatherIcon;
+    switch (icon) {
+        case WeatherIcon::clear_day:
+            weather_shape(parent, 14, 4, 18, 18, color, 9);
+            break;
+        case WeatherIcon::clear_night:
+            weather_shape(parent, 12, 3, 20, 20, color, 10);
+            weather_shape(parent, 19, 0, 18, 18, shadow, 9);
+            break;
+        case WeatherIcon::partly_cloudy:
+            weather_shape(parent, 22, 2, 13, 13, color, 7);
+            cloud();
+            break;
+        case WeatherIcon::cloudy:
+            cloud();
+            break;
+        case WeatherIcon::fog:
+            weather_shape(parent, 7, 7, 30, 3, color, 2);
+            weather_shape(parent, 11, 14, 26, 3, color, 2);
+            weather_shape(parent, 7, 21, 30, 3, color, 2);
+            break;
+        case WeatherIcon::rain:
+            cloud();
+            weather_shape(parent, 12, 24, 3, 4, color, 1);
+            weather_shape(parent, 22, 24, 3, 4, color, 1);
+            weather_shape(parent, 32, 24, 3, 4, color, 1);
+            break;
+        case WeatherIcon::snow:
+            cloud();
+            weather_shape(parent, 12, 24, 4, 4, color, 2);
+            weather_shape(parent, 22, 24, 4, 4, color, 2);
+            weather_shape(parent, 32, 24, 4, 4, color, 2);
+            break;
+        case WeatherIcon::storm:
+            cloud();
+            weather_shape(parent, 19, 22, 5, 6, color, 1);
+            weather_shape(parent, 24, 25, 5, 3, color, 1);
+            break;
+    }
 }
 
 lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int width, int height,
@@ -609,8 +676,18 @@ void Shell::activity_callback(lv_event_t *event) {
 void Shell::activity_stride_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto settings = nightglass::services::activity_service().snapshot().settings;
-    settings.stride_length_mm = static_cast<std::uint16_t>(settings.stride_length_mm + 50);
-    if (settings.stride_length_mm > 1500) settings.stride_length_mm = 300;
+    settings.stride_length_mm = nightglass::services::next_stride_length(
+        settings.stride_length_mm, settings.units);
+    nightglass::services::activity_service().update_settings(settings);
+    self->refresh_activity();
+}
+
+void Shell::activity_units_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::activity_service().snapshot().settings;
+    settings.units = settings.units == nightglass::services::ActivityUnits::imperial
+                         ? nightglass::services::ActivityUnits::metric
+                         : nightglass::services::ActivityUnits::imperial;
     nightglass::services::activity_service().update_settings(settings);
     self->refresh_activity();
 }
@@ -900,6 +977,16 @@ void Shell::render_pack_home() {
 
     for (std::uint8_t index = 0; index < pack.text_slot_count; ++index) {
         const auto &slot = pack.text_slots[index];
+        if (slot.field == nightglass::services::FaceField::weather_icon) {
+            auto *obj = lv_obj_create(content_host_);
+            lv_obj_remove_style_all(obj);
+            lv_obj_set_pos(obj, slot.bounds.x, slot.bounds.y);
+            lv_obj_set_size(obj, slot.bounds.width, slot.bounds.height);
+            lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+            home_weather_icon_ = obj;
+            continue;
+        }
         auto *obj = label(content_host_, slot.fixed_text ? slot.fixed_text : "--",
                           face_font(slot.style), face_color(pack.palette, slot.color));
         lv_obj_set_pos(obj, slot.bounds.x, slot.bounds.y);
@@ -943,8 +1030,13 @@ void Shell::render_pack_home() {
             case nightglass::services::FaceField::weather:
                 home_weather_ = obj;
                 break;
+            case nightglass::services::FaceField::weather_icon:
+                break;
             case nightglass::services::FaceField::notifications:
                 home_notifications_ = obj;
+                break;
+            case nightglass::services::FaceField::connectivity:
+                home_connectivity_ = obj;
                 break;
             case nightglass::services::FaceField::fixed_text:
                 break;
@@ -1027,18 +1119,20 @@ void Shell::render_watchface_settings() {
 
 void Shell::render_activity() {
     add_header(content_host_, "ACTIVITY", back_callback, this);
-    auto *card = make_route_card(content_host_, 112, 140);
+    auto *card = make_route_card(content_host_, 108, 126);
     activity_steps_ = label(card, "-- STEPS", &lv_font_montserrat_26, kGreen);
     lv_obj_set_pos(activity_steps_, 0, 4);
     activity_detail_ = label(card, "Calibrating activity sensor", &lv_font_montserrat_16,
                              kSecondary);
     lv_obj_set_pos(activity_detail_, 0, 52);
     lv_obj_set_width(activity_detail_, kSafeContentWidth - 32);
-    activity_stride_ = make_button(content_host_, kSafeInset, 270, kSafeContentWidth, 58, "",
+    activity_stride_ = make_button(content_host_, kSafeInset, 246, kSafeContentWidth, 48, "",
                                    kSurface, kPrimary, activity_stride_callback, this);
-    activity_goal_ = make_button(content_host_, kSafeInset, 340, kSafeContentWidth, 58, "",
+    activity_units_ = make_button(content_host_, kSafeInset, 304, kSafeContentWidth, 48, "",
+                                  kSurface, kPrimary, activity_units_callback, this);
+    activity_goal_ = make_button(content_host_, kSafeInset, 362, kSafeContentWidth, 48, "",
                                  kSurface, kPrimary, activity_goal_callback, this);
-    make_button(content_host_, kSafeInset, 410, kSafeContentWidth, 58, "RESET TODAY",
+    make_button(content_host_, kSafeInset, 420, kSafeContentWidth, 48, "RESET TODAY",
                 kSurface, kAmber, activity_reset_callback, this);
     configure_refresh_timer(1000);
     refresh_activity();
@@ -1448,18 +1542,23 @@ void Shell::refresh_activity() {
     char text[96]{};
     std::snprintf(text, sizeof(text), "%lu STEPS", static_cast<unsigned long>(snapshot.steps_today));
     lv_label_set_text(activity_steps_, text);
-    std::snprintf(text, sizeof(text), "%lu m | %u%% goal | %s",
-                  static_cast<unsigned long>(snapshot.distance_m), snapshot.goal_percent,
+    char distance[32]{};
+    nightglass::services::format_activity_distance(
+        distance, sizeof(distance), snapshot.distance_mm, snapshot.settings.units);
+    std::snprintf(text, sizeof(text), "EST %s | %u%% goal | %s", distance,
+                  snapshot.goal_percent,
                   snapshot.readiness == nightglass::services::ActivityReadiness::ready
                       ? "READY"
                       : snapshot.readiness == nightglass::services::ActivityReadiness::warming_up
                             ? "CALIBRATING"
                             : "UNAVAILABLE");
     lv_label_set_text(activity_detail_, text);
-    std::snprintf(text, sizeof(text), "STRIDE  %u.%02u m",
-                  snapshot.settings.stride_length_mm / 1000,
-                  (snapshot.settings.stride_length_mm % 1000) / 10);
+    nightglass::services::format_stride_length(
+        text, sizeof(text), snapshot.settings.stride_length_mm, snapshot.settings.units);
     set_button_text(activity_stride_, text);
+    set_button_text(activity_units_, snapshot.settings.units ==
+                                         nightglass::services::ActivityUnits::imperial
+                                     ? "DISTANCE  IMPERIAL" : "DISTANCE  METRIC");
     std::snprintf(text, sizeof(text), "DAILY GOAL  %lu",
                   static_cast<unsigned long>(snapshot.settings.daily_goal_steps));
     set_button_text(activity_goal_, text);
@@ -1545,6 +1644,10 @@ void Shell::refresh_home() {
         const char *period = "";
         format_time(buffer, sizeof(buffer), clock.local_time,
                     clock.settings.use_24_hour, &period);
+        if (period[0]) {
+            const auto length = std::strlen(buffer);
+            std::snprintf(buffer + length, sizeof(buffer) - length, " %s", period);
+        }
         lv_label_set_text(home_time_, buffer);
         if (full_background) {
             static constexpr const char *days[]{"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY",
@@ -1567,12 +1670,11 @@ void Shell::refresh_home() {
                                      (clock.settings.daylight_saving ? 60 : 0);
         const int offset_abs = effective_offset < 0 ? -effective_offset : effective_offset;
         if (full_background) {
-            std::snprintf(buffer, sizeof(buffer), "%s%sRTC LIVE",
-                          period, period[0] ? " | " : "");
+            std::snprintf(buffer, sizeof(buffer), "RTC LIVE");
             set_state(home_time_state_, buffer, pack.palette.accent);
         } else {
-            std::snprintf(buffer, sizeof(buffer), "%s%sUTC%c%d:%02d | LIVE",
-                          period, period[0] ? " | " : "", effective_offset < 0 ? '-' : '+',
+            std::snprintf(buffer, sizeof(buffer), "UTC%c%d:%02d | LIVE",
+                          effective_offset < 0 ? '-' : '+',
                           offset_abs / 60, offset_abs % 60);
             set_state(home_time_state_, buffer, kGreen);
         }
@@ -1647,7 +1749,8 @@ void Shell::refresh_home() {
     }
     if (home_distance_) {
         if (activity.readiness == nightglass::services::ActivityReadiness::ready) {
-            std::snprintf(buffer, sizeof(buffer), "%.2f KM", activity.distance_m / 1000.0);
+            nightglass::services::format_activity_distance(
+                buffer, sizeof(buffer), activity.distance_mm, activity.settings.units);
             lv_label_set_text(home_distance_, buffer);
         } else {
             lv_label_set_text(home_distance_, "CALIBRATING");
@@ -1665,10 +1768,31 @@ void Shell::refresh_home() {
         }
     }
     const auto connectivity = nightglass::services::connectivity_service().snapshot();
+    if (home_weather_icon_) {
+        if (weather.data_valid) {
+            draw_weather_icon(home_weather_icon_,
+                              nightglass::services::weather_icon_for_code(
+                                  weather.current.weather_code, weather.current.is_day),
+                              weather.stale ? kAmber : pack.palette.accent);
+        } else {
+            lv_obj_clean(home_weather_icon_);
+        }
+    }
     if (home_notifications_) {
         std::snprintf(buffer, sizeof(buffer), "%u NEW", connectivity.notification_count);
         set_state(home_notifications_, buffer,
                   connectivity.notification_count ? pack.palette.accent : pack.palette.secondary);
+    }
+    if (home_connectivity_) {
+        const bool connected = connectivity.state ==
+                               nightglass::services::CompanionLinkState::connected_encrypted;
+        const char *link = connected ? "LINK\nON"
+                           : connectivity.state ==
+                                 nightglass::services::CompanionLinkState::advertising
+                               ? "PAIR"
+                               : connectivity.settings.enabled ? "LINK\nWAIT" : "OFF";
+        set_state(home_connectivity_, link,
+                  connected ? pack.palette.accent : pack.palette.secondary);
     }
 
     const auto &motion = snapshot.motion;
@@ -1976,12 +2100,15 @@ void Shell::clear_route_objects() {
     stopwatch_toggle_ = nullptr;
     home_alarm_ = nullptr;
     home_timer_ = nullptr;
+    home_connectivity_ = nullptr;
     home_distance_ = nullptr;
     home_weather_ = nullptr;
+    home_weather_icon_ = nullptr;
     home_notifications_ = nullptr;
     activity_steps_ = nullptr;
     activity_detail_ = nullptr;
     activity_stride_ = nullptr;
+    activity_units_ = nullptr;
     activity_goal_ = nullptr;
     weather_state_ = nullptr;
     weather_detail_ = nullptr;

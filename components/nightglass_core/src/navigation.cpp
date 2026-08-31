@@ -3,6 +3,13 @@
 namespace nightglass::core {
 
 namespace {
+constexpr void push_route(NavigationState &state, Route route) noexcept {
+    state.back_back_route = state.back_route;
+    state.back_route = state.route;
+    state.route = route;
+    state.overlay = Overlay::none;
+}
+
 constexpr NavigationState reduce_impl(NavigationState state, NavigationAction action) noexcept {
     if (action == NavigationAction::back && state.overlay != Overlay::none) {
         state.overlay = Overlay::none;
@@ -11,73 +18,62 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
 
     switch (action) {
         case NavigationAction::back:
-            state.route = state.route == Route::home ? Route::home
-                          : state.route == Route::launcher ? Route::home
-                          : state.route == Route::power_settings ||
-                                state.route == Route::clock_settings ||
-                                state.route == Route::watchface_settings
-                              ? Route::settings
-                              : Route::launcher;
+            if (state.route != Route::home) {
+                state.route = state.back_route;
+                state.back_route = state.back_back_route;
+                state.back_back_route = Route::home;
+            }
             break;
         case NavigationAction::home:
             state.route = Route::home;
             state.overlay = Overlay::none;
+            state.back_route = Route::home;
+            state.back_back_route = Route::home;
             break;
         case NavigationAction::open_launcher:
             state.route = Route::launcher;
             state.overlay = Overlay::none;
+            state.back_route = Route::home;
+            state.back_back_route = Route::home;
             break;
         case NavigationAction::open_settings:
-            state.route = Route::settings;
-            state.overlay = Overlay::none;
+            push_route(state, Route::settings);
             break;
         case NavigationAction::open_power_settings:
-            state.route = Route::power_settings;
-            state.overlay = Overlay::none;
+            push_route(state, Route::power_settings);
             break;
         case NavigationAction::open_clock_settings:
-            state.route = Route::clock_settings;
-            state.overlay = Overlay::none;
+            push_route(state, Route::clock_settings);
             break;
         case NavigationAction::open_watchface_settings:
-            state.route = Route::watchface_settings;
-            state.overlay = Overlay::none;
+            push_route(state, Route::watchface_settings);
             break;
         case NavigationAction::open_activity:
-            state.route = Route::activity;
-            state.overlay = Overlay::none;
+            push_route(state, Route::activity);
             break;
         case NavigationAction::open_weather:
-            state.route = Route::weather;
-            state.overlay = Overlay::none;
+            push_route(state, Route::weather);
             break;
         case NavigationAction::open_connectivity:
-            state.route = Route::connectivity;
-            state.overlay = Overlay::none;
+            push_route(state, Route::connectivity);
             break;
         case NavigationAction::open_notifications:
-            state.route = Route::notifications;
-            state.overlay = Overlay::none;
+            push_route(state, Route::notifications);
             break;
         case NavigationAction::open_alarm:
-            state.route = Route::alarm;
-            state.overlay = Overlay::none;
+            push_route(state, Route::alarm);
             break;
         case NavigationAction::open_countdown:
-            state.route = Route::countdown;
-            state.overlay = Overlay::none;
+            push_route(state, Route::countdown);
             break;
         case NavigationAction::open_stopwatch:
-            state.route = Route::stopwatch;
-            state.overlay = Overlay::none;
+            push_route(state, Route::stopwatch);
             break;
         case NavigationAction::open_diagnostics:
-            state.route = Route::diagnostics;
-            state.overlay = Overlay::none;
+            push_route(state, Route::diagnostics);
             break;
         case NavigationAction::open_about:
-            state.route = Route::about;
-            state.overlay = Overlay::none;
+            push_route(state, Route::about);
             break;
         case NavigationAction::show_system_modal:
             state.overlay = Overlay::system_modal;
@@ -89,21 +85,21 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
     return state;
 }
 
-static_assert(reduce_impl({Route::home, Overlay::none},
+static_assert(reduce_impl({Route::home, Overlay::none, Route::home, Route::home},
                           NavigationAction::open_launcher) ==
-              NavigationState{Route::launcher, Overlay::none});
-static_assert(reduce_impl({Route::diagnostics, Overlay::none}, NavigationAction::back) ==
-              NavigationState{Route::launcher, Overlay::none});
-static_assert(reduce_impl({Route::launcher, Overlay::none}, NavigationAction::back) ==
-              NavigationState{Route::home, Overlay::none});
-static_assert(reduce_impl({Route::about, Overlay::system_modal}, NavigationAction::back) ==
-              NavigationState{Route::about, Overlay::none});
-static_assert(reduce_impl({Route::home, Overlay::none},
+              NavigationState{Route::launcher, Overlay::none, Route::home, Route::home});
+static_assert(reduce_impl({Route::diagnostics, Overlay::none, Route::home, Route::home}, NavigationAction::back) ==
+              NavigationState{Route::home, Overlay::none, Route::home, Route::home});
+static_assert(reduce_impl({Route::launcher, Overlay::none, Route::home, Route::home}, NavigationAction::back) ==
+              NavigationState{Route::home, Overlay::none, Route::home, Route::home});
+static_assert(reduce_impl({Route::about, Overlay::system_modal, Route::launcher, Route::home}, NavigationAction::back) ==
+              NavigationState{Route::about, Overlay::none, Route::launcher, Route::home});
+static_assert(reduce_impl({Route::home, Overlay::none, Route::home, Route::home},
                           NavigationAction::open_notifications) ==
-              NavigationState{Route::notifications, Overlay::none});
-static_assert(reduce_impl({Route::notifications, Overlay::none},
+              NavigationState{Route::notifications, Overlay::none, Route::home, Route::home});
+static_assert(reduce_impl({Route::notifications, Overlay::none, Route::home, Route::home},
                           NavigationAction::back) ==
-              NavigationState{Route::launcher, Overlay::none});
+              NavigationState{Route::home, Overlay::none, Route::home, Route::home});
 }  // namespace
 
 NavigationState reduce_navigation(NavigationState state, NavigationAction action) noexcept {
