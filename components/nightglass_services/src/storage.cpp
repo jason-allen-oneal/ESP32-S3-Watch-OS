@@ -53,7 +53,9 @@ nightglass::core::Status StorageService::start() {
         .partition_label = kPartitionLabel,
         .partition = nullptr,
         .format_if_mount_failed = false,
-        .read_only = false,
+        // Assets remain immutable until an authenticated, atomic installer is
+        // available. The volume never formats itself on mount failure.
+        .read_only = true,
         .dont_mount = false,
         .grow_on_mount = false,
     };

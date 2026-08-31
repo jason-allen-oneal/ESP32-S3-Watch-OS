@@ -134,15 +134,28 @@ void health_gate_task(void *) {
 
     switch (action) {
         case HealthGateAction::accept_pending_image:
-            if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK &&
-                store_unhealthy_boots(0)) {
+            // Persist healthy state before permanently cancelling rollback.
+            // If NVS fails, the pending image must remain rejectable.
+            if (!store_unhealthy_boots(0)) {
+                nightglass::core::health_registry().set(
+                    "recovery", nightglass::core::HealthState::failed,
+                    "healthy boot persistence failed; rolling back pending image");
+                ESP_LOGE(kTag, "Could not persist healthy boot; requesting rollback");
+                if (esp_ota_mark_app_invalid_rollback_and_reboot() != ESP_OK) {
+                    ESP_LOGE(kTag, "Rollback request failed after NVS error");
+                }
+            } else if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
                 nightglass::core::health_registry().set(
                     "recovery", nightglass::core::HealthState::ok,
                     "pending image accepted after 60-second health gate");
             } else {
                 nightglass::core::health_registry().set(
                     "recovery", nightglass::core::HealthState::failed,
-                    "could not accept pending image or persist healthy boot");
+                    "could not accept pending image; requesting rollback");
+                ESP_LOGE(kTag, "Could not accept pending image; requesting rollback");
+                if (esp_ota_mark_app_invalid_rollback_and_reboot() != ESP_OK) {
+                    ESP_LOGE(kTag, "Rollback request failed after acceptance error");
+                }
             }
             break;
         case HealthGateAction::rollback_pending_image:
@@ -252,6 +265,16 @@ nightglass::core::Status UpdateService::arm_health_gate() {
     if (xTaskCreate(health_gate_task, "nightglass_health", 4096, nullptr, 4,
                     &health_task_handle) != pdPASS) {
         health_task_handle = nullptr;
+        const auto current_snapshot = this->snapshot();
+        if (current_snapshot.pending_verification) {
+            nightglass::core::health_registry().set(
+                "recovery", nightglass::core::HealthState::failed,
+                "pending image health gate unavailable; rolling back");
+            ESP_LOGE(kTag, "Health gate task unavailable; requesting rollback");
+            if (esp_ota_mark_app_invalid_rollback_and_reboot() != ESP_OK) {
+                ESP_LOGE(kTag, "Rollback request failed after health task error");
+            }
+        }
         return {nightglass::core::StatusCode::no_memory, "health gate task unavailable"};
     }
     auto snapshot = this->snapshot();
@@ -286,8 +309,9 @@ nightglass::core::Status UpdateService::begin_update(
         return {nightglass::core::StatusCode::no_memory, "update mutex unavailable"};
     }
     const auto initial_snapshot = this->snapshot();
-    if (ota_handle != 0 || initial_snapshot.state == UpdateState::receiving) {
-        return {nightglass::core::StatusCode::invalid_state, "update already active"};
+    if (ota_handle != 0 || initial_snapshot.state != UpdateState::idle) {
+        return {nightglass::core::StatusCode::invalid_state,
+                "update service is not idle"};
     }
     if (initial_snapshot.pending_verification) {
         return {nightglass::core::StatusCode::invalid_state,
