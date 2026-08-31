@@ -10,6 +10,7 @@
 #include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/watchface.hpp"
+#include "nightglass/services/audio.hpp"
 #include "nightglass/ui/shell.hpp"
 
 namespace {
@@ -46,6 +47,11 @@ extern "C" void app_main() {
     const auto hardware_status = nightglass::services::hardware_service().start(board.i2c_bus());
     if (!hardware_status.is_ok()) {
         ESP_LOGW(kTag, "Hardware services degraded: %s", hardware_status.detail);
+    }
+
+    const auto audio_status = nightglass::services::audio_service().start(board.i2c_bus());
+    if (!audio_status.is_ok()) {
+        ESP_LOGI(kTag, "Audio unavailable by policy: %s", audio_status.detail);
     }
 
     const auto power_status = nightglass::services::power_service().start();

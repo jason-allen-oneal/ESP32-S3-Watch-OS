@@ -1,0 +1,10 @@
+menu "Nightglass audio"
+
+config NIGHTGLASS_AUDIO_ENABLED
+    bool "Enable audio input/output"
+    default n
+    help
+        Enable the bounded ES8311/I2S audio service. Keep disabled until the
+        exact board microphone population and amplifier behavior are verified.
+
+endmenu
