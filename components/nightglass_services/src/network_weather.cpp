@@ -828,23 +828,35 @@ void NetworkWeatherService::request_refresh() {
 }
 
 nightglass::core::Status NetworkWeatherService::accept_phone_weather(
-    std::uint32_t observed_epoch_seconds, WeatherUnits units,
+    std::uint32_t observed_epoch_seconds, std::uint16_t reported_age_seconds,
+    WeatherUnits units,
     const DecodedWeather &weather) {
     const auto clock = clock_service().snapshot();
-    if (!clock.time_valid || clock.utc_epoch_seconds < 1'577'836'800U) {
+    if (observed_epoch_seconds < 1'577'836'800U ||
+        reported_age_seconds > kMaximumProxyAgeSeconds ||
+        observed_epoch_seconds < reported_age_seconds) {
         return {nightglass::core::StatusCode::invalid_state,
-                "wall clock unavailable for weather freshness validation"};
+                "phone weather snapshot outside freshness window"};
     }
     if (units != WeatherUnits::metric && units != WeatherUnits::imperial) {
         return {nightglass::core::StatusCode::invalid_state, "invalid weather units"};
     }
-    const auto now = clock.utc_epoch_seconds;
-    std::uint32_t age_seconds = 0;
-    if (!weather_observation_age(observed_epoch_seconds, now,
-                                 kMaximumFutureSkewSeconds, age_seconds) ||
-        age_seconds > kMaximumProxyAgeSeconds) {
-        return {nightglass::core::StatusCode::invalid_state,
-                "phone weather snapshot outside freshness window"};
+    auto effective_observed = observed_epoch_seconds - reported_age_seconds;
+    std::uint32_t age_seconds = reported_age_seconds;
+    if (clock.time_valid && clock.utc_epoch_seconds >= 1'577'836'800U) {
+        const auto now = static_cast<std::uint32_t>(clock.utc_epoch_seconds);
+        std::uint32_t wall_age = 0;
+        if (weather_observation_age(effective_observed, now,
+                                    kMaximumFutureSkewSeconds, wall_age) &&
+            wall_age <= kMaximumProxyAgeSeconds) {
+            age_seconds = wall_age;
+        } else {
+            // The bonded phone delivered this observation over the live encrypted
+            // GATT connection. If its wall clock disagrees with the hardware RTC,
+            // preserve the phone-reported age and timestamp receipt against the
+            // watch clock instead of rejecting current data.
+            effective_observed = now - std::min<std::uint32_t>(reported_age_seconds, now);
+        }
     }
     if (weather.temperature < -150.0F || weather.temperature > 150.0F ||
         weather.apparent_temperature < -150.0F ||
@@ -867,13 +879,13 @@ nightglass::core::Status NetworkWeatherService::accept_phone_weather(
                             ? WeatherCandidateSource::cache
                             : WeatherCandidateSource::none,
             current.observed_epoch_seconds, WeatherCandidateSource::phone,
-            observed_epoch_seconds)) {
+            effective_observed)) {
         portEXIT_CRITICAL(&state_mux);
         return {nightglass::core::StatusCode::invalid_state,
                 "phone weather snapshot does not supersede current data"};
     }
     current.current = weather;
-    current.observed_epoch_seconds = observed_epoch_seconds;
+    current.observed_epoch_seconds = effective_observed;
     current.age_seconds = age_seconds;
     current.data_valid = true;
     current.stale = false;

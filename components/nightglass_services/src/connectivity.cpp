@@ -140,14 +140,12 @@ bool apply_message(const CompanionMessage &message) {
         weather.weather_code = message.weather_snapshot.weather_code;
         weather.wind_speed = message.weather_snapshot.wind_tenths / 10.0F;
         weather.is_day = message.weather_snapshot.is_day;
-        return network_weather_service()
-            .accept_phone_weather(
-                message.weather_snapshot.observed_epoch_seconds -
-                    message.weather_snapshot.age_seconds,
-                message.weather_snapshot.metric ? WeatherUnits::metric
-                                                : WeatherUnits::imperial,
-                weather)
-            .is_ok();
+        return network_weather_service().accept_phone_weather(
+            message.weather_snapshot.observed_epoch_seconds,
+            message.weather_snapshot.age_seconds,
+            message.weather_snapshot.metric ? WeatherUnits::metric
+                                            : WeatherUnits::imperial,
+            weather).is_ok();
     }
     portENTER_CRITICAL(&state_lock);
     if (message.kind == CompanionMessageKind::notification_clear) {

@@ -86,7 +86,8 @@ public:
     nightglass::core::Status clear_credentials();
     void request_refresh();
     nightglass::core::Status accept_phone_weather(
-        std::uint32_t observed_epoch_seconds, WeatherUnits units,
+        std::uint32_t observed_epoch_seconds, std::uint16_t age_seconds,
+        WeatherUnits units,
         const DecodedWeather &weather);
     [[nodiscard]] bool prepare_for_light_sleep();
     void resume_from_light_sleep();

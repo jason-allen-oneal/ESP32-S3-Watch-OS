@@ -10,6 +10,7 @@ import android.media.AudioManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.*
+import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
@@ -22,6 +23,7 @@ import java.util.concurrent.Executors
 
 class NightglassConnectionService : Service() {
     companion object {
+        private const val TAG = "NightglassLink"
         const val ACTION_CONNECT = "dev.nightglass.CONNECT"
         const val ACTION_DISCONNECT = "dev.nightglass.DISCONNECT"
         const val ACTION_WRITE = "dev.nightglass.WRITE"
@@ -39,9 +41,11 @@ class NightglassConnectionService : Service() {
     private val adapter by lazy { getSystemService(BluetoothManager::class.java).adapter }
     private var gatt: BluetoothGatt? = null
     private var scanning = false
+    private var scanGeneration = 0
     private var negotiatedPayload = 20
     private val writes = ArrayDeque<ByteArray>()
     private var writePending = false
+    private var pendingOpcode = -1
     private var linkReady = false
     private val reconnectHandler = Handler(Looper.getMainLooper())
     private var reconnectAttempt = 0
@@ -121,11 +125,12 @@ class NightglassConnectionService : Service() {
         }
         if (scanning) return
         scanning = true
+        val generation = ++scanGeneration
         // Some Samsung Bluetooth stacks fail to return custom 128-bit UUID advertisements
         // through a platform ScanFilter. Scan broadly, then strictly allowlist Nightglass.
         adapter.bluetoothLeScanner?.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCallback)
         reconnectHandler.postDelayed({
-            if (scanning) {
+            if (scanning && generation == scanGeneration && gatt == null) {
                 stopScan()
                 update("Nightglass not found; retrying")
                 scheduleReconnect()
@@ -186,13 +191,25 @@ class NightglassConnectionService : Service() {
             if (descriptor.uuid != NightglassProtocol.CCCD) return
             if (status != BluetoothGatt.GATT_SUCCESS) return update("Could not enable Nightglass notifications")
             reconnectAttempt = 0
-            synchronized(writes) { linkReady = true; writeNextLocked() }
+            synchronized(writes) {
+                linkReady = true
+                PhoneWeatherProxy.load(this@NightglassConnectionService)?.let { config ->
+                    val settings = NightglassProtocol.configureWeather(
+                        true, true, config.metric, config.refreshMinutes,
+                        config.latitudeE6, config.longitudeE6)
+                    if (writes.size >= 32) writes.removeLast()
+                    writes.addFirst(settings)
+                }
+                writeNextLocked()
+            }
+            Log.i(TAG, "Secure Nightglass link ready")
             update("Nightglass connected")
             scheduleWeatherRefresh(0)
         }
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) update("Nightglass rejected a settings frame")
-            synchronized(writes) { writePending = false; writeNextLocked() }
+            Log.i(TAG, "Nightglass frame completion: opcode=$pendingOpcode status=$status")
+            if (status != BluetoothGatt.GATT_SUCCESS) update("Nightglass rejected frame $pendingOpcode")
+            synchronized(writes) { writePending = false; pendingOpcode = -1; writeNextLocked() }
         }
         @Deprecated("API compatibility")
         override fun onCharacteristicChanged(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic) { receive(characteristic.value) }
@@ -233,7 +250,11 @@ class NightglassConnectionService : Service() {
         val started = if (Build.VERSION.SDK_INT >= 33) client.writeCharacteristic(c, frame, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
         else { @Suppress("DEPRECATION") c.value = frame; @Suppress("DEPRECATION") client.writeCharacteristic(c) }
         writePending = started
-        if (started) writes.poll()
+        if (started) {
+            pendingOpcode = frame.getOrNull(1)?.toInt()?.and(0xff) ?: -1
+            Log.i(TAG, "Nightglass frame started: opcode=$pendingOpcode bytes=${frame.size}")
+            writes.poll()
+        }
     }
     private fun stopScan() { if (scanning && hasConnectPermissions()) adapter.bluetoothLeScanner?.stopScan(scanCallback); scanning = false }
     private fun scheduleReconnect() {
@@ -258,15 +279,28 @@ class NightglassConnectionService : Service() {
     }
 
     private fun fetchPhoneWeather() {
-        if (!linkReady || weatherFetchInFlight) return
-        val config = PhoneWeatherProxy.load(this) ?: return
+        if (!linkReady || weatherFetchInFlight) {
+            Log.i(TAG, "Weather refresh deferred: link not ready or request active")
+            return
+        }
+        val config = PhoneWeatherProxy.load(this) ?: run {
+            Log.i(TAG, "Weather refresh deferred: configuration unavailable")
+            return
+        }
         weatherFetchInFlight = true
+        Log.i(TAG, "Weather refresh started")
         weatherExecutor.execute {
-            val frame = runCatching { PhoneWeatherProxy.fetch(config) }.getOrNull()
+            val result = runCatching { PhoneWeatherProxy.fetch(config) }
+            val frame = result.getOrNull()
             reconnectHandler.post {
                 if (destroyed) return@post
                 weatherFetchInFlight = false
-                if (frame != null && linkReady) write(frame)
+                if (frame != null && linkReady) {
+                    Log.i(TAG, "Weather refresh fetched; queueing bounded frame")
+                    write(frame)
+                } else if (frame == null) {
+                    Log.w(TAG, "Weather refresh failed: ${result.exceptionOrNull()?.javaClass?.simpleName ?: "unknown"}")
+                }
                 scheduleWeatherRefresh(if (frame == null) 5 * 60_000L else null)
             }
         }
