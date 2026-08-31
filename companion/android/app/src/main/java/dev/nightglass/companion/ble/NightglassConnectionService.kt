@@ -50,7 +50,8 @@ class NightglassConnectionService : Service() {
     private val reconnectHandler = Handler(Looper.getMainLooper())
     private var reconnectAttempt = 0
     private var explicitDisconnect = false
-    private val reconnect = Runnable { if (!explicitDisconnect && gatt == null) scan() }
+    private var connectionStatus = "Searching for Nightglass"
+    private val reconnect = Runnable { if (!explicitDisconnect && gatt == null) reconnectBondedOrScan() }
     private val weatherExecutor = Executors.newSingleThreadExecutor()
     @Volatile private var destroyed = false
     private var weatherFetchInFlight = false
@@ -94,22 +95,33 @@ class NightglassConnectionService : Service() {
     }
     override fun onBind(intent: Intent?) = null
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(7, connectionNotification("Searching for Nightglass"))
+        startForeground(7, connectionNotification(connectionStatus))
         when (intent?.action) {
             ACTION_DISCONNECT -> { explicitDisconnect = true; reconnectHandler.removeCallbacks(reconnect); stopScan(); closeGatt(); stopSelf() }
             ACTION_WRITE -> {
                 explicitDisconnect = false
                 intent.getByteArrayExtra(EXTRA_FRAME)?.let(::write)
-                if (gatt == null) scan()
+                if (gatt == null) reconnectBondedOrScan()
             }
             ACTION_REFRESH_WEATHER -> {
                 explicitDisconnect = false
                 scheduleWeatherRefresh(0)
-                if (gatt == null) scan()
+                if (gatt == null) reconnectBondedOrScan()
             }
-            else -> { explicitDisconnect = false; scan() }
+            else -> { explicitDisconnect = false; reconnectBondedOrScan() }
         }
         return START_STICKY
+    }
+
+    private fun reconnectBondedOrScan() {
+        if (!hasConnectPermissions() || !adapter.isEnabled) {
+            scan()
+            return
+        }
+        val bondedNightglass = adapter.bondedDevices.firstOrNull { device ->
+            runCatching { device.name == "Nightglass" }.getOrDefault(false)
+        }
+        if (bondedNightglass != null) connect(bondedNightglass) else scan()
     }
 
     private fun scan() {
@@ -159,6 +171,10 @@ class NightglassConnectionService : Service() {
     }
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(client: BluetoothGatt, status: Int, state: Int) {
+            if (gatt !== client) {
+                client.close()
+                return
+            }
             if (status == BluetoothGatt.GATT_SUCCESS && state == BluetoothProfile.STATE_CONNECTED) {
                 reconnectHandler.removeCallbacks(reconnect)
                 linkReady = false
@@ -174,13 +190,23 @@ class NightglassConnectionService : Service() {
             }
         }
         override fun onMtuChanged(client: BluetoothGatt, mtu: Int, status: Int) {
+            if (gatt !== client) return
             if (status == BluetoothGatt.GATT_SUCCESS && mtu >= 182) {
                 negotiatedPayload = mtu - 3
                 client.discoverServices()
             }
-            else update("Nightglass link MTU is too small")
+            else if (negotiatedPayload >= 179 || linkReady) {
+                // Samsung can emit a redundant default-MTU callback after the negotiated
+                // secure link is already usable. It must not tear down the healthy bearer.
+                return
+            }
+            else {
+                update("Nightglass MTU unavailable; reconnecting")
+                recoverDeadLink(client)
+            }
         }
         override fun onServicesDiscovered(client: BluetoothGatt, status: Int) {
+            if (gatt !== client) return
             if (negotiatedPayload < 179) { client.requestMtu(247); return }
             if (status != BluetoothGatt.GATT_SUCCESS || client.device.bondState != BluetoothDevice.BOND_BONDED) { update("Pairing required; accept the system prompt"); return }
             val service = client.getService(NightglassProtocol.SERVICE) ?: return update("Incompatible Nightglass service")
@@ -188,6 +214,7 @@ class NightglassConnectionService : Service() {
                 update("Could not enable Nightglass notifications")
         }
         override fun onDescriptorWrite(client: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (gatt !== client) return
             if (descriptor.uuid != NightglassProtocol.CCCD) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 update("Nightglass subscription failed; reconnecting")
@@ -211,6 +238,7 @@ class NightglassConnectionService : Service() {
             scheduleWeatherRefresh(0)
         }
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (gatt !== client) return
             Log.i(TAG, "Nightglass frame completion: opcode=$pendingOpcode status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 update("Nightglass link failed; reconnecting")
@@ -322,6 +350,9 @@ class NightglassConnectionService : Service() {
     }
     private fun hasConnectPermissions() = Build.VERSION.SDK_INT < 31 || (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED)
     private fun createChannel() { getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "Watch connection", NotificationManager.IMPORTANCE_LOW)) }
-    private fun update(text: String) { getSystemService(NotificationManager::class.java).notify(7, connectionNotification(text)) }
+    private fun update(text: String) {
+        connectionStatus = text
+        getSystemService(NotificationManager::class.java).notify(7, connectionNotification(text))
+    }
     private fun connectionNotification(text: String) = NotificationCompat.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_data_bluetooth).setContentTitle("Nightglass").setContentText(text).setOngoing(true).setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, dev.nightglass.companion.MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)).build()
 }
