@@ -60,7 +60,7 @@ empty instrument bays. Native LVGL overlays provide:
 
 - battery percentage in the top arc and voltage/charge state in the power bay;
 - live IMU-backed steps and an estimated distance bay using the persisted
-  stride calibration and unit preference;
+  per-step length calibration and unit preference;
 - current QMI8658 movement/calibration state in the activity bay (never a fake
   heart-rate value);
 - large local time, RTC availability, day, and date;
@@ -70,7 +70,7 @@ empty instrument bays. Native LVGL overlays provide:
   instrument bays. Timer remains available in Launcher.
 
 The activity bay formats distance in the persisted Activity unit preference.
-Fresh installs default to imperial; users can select metric and tune stride in
+Fresh installs default to imperial; users can select metric and tune step length in
 inches or metres from Activity settings.
 
 The same pack themes Launcher, Settings, Power, Clock & Region, Watch Face,

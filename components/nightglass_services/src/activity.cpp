@@ -26,8 +26,8 @@ constexpr std::int64_t kStaleAfterUs = 2'000'000;
 constexpr std::int64_t kPeriodicSaveUs = 300'000'000;
 constexpr std::int64_t kSaveRetryBackoffUs = 30'000'000;
 constexpr std::uint32_t kSaveStepBatch = 20;
-constexpr std::uint16_t kMinimumStrideMm = 300;
-constexpr std::uint16_t kMaximumStrideMm = 1'500;
+constexpr std::uint16_t kMinimumStepLengthMm = 300;
+constexpr std::uint16_t kMaximumStepLengthMm = 1'500;
 constexpr std::uint32_t kMinimumGoal = 500;
 constexpr std::uint32_t kMaximumGoal = 100'000;
 
@@ -51,8 +51,8 @@ bool dirty = false;
 bool priority_dirty = false;
 
 bool valid_settings(const ActivitySettings &settings) {
-    return settings.stride_length_mm >= kMinimumStrideMm &&
-           settings.stride_length_mm <= kMaximumStrideMm &&
+    return settings.step_length_mm >= kMinimumStepLengthMm &&
+           settings.step_length_mm <= kMaximumStepLengthMm &&
            settings.daily_goal_steps >= kMinimumGoal &&
            settings.daily_goal_steps <= kMaximumGoal &&
            (settings.units == ActivityUnits::imperial ||
@@ -61,7 +61,7 @@ bool valid_settings(const ActivitySettings &settings) {
 
 void update_derived(ActivitySnapshot &snapshot) {
     const auto distance_mm = static_cast<std::uint64_t>(snapshot.steps_today) *
-                             snapshot.settings.stride_length_mm;
+                             snapshot.settings.step_length_mm;
     snapshot.distance_mm = distance_mm;
     snapshot.distance_m = static_cast<std::uint32_t>(std::min<std::uint64_t>(
         distance_mm / 1000U, std::numeric_limits<std::uint32_t>::max()));
@@ -80,7 +80,8 @@ bool save_state() {
     esp_err_t result = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
     if (result != ESP_OK) return false;
     if ((result = nvs_set_u8(handle, "version", 1)) == ESP_OK &&
-        (result = nvs_set_u16(handle, "stride_mm", copy.settings.stride_length_mm)) == ESP_OK &&
+        // Retain the legacy NVS key so existing calibrated values migrate in place.
+        (result = nvs_set_u16(handle, "stride_mm", copy.settings.step_length_mm)) == ESP_OK &&
         (result = nvs_set_u8(handle, "units", static_cast<std::uint8_t>(copy.settings.units))) == ESP_OK &&
         (result = nvs_set_u32(handle, "goal", copy.settings.daily_goal_steps)) == ESP_OK &&
         (result = nvs_set_u32(handle, "steps", copy.steps_today)) == ESP_OK &&
@@ -117,11 +118,11 @@ void load_state() {
     nvs_handle_t handle{};
     const auto opened = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
     if (opened == ESP_OK) {
-        std::uint16_t stride{};
+        std::uint16_t step_length{};
         std::uint32_t value{};
         std::int64_t local_day{};
-        if (nvs_get_u16(handle, "stride_mm", &stride) == ESP_OK) {
-            loaded.settings.stride_length_mm = stride;
+        if (nvs_get_u16(handle, "stride_mm", &step_length) == ESP_OK) {
+            loaded.settings.step_length_mm = step_length;
         }
         std::uint8_t units{};
         if (nvs_get_u8(handle, "units", &units) == ESP_OK) {
@@ -321,8 +322,8 @@ nightglass::core::Status ActivityService::start() {
                                             : nightglass::core::HealthState::failed,
         current.persistence_ok ? "Activity sensor warm-up pending"
                                : "Activity started; persisted state unavailable");
-    ESP_LOGI(kTag, "Activity service active: stride=%u mm goal=%lu",
-             current.settings.stride_length_mm,
+    ESP_LOGI(kTag, "Activity service active: step length=%u mm goal=%lu",
+             current.settings.step_length_mm,
              static_cast<unsigned long>(current.settings.daily_goal_steps));
     return nightglass::core::Status::Ok();
 }

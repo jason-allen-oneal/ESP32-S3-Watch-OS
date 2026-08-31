@@ -16,7 +16,9 @@ enum class ActivityReadiness : std::uint8_t {
 };
 
 struct ActivitySettings {
-    std::uint16_t stride_length_mm{750};
+    // Distance is steps multiplied by the distance covered by one step.
+    // A gait stride spans two steps, so expose the unambiguous step length.
+    std::uint16_t step_length_mm{750};
     std::uint32_t daily_goal_steps{10'000};
     ActivityUnits units{ActivityUnits::imperial};
 };

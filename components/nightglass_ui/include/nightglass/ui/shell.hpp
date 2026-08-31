@@ -5,6 +5,7 @@
 #include "lvgl.h"
 #include "nightglass/core/navigation.hpp"
 #include "nightglass/core/status.hpp"
+#include "nightglass/services/weather_logic.hpp"
 
 namespace nightglass::ui {
 
@@ -25,7 +26,7 @@ private:
     static void watchface_settings_callback(lv_event_t *event);
     static void watchface_next_callback(lv_event_t *event);
     static void activity_callback(lv_event_t *event);
-    static void activity_stride_callback(lv_event_t *event);
+    static void activity_step_length_callback(lv_event_t *event);
     static void activity_units_callback(lv_event_t *event);
     static void activity_goal_callback(lv_event_t *event);
     static void activity_reset_callback(lv_event_t *event);
@@ -122,7 +123,7 @@ private:
     lv_obj_t *watchface_name_{nullptr};
     lv_obj_t *activity_steps_{nullptr};
     lv_obj_t *activity_detail_{nullptr};
-    lv_obj_t *activity_stride_{nullptr};
+    lv_obj_t *activity_step_length_{nullptr};
     lv_obj_t *activity_units_{nullptr};
     lv_obj_t *activity_goal_{nullptr};
     lv_obj_t *weather_state_{nullptr};
@@ -173,6 +174,10 @@ private:
     lv_obj_t *home_distance_{nullptr};
     lv_obj_t *home_weather_{nullptr};
     lv_obj_t *home_weather_icon_{nullptr};
+    bool home_weather_icon_state_valid_{false};
+    nightglass::services::WeatherIcon home_weather_icon_state_{
+        nightglass::services::WeatherIcon::cloudy};
+    std::uint32_t home_weather_icon_color_{0};
     lv_obj_t *home_notifications_{nullptr};
 
     // Diagnostics widgets exist only while that route is active.

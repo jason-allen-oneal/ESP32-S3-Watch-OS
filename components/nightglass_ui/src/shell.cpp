@@ -673,11 +673,11 @@ void Shell::activity_callback(lv_event_t *event) {
         nightglass::core::NavigationAction::open_activity);
 }
 
-void Shell::activity_stride_callback(lv_event_t *event) {
+void Shell::activity_step_length_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto settings = nightglass::services::activity_service().snapshot().settings;
-    settings.stride_length_mm = nightglass::services::next_stride_length(
-        settings.stride_length_mm, settings.units);
+    settings.step_length_mm = nightglass::services::next_step_length(
+        settings.step_length_mm, settings.units);
     nightglass::services::activity_service().update_settings(settings);
     self->refresh_activity();
 }
@@ -1126,8 +1126,9 @@ void Shell::render_activity() {
                              kSecondary);
     lv_obj_set_pos(activity_detail_, 0, 52);
     lv_obj_set_width(activity_detail_, kSafeContentWidth - 32);
-    activity_stride_ = make_button(content_host_, kSafeInset, 246, kSafeContentWidth, 48, "",
-                                   kSurface, kPrimary, activity_stride_callback, this);
+    activity_step_length_ = make_button(content_host_, kSafeInset, 246, kSafeContentWidth, 48, "",
+                                        kSurface, kPrimary,
+                                        activity_step_length_callback, this);
     activity_units_ = make_button(content_host_, kSafeInset, 304, kSafeContentWidth, 48, "",
                                   kSurface, kPrimary, activity_units_callback, this);
     activity_goal_ = make_button(content_host_, kSafeInset, 362, kSafeContentWidth, 48, "",
@@ -1553,9 +1554,9 @@ void Shell::refresh_activity() {
                             ? "CALIBRATING"
                             : "UNAVAILABLE");
     lv_label_set_text(activity_detail_, text);
-    nightglass::services::format_stride_length(
-        text, sizeof(text), snapshot.settings.stride_length_mm, snapshot.settings.units);
-    set_button_text(activity_stride_, text);
+    nightglass::services::format_step_length(
+        text, sizeof(text), snapshot.settings.step_length_mm, snapshot.settings.units);
+    set_button_text(activity_step_length_, text);
     set_button_text(activity_units_, snapshot.settings.units ==
                                          nightglass::services::ActivityUnits::imperial
                                      ? "DISTANCE  IMPERIAL" : "DISTANCE  METRIC");
@@ -1770,12 +1771,19 @@ void Shell::refresh_home() {
     const auto connectivity = nightglass::services::connectivity_service().snapshot();
     if (home_weather_icon_) {
         if (weather.data_valid) {
-            draw_weather_icon(home_weather_icon_,
-                              nightglass::services::weather_icon_for_code(
-                                  weather.current.weather_code, weather.current.is_day),
-                              weather.stale ? kAmber : pack.palette.accent);
-        } else {
+            const auto icon = nightglass::services::weather_icon_for_code(
+                weather.current.weather_code, weather.current.is_day);
+            const auto color = weather.stale ? kAmber : pack.palette.accent;
+            if (!home_weather_icon_state_valid_ || icon != home_weather_icon_state_ ||
+                color != home_weather_icon_color_) {
+                draw_weather_icon(home_weather_icon_, icon, color);
+                home_weather_icon_state_valid_ = true;
+                home_weather_icon_state_ = icon;
+                home_weather_icon_color_ = color;
+            }
+        } else if (home_weather_icon_state_valid_) {
             lv_obj_clean(home_weather_icon_);
+            home_weather_icon_state_valid_ = false;
         }
     }
     if (home_notifications_) {
@@ -2104,10 +2112,11 @@ void Shell::clear_route_objects() {
     home_distance_ = nullptr;
     home_weather_ = nullptr;
     home_weather_icon_ = nullptr;
+    home_weather_icon_state_valid_ = false;
     home_notifications_ = nullptr;
     activity_steps_ = nullptr;
     activity_detail_ = nullptr;
-    activity_stride_ = nullptr;
+    activity_step_length_ = nullptr;
     activity_units_ = nullptr;
     activity_goal_ = nullptr;
     weather_state_ = nullptr;

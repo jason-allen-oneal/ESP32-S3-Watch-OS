@@ -5,8 +5,8 @@
 namespace nightglass::services {
 namespace {
 constexpr std::uint64_t kMmPerMile = 1'609'344;
-constexpr std::uint16_t kMinimumStrideMm = 300;
-constexpr std::uint16_t kMaximumStrideMm = 1'500;
+constexpr std::uint16_t kMinimumStepLengthMm = 300;
+constexpr std::uint16_t kMaximumStepLengthMm = 1'500;
 }
 
 void format_activity_distance(char *buffer, std::size_t size,
@@ -30,24 +30,30 @@ void format_activity_distance(char *buffer, std::size_t size,
     }
 }
 
-void format_stride_length(char *buffer, std::size_t size,
-                          std::uint16_t stride_mm, ActivityUnits units) {
+void format_step_length(char *buffer, std::size_t size,
+                        std::uint16_t step_length_mm, ActivityUnits units) {
     if (!buffer || size == 0) return;
     if (units == ActivityUnits::metric) {
-        std::snprintf(buffer, size, "STRIDE  %.2f m", stride_mm / 1000.0);
+        std::snprintf(buffer, size, "STEP LENGTH  %.2f m", step_length_mm / 1000.0);
     } else {
-        std::snprintf(buffer, size, "STRIDE  %.1f in", stride_mm / 25.4);
+        std::snprintf(buffer, size, "STEP LENGTH  %.1f in", step_length_mm / 25.4);
     }
 }
 
-std::uint16_t next_stride_length(std::uint16_t stride_mm, ActivityUnits units) {
+std::uint16_t next_step_length(std::uint16_t step_length_mm, ActivityUnits units) {
     if (units == ActivityUnits::metric) {
-        const auto next = static_cast<std::uint16_t>(stride_mm + 50);
-        return next > kMaximumStrideMm ? kMinimumStrideMm : next;
+        const auto next = static_cast<std::uint16_t>(step_length_mm + 50);
+        return next > kMaximumStepLengthMm ? kMinimumStepLengthMm : next;
     }
-    const auto current_inches = static_cast<unsigned>((stride_mm + 13) / 25.4);
-    const auto next_inches = current_inches >= 59 ? 12U : current_inches + 1U;
-    return static_cast<std::uint16_t>(next_inches * 25.4 + 0.5);
+    // Half-inch increments keep the displayed value and each tap aligned.
+    constexpr unsigned kMinimumHalfInches = 24;   // 12.0 in
+    constexpr unsigned kMaximumHalfInches = 118;  // 59.0 in
+    const auto current_half_inches = static_cast<unsigned>(
+        (static_cast<std::uint32_t>(step_length_mm) * 10U + 63U) / 127U);
+    const auto next_half_inches = current_half_inches >= kMaximumHalfInches
+                                      ? kMinimumHalfInches
+                                      : current_half_inches + 1U;
+    return static_cast<std::uint16_t>((next_half_inches * 127U + 5U) / 10U);
 }
 
 }  // namespace nightglass::services
