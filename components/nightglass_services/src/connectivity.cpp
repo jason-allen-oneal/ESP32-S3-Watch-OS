@@ -139,6 +139,27 @@ bool apply_message(const CompanionMessage &message) {
         portEXIT_CRITICAL(&state_lock);
         return true;
     }
+    if (message.kind == CompanionMessageKind::agenda) {
+        portENTER_CRITICAL(&state_lock);
+        current.agenda = message.agenda;
+        ++current.sequence;
+        portEXIT_CRITICAL(&state_lock);
+        return true;
+    }
+    if (message.kind == CompanionMessageKind::phone_battery) {
+        portENTER_CRITICAL(&state_lock);
+        current.phone_battery = message.phone_battery;
+        ++current.sequence;
+        portEXIT_CRITICAL(&state_lock);
+        return true;
+    }
+    if (message.kind == CompanionMessageKind::call_state) {
+        portENTER_CRITICAL(&state_lock);
+        current.call = message.call;
+        ++current.sequence;
+        portEXIT_CRITICAL(&state_lock);
+        return true;
+    }
     if (message.kind == CompanionMessageKind::reply_result) {
         portENTER_CRITICAL(&state_lock);
         const bool matches = current.reply_pending &&
@@ -578,6 +599,16 @@ nightglass::core::Status ConnectivityService::update_settings(
 
 bool ConnectivityService::send_media(MediaCommand command) {
     const auto frame = encode_media_command(command, outbound_sequence.fetch_add(1) + 1);
+    return notify_outbound(frame.data(), frame.size());
+}
+
+bool ConnectivityService::send_call(CallCommand command) {
+    const auto frame = encode_call_command(command, outbound_sequence.fetch_add(1) + 1);
+    return notify_outbound(frame.data(), frame.size());
+}
+
+bool ConnectivityService::send_phone(PhoneCommand command) {
+    const auto frame = encode_phone_command(command, outbound_sequence.fetch_add(1) + 1);
     return notify_outbound(frame.data(), frame.size());
 }
 

@@ -10,6 +10,7 @@ import android.media.session.MediaController
 import android.media.session.PlaybackState
 import android.os.Bundle
 import android.os.Build
+import android.os.SystemClock
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import dev.nightglass.companion.ble.NightglassConnectionService
@@ -43,6 +44,21 @@ class NightglassNotificationListener : NotificationListenerService() {
             NightglassConnectionService.send(service, NightglassProtocol.clear())
             service.activeNotifications.forEach { service.relay(it, false) }
             service.relayMedia()
+        }
+        fun syncMedia() { current?.relayMedia() }
+        fun seekMedia(deltaMs: Long): Boolean {
+            val service = current ?: return false
+            val controller = service.mediaController ?: return false
+            val state = controller.playbackState ?: return false
+            if ((state.actions and PlaybackState.ACTION_SEEK_TO) == 0L) return false
+            val duration = controller.metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+            if (duration <= 0L) return false
+            val target = (service.currentPosition(state)).plus(deltaMs).coerceIn(0L, duration)
+            return runCatching {
+                controller.transportControls.seekTo(target)
+                service.relayMedia()
+                true
+            }.getOrDefault(false)
         }
         fun perform(id: UInt, dismiss: Boolean) {
             val service = current ?: return; val key = keys[id] ?: return
@@ -126,9 +142,23 @@ class NightglassNotificationListener : NotificationListenerService() {
         val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty()
         val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST)
             ?: metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST).orEmpty()
-        val playing = controller?.playbackState?.state == PlaybackState.STATE_PLAYING
+        val state = controller?.playbackState
+        val playing = state?.state == PlaybackState.STATE_PLAYING
+        val duration = (metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L)
+            .coerceIn(0L, 604_800_000L)
+        val position = if (state == null || duration == 0L) 0L
+            else currentPosition(state).coerceIn(0L, duration)
+        val seekable = state != null && duration > 0L &&
+            (state.actions and PlaybackState.ACTION_SEEK_TO) != 0L
         NightglassConnectionService.send(
-            this, NightglassProtocol.mediaState(title, artist, playing, controller != null))
+            this, NightglassProtocol.mediaState(title, artist, playing, controller != null,
+                seekable, position, duration))
+    }
+    private fun currentPosition(state: PlaybackState): Long {
+        if (state.state != PlaybackState.STATE_PLAYING || state.lastPositionUpdateTime <= 0L)
+            return state.position.coerceAtLeast(0L)
+        val elapsed = (SystemClock.elapsedRealtime() - state.lastPositionUpdateTime).coerceAtLeast(0L)
+        return (state.position + elapsed * state.playbackSpeed).toLong().coerceAtLeast(0L)
     }
     private fun relay(sbn: StatusBarNotification, alert: Boolean) {
         if (sbn.packageName == packageName || sbn.isOngoing || (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return

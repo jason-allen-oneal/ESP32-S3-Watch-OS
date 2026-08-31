@@ -75,3 +75,20 @@ tenths `i16`, WMO weather code `u16`, and wind-speed tenths `u16`. All integers
 are little-endian. The watch rejects unknown flags, nonzero reserved data,
 invalid ranges, observations older than six hours, observations more than five
 minutes in the future, unit mismatches, and data older than its current source.
+
+## Phone integrations
+
+- `0x05` carries at most three agenda events for the next 24 hours, with bounded
+  times, title, and location. Descriptions, attendees, and accounts stay local.
+- `0x06` carries phone battery percentage and charging/power-save flags.
+- `0x07` adds media seekability and bounded position/duration. Media commands
+  6/7 seek by 15 seconds when Android advertises seek support.
+- `0x08` carries generic call state without number/contact identity. Outbound
+  `0x14` controls answer, reject, or handset-microphone mute; no call audio is
+  carried over BLE.
+- Outbound `0x15` starts/stops a bounded 30-second phone ring or launches the
+  system camera intent.
+
+These frames retain the bonded, pinned, encrypted GATT boundary and MTU bounds.
+Logs contain opcode, length, and status, not private payload content. Missing
+Android calendar/telephony permission produces empty or unavailable state.

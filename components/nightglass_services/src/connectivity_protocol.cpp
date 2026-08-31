@@ -8,10 +8,16 @@ constexpr std::uint8_t kUpsert = 0x01;
 constexpr std::uint8_t kRemove = 0x02;
 constexpr std::uint8_t kClear = 0x03;
 constexpr std::uint8_t kMediaState = 0x04;
+constexpr std::uint8_t kAgenda = 0x05;
+constexpr std::uint8_t kPhoneBattery = 0x06;
+constexpr std::uint8_t kMediaProgress = 0x07;
+constexpr std::uint8_t kCallState = 0x08;
 constexpr std::uint8_t kMedia = 0x10;
 constexpr std::uint8_t kDismiss = 0x11;
 constexpr std::uint8_t kRead = 0x12;
 constexpr std::uint8_t kReply = 0x13;
+constexpr std::uint8_t kCall = 0x14;
+constexpr std::uint8_t kPhone = 0x15;
 constexpr std::uint8_t kWifiProvision = 0x20;
 constexpr std::uint8_t kWeatherSettings = 0x21;
 constexpr std::uint8_t kWifiClear = 0x22;
@@ -83,6 +89,80 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
         copy_ascii(message.media.title, frame.data() + 5, title_length);
         copy_ascii(message.media.artist, frame.data() + 5 + title_length, artist_length);
         message.kind = CompanionMessageKind::media_state;
+        return true;
+    }
+    if (frame[1] == kMediaProgress) {
+        if (frame.size() < 13 || (frame[2] & ~std::uint8_t{0x07}) != 0) return false;
+        const auto title_length = static_cast<std::size_t>(frame[3]);
+        const auto artist_length = static_cast<std::size_t>(frame[4]);
+        if (title_length > 48 || artist_length > 48 ||
+            frame.size() != 13U + title_length + artist_length) return false;
+        message.media.playing = (frame[2] & 0x01U) != 0;
+        message.media.available = (frame[2] & 0x02U) != 0;
+        message.media.seekable = (frame[2] & 0x04U) != 0;
+        message.media.position_ms = read_u32(frame.data() + 5);
+        message.media.duration_ms = read_u32(frame.data() + 9);
+        if ((!message.media.available &&
+             (message.media.playing || message.media.seekable || message.media.position_ms != 0 ||
+              message.media.duration_ms != 0 || title_length != 0 || artist_length != 0)) ||
+            message.media.duration_ms > 604'800'000U ||
+            (message.media.duration_ms != 0 &&
+             message.media.position_ms > message.media.duration_ms)) return false;
+        copy_ascii(message.media.title, frame.data() + 13, title_length);
+        copy_ascii(message.media.artist, frame.data() + 13 + title_length, artist_length);
+        message.kind = CompanionMessageKind::media_state;
+        return true;
+    }
+    if (frame[1] == kAgenda) {
+        if (frame.size() < 3 || frame[2] > kAgendaCapacity) return false;
+        std::size_t offset = 3;
+        message.agenda.count = frame[2];
+        for (std::size_t index = 0; index < message.agenda.count; ++index) {
+            if (frame.size() - offset < 11) return false;
+            auto &event = message.agenda.events[index];
+            event.start_epoch_seconds = read_u32(frame.data() + offset);
+            event.end_epoch_seconds = read_u32(frame.data() + offset + 4);
+            const auto flags = frame[offset + 8];
+            const auto title_length = static_cast<std::size_t>(frame[offset + 9]);
+            const auto location_length = static_cast<std::size_t>(frame[offset + 10]);
+            if ((flags & ~std::uint8_t{0x01}) != 0 || title_length > 32 ||
+                location_length > 15 ||
+                frame.size() - offset < 11 + title_length + location_length ||
+                event.start_epoch_seconds < 1'577'836'800U ||
+                event.end_epoch_seconds < event.start_epoch_seconds) return false;
+            event.all_day = (flags & 0x01U) != 0;
+            copy_ascii(event.title, frame.data() + offset + 11, title_length);
+            copy_ascii(event.location, frame.data() + offset + 11 + title_length,
+                       location_length);
+            event.valid = true;
+            offset += 11 + title_length + location_length;
+        }
+        if (offset != frame.size()) return false;
+        message.kind = CompanionMessageKind::agenda;
+        return true;
+    }
+    if (frame[1] == kPhoneBattery) {
+        if (frame.size() != 5 || frame[2] > 100 ||
+            (frame[3] & ~std::uint8_t{0x03}) != 0 || frame[4] != 0) return false;
+        message.phone_battery.percent = frame[2];
+        message.phone_battery.charging = (frame[3] & 0x01U) != 0;
+        message.phone_battery.power_save = (frame[3] & 0x02U) != 0;
+        message.phone_battery.valid = true;
+        message.kind = CompanionMessageKind::phone_battery;
+        return true;
+    }
+    if (frame[1] == kCallState) {
+        if (frame.size() < 4 || (frame[2] & ~std::uint8_t{0x1f}) != 0) return false;
+        const auto label_length = static_cast<std::size_t>(frame[3]);
+        if (label_length > 48 || frame.size() != 4U + label_length) return false;
+        message.call.ringing = (frame[2] & 0x01U) != 0;
+        message.call.active = (frame[2] & 0x02U) != 0;
+        message.call.muted = (frame[2] & 0x04U) != 0;
+        message.call.can_answer = (frame[2] & 0x08U) != 0;
+        message.call.can_reject = (frame[2] & 0x10U) != 0;
+        if (message.call.can_answer && !message.call.ringing) return false;
+        copy_ascii(message.call.label, frame.data() + 4, label_length);
+        message.kind = CompanionMessageKind::call_state;
         return true;
     }
     if (frame[1] == kReplyResult) {
@@ -206,6 +286,16 @@ EncodedReply encode_notification_reply(std::uint32_t notification_id,
 std::array<std::uint8_t, 4> encode_media_command(MediaCommand command,
                                                   std::uint8_t sequence) noexcept {
     return {kCompanionProtocolVersion, kMedia, sequence, static_cast<std::uint8_t>(command)};
+}
+
+std::array<std::uint8_t, 4> encode_call_command(CallCommand command,
+                                                std::uint8_t sequence) noexcept {
+    return {kCompanionProtocolVersion, kCall, sequence, static_cast<std::uint8_t>(command)};
+}
+
+std::array<std::uint8_t, 4> encode_phone_command(PhoneCommand command,
+                                                 std::uint8_t sequence) noexcept {
+    return {kCompanionProtocolVersion, kPhone, sequence, static_cast<std::uint8_t>(command)};
 }
 
 std::array<std::uint8_t, 7> encode_notification_action(

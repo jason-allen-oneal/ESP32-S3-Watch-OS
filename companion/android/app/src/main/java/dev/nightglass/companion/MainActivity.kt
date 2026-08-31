@@ -63,6 +63,8 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= 31) permissions += listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         else permissions += Manifest.permission.ACCESS_FINE_LOCATION
         if (Build.VERSION.SDK_INT >= 33) permissions += Manifest.permission.POST_NOTIFICATIONS
+        permissions += listOf(Manifest.permission.READ_CALENDAR,
+            Manifest.permission.READ_PHONE_STATE, Manifest.permission.ANSWER_PHONE_CALLS)
         permissionRequest.launch(permissions.toTypedArray())
     }
     private fun connect() { ContextCompat.startForegroundService(this, Intent(this, NightglassConnectionService::class.java).setAction(NightglassConnectionService.ACTION_CONNECT)) }

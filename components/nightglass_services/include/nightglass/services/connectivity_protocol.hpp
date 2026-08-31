@@ -10,6 +10,7 @@ namespace nightglass::services {
 
 constexpr std::uint8_t kCompanionProtocolVersion = 1;
 constexpr std::size_t kNotificationCapacity = 6;
+constexpr std::size_t kAgendaCapacity = 3;
 
 enum class NotificationCategory : std::uint8_t {
     other = 0, message = 1, call = 2, email = 3, calendar = 4, social = 5,
@@ -17,7 +18,11 @@ enum class NotificationCategory : std::uint8_t {
 
 enum class MediaCommand : std::uint8_t {
     play_pause = 1, next = 2, previous = 3, volume_up = 4, volume_down = 5,
+    seek_backward = 6, seek_forward = 7,
 };
+
+enum class CallCommand : std::uint8_t { answer = 1, reject = 2, mute_toggle = 3 };
+enum class PhoneCommand : std::uint8_t { ring_start = 1, ring_stop = 2, camera = 3 };
 
 struct CompanionNotification {
     std::uint32_t id{0};
@@ -38,6 +43,39 @@ struct CompanionMediaState {
     std::array<char, 49> artist{};
     bool playing{false};
     bool available{false};
+    bool seekable{false};
+    std::uint32_t position_ms{0};
+    std::uint32_t duration_ms{0};
+};
+
+struct CompanionAgendaEvent {
+    std::uint32_t start_epoch_seconds{0};
+    std::uint32_t end_epoch_seconds{0};
+    std::array<char, 33> title{};
+    std::array<char, 16> location{};
+    bool all_day{false};
+    bool valid{false};
+};
+
+struct CompanionAgenda {
+    std::uint8_t count{0};
+    std::array<CompanionAgendaEvent, kAgendaCapacity> events{};
+};
+
+struct CompanionPhoneBattery {
+    std::uint8_t percent{0};
+    bool charging{false};
+    bool power_save{false};
+    bool valid{false};
+};
+
+struct CompanionCallState {
+    std::array<char, 49> label{};
+    bool ringing{false};
+    bool active{false};
+    bool muted{false};
+    bool can_answer{false};
+    bool can_reject{false};
 };
 
 struct CompanionReplyResult {
@@ -48,7 +86,8 @@ struct CompanionReplyResult {
 
 enum class CompanionMessageKind : std::uint8_t {
     invalid = 0, notification_upsert, notification_remove, notification_clear,
-    media_state, reply_result, wifi_provision, wifi_clear, weather_settings, weather_snapshot,
+    media_state, agenda, phone_battery, call_state, reply_result,
+    wifi_provision, wifi_clear, weather_settings, weather_snapshot,
 };
 
 struct CompanionWifiProvisioning {
@@ -86,6 +125,9 @@ struct CompanionMessage {
     CompanionWeatherSettings weather{};
     CompanionWeatherSnapshot weather_snapshot{};
     CompanionMediaState media{};
+    CompanionAgenda agenda{};
+    CompanionPhoneBattery phone_battery{};
+    CompanionCallState call{};
     CompanionReplyResult reply_result{};
 };
 
@@ -97,6 +139,10 @@ struct EncodedReply {
 [[nodiscard]] bool parse_companion_message(std::span<const std::uint8_t> frame,
                                            CompanionMessage &message) noexcept;
 [[nodiscard]] std::array<std::uint8_t, 4> encode_media_command(MediaCommand command,
+                                                               std::uint8_t sequence) noexcept;
+[[nodiscard]] std::array<std::uint8_t, 4> encode_call_command(CallCommand command,
+                                                              std::uint8_t sequence) noexcept;
+[[nodiscard]] std::array<std::uint8_t, 4> encode_phone_command(PhoneCommand command,
                                                                std::uint8_t sequence) noexcept;
 [[nodiscard]] std::array<std::uint8_t, 7> encode_notification_action(
     bool dismiss, std::uint32_t notification_id, std::uint8_t sequence) noexcept;

@@ -44,6 +44,26 @@ int main() {
     assert(parse_companion_message(media_state, message));
     assert(message.kind == CompanionMessageKind::media_state);
     assert(message.media.playing && message.media.available);
+    const std::array<std::uint8_t, 21> media_progress{
+        1, 7, 7, 4, 4, 0x98, 0x3A, 0, 0, 0xC0, 0xD4, 0x01, 0,
+        'S', 'o', 'n', 'g', 'B', 'a', 'n', 'd'};
+    assert(parse_companion_message(media_progress, message));
+    assert(message.media.seekable && message.media.position_ms == 15000 &&
+           message.media.duration_ms == 120000);
+    const std::array<std::uint8_t, 26> agenda{
+        1, 5, 1, 0, 0xF1, 0x53, 0x65, 0x10, 0xFF, 0x53, 0x65,
+        0, 7, 5, 'S', 't', 'a', 'n', 'd', 'u', 'p', 'R', 'o', 'o', 'm'};
+    assert(parse_companion_message(agenda, message));
+    assert(message.kind == CompanionMessageKind::agenda && message.agenda.count == 1);
+    const std::array<std::uint8_t, 5> battery{1, 6, 73, 3, 0};
+    assert(parse_companion_message(battery, message));
+    const std::array<std::uint8_t, 12> call{1, 8, 0x19, 8,
+        'I', 'n', 'c', 'o', 'm', 'i', 'n', 'g'};
+    assert(parse_companion_message(call, message));
+    auto invalid_call = call; invalid_call[2] = 0x08;
+    assert(!parse_companion_message(invalid_call, message));
+    assert(encode_call_command(CallCommand::answer, 3)[1] == 0x14);
+    assert(encode_phone_command(PhoneCommand::camera, 4)[1] == 0x15);
     const std::array<std::uint8_t, 10> wifi{1, 0x20, 3, 3, 'N', 'e', 't', 's', 'e', 'c'};
     assert(parse_companion_message(wifi, message));
     assert(message.kind == CompanionMessageKind::wifi_provision);

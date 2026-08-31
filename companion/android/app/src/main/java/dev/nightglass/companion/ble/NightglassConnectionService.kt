@@ -17,6 +17,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.nightglass.companion.protocol.NightglassProtocol
 import dev.nightglass.companion.notifications.NightglassNotificationListener
+import dev.nightglass.companion.phone.PhoneIntegrationManager
 import dev.nightglass.companion.weather.PhoneWeatherProxy
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
@@ -56,6 +57,7 @@ class NightglassConnectionService : Service() {
     private var connectionStatus = "Searching for Nightglass"
     private val reconnect = Runnable { if (!explicitDisconnect && gatt == null) reconnectBondedOrScan() }
     private val weatherExecutor = Executors.newSingleThreadExecutor()
+    private val phoneIntegrations by lazy { PhoneIntegrationManager(this, weatherExecutor) }
     @Volatile private var destroyed = false
     private var weatherFetchInFlight = false
     private val weatherRefresh = Runnable { fetchPhoneWeather() }
@@ -81,6 +83,7 @@ class NightglassConnectionService : Service() {
             ContextCompat.RECEIVER_EXPORTED)
         runCatching { getSystemService(ConnectivityManager::class.java)
             .registerDefaultNetworkCallback(networkCallback) }
+        phoneIntegrations.start()
     }
     override fun onDestroy() {
         destroyed = true
@@ -92,6 +95,7 @@ class NightglassConnectionService : Service() {
             .unregisterNetworkCallback(networkCallback) }
         stopScan()
         reconnectHandler.removeCallbacks(weatherRefresh)
+        phoneIntegrations.stop()
         weatherExecutor.shutdownNow()
         closeGatt()
         super.onDestroy()
@@ -259,6 +263,8 @@ class NightglassConnectionService : Service() {
             // frames. Live posts received while the link was unavailable are
             // never replayed later as surprise audible alerts.
             NightglassNotificationListener.syncCurrent()
+            NightglassNotificationListener.syncMedia()
+            phoneIntegrations.refreshAll()
             scheduleWeatherRefresh(0)
         }
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
@@ -292,9 +298,15 @@ class NightglassConnectionService : Service() {
             write(NightglassProtocol.replyResult(
                 action.sequence, status, action.id, action.nonce))
         }
+        is NightglassProtocol.WatchAction.Call -> phoneIntegrations.handleCall(action.command)
+        is NightglassProtocol.WatchAction.Phone -> phoneIntegrations.handlePhone(action.command)
         null -> Unit
     } }
     private fun handleMedia(command: Int) {
+        if (command == 6 || command == 7) {
+            NightglassNotificationListener.seekMedia(if (command == 6) -15_000L else 15_000L)
+            return
+        }
         val key = when(command) { 1 -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE; 2 -> KeyEvent.KEYCODE_MEDIA_NEXT; 3 -> KeyEvent.KEYCODE_MEDIA_PREVIOUS; 4 -> KeyEvent.KEYCODE_VOLUME_UP; 5 -> KeyEvent.KEYCODE_VOLUME_DOWN; else -> return }
         val audio = getSystemService(AudioManager::class.java)
         audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, key)); audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, key))

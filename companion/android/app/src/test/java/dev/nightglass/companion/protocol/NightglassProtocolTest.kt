@@ -25,11 +25,40 @@ class NightglassProtocolTest {
     }
     @Test fun mediaAndReplyResultsAreBounded() {
         val media = NightglassProtocol.mediaState("Song", "Artist", true, true)
-        assertEquals(4, media[1].toInt())
+        assertEquals(7, media[1].toInt())
         assertEquals(3, media[2].toInt())
         val result = NightglassProtocol.replyResult(7, 0, 0x78563412u, 0x11223344u)
         assertEquals(12, result.size)
         assertEquals(0x24, result[1].toInt())
+    }
+    @Test fun phoneFeatureFramesAreBounded() {
+        val agenda = NightglassProtocol.agenda(listOf(
+            NightglassProtocol.AgendaEvent(1_700_000_000L, 1_700_003_600L,
+                "Standup", "Room", false)))
+        assertEquals(5, agenda[1].toInt())
+        assertTrue(agenda.size <= 179)
+        assertArrayEquals(byteArrayOf(1, 6, 73, 3, 0),
+            NightglassProtocol.phoneBattery(73, true, true))
+        assertEquals(8, NightglassProtocol.callState(true, false, false,
+            true, true, "Incoming")[1].toInt())
+        val progress = NightglassProtocol.mediaState("Song", "Artist", true, true,
+            true, 15_000, 120_000)
+        assertEquals(7, progress[1].toInt())
+        assertEquals(7, progress[2].toInt())
+        assertThrows(IllegalArgumentException::class.java) {
+            NightglassProtocol.agenda(List(4) {
+                NightglassProtocol.AgendaEvent(1_700_000_000L, 1_700_000_001L,
+                    "x", "", false)
+            })
+        }
+    }
+    @Test fun parsesBoundedPhoneActions() {
+        assertEquals(NightglassProtocol.WatchAction.Call(4, 1),
+            NightglassProtocol.parseAction(byteArrayOf(1, 0x14, 4, 1)))
+        assertEquals(NightglassProtocol.WatchAction.Phone(9, 3),
+            NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 9, 3)))
+        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x14, 4, 4)))
+        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 9, 0)))
     }
     @Test fun provisioningContainsNoPersistentState() {
         val frame = NightglassProtocol.provisionWifi("wifi", "secret".toCharArray())

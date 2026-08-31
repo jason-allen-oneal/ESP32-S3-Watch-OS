@@ -15,11 +15,15 @@ object NightglassProtocol {
     data class RelayNotification(val id: UInt, val category: Int, val app: String,
                                  val title: String, val body: String,
                                  val replyable: Boolean = false)
+    data class AgendaEvent(val startEpochSeconds: Long, val endEpochSeconds: Long,
+                           val title: String, val location: String, val allDay: Boolean)
     sealed interface WatchAction {
         data class Media(val sequence: Int, val command: Int): WatchAction
         data class Notification(val sequence: Int, val id: UInt, val dismiss: Boolean): WatchAction
         data class Reply(val sequence: Int, val id: UInt, val nonce: UInt,
                          val text: String): WatchAction
+        data class Call(val sequence: Int, val command: Int): WatchAction
+        data class Phone(val sequence: Int, val command: Int): WatchAction
     }
 
     private fun ascii(value: String, max: Int) = value.map { if (it.code in 0x20..0x7e) it else '?' }.joinToString("").toByteArray(Charsets.US_ASCII).copyOfRange(0, minOf(max, value.length))
@@ -33,12 +37,52 @@ object NightglassProtocol {
     fun remove(id: UInt) = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN).put(VERSION).put(2).putInt(id.toInt()).array()
     fun clear() = byteArrayOf(VERSION, 3)
     fun mediaState(titleValue: String, artistValue: String, playing: Boolean,
-                   available: Boolean): ByteArray {
+                   available: Boolean, seekable: Boolean = false,
+                   positionMs: Long = 0, durationMs: Long = 0): ByteArray {
         val title = ascii(titleValue, 48); val artist = ascii(artistValue, 48)
-        val flags = (if (playing) 1 else 0) or (if (available) 2 else 0)
-        return ByteBuffer.allocate(5 + title.size + artist.size)
-            .put(VERSION).put(4).put(flags.toByte()).put(title.size.toByte())
-            .put(artist.size.toByte()).put(title).put(artist).array()
+        require(positionMs in 0..604_800_000L && durationMs in 0..604_800_000L)
+        require(durationMs == 0L || positionMs <= durationMs)
+        require(available || (!playing && !seekable && positionMs == 0L && durationMs == 0L &&
+            title.isEmpty() && artist.isEmpty()))
+        val flags = (if (playing) 1 else 0) or (if (available) 2 else 0) or
+            (if (seekable) 4 else 0)
+        return ByteBuffer.allocate(13 + title.size + artist.size).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(7).put(flags.toByte()).put(title.size.toByte())
+            .put(artist.size.toByte()).putInt(positionMs.toInt()).putInt(durationMs.toInt())
+            .put(title).put(artist).array()
+    }
+    fun agenda(events: List<AgendaEvent>): ByteArray {
+        require(events.size <= 3)
+        val encoded = events.map { event ->
+            require(event.startEpochSeconds in 1_577_836_800L..UInt.MAX_VALUE.toLong())
+            require(event.endEpochSeconds in event.startEpochSeconds..UInt.MAX_VALUE.toLong())
+            Triple(ascii(event.title, 32), ascii(event.location, 15), event)
+        }
+        val size = 3 + encoded.sumOf { 11 + it.first.size + it.second.size }
+        require(size <= 179)
+        return ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN).apply {
+            put(VERSION).put(5).put(encoded.size.toByte())
+            encoded.forEach { (title, location, event) ->
+                putInt(event.startEpochSeconds.toInt()).putInt(event.endEpochSeconds.toInt())
+                put((if (event.allDay) 1 else 0).toByte()).put(title.size.toByte())
+                    .put(location.size.toByte()).put(title).put(location)
+            }
+        }.array()
+    }
+    fun phoneBattery(percent: Int, charging: Boolean, powerSave: Boolean): ByteArray {
+        require(percent in 0..100)
+        val flags = (if (charging) 1 else 0) or (if (powerSave) 2 else 0)
+        return byteArrayOf(VERSION, 6, percent.toByte(), flags.toByte(), 0)
+    }
+    fun callState(ringing: Boolean, active: Boolean, muted: Boolean,
+                  canAnswer: Boolean, canReject: Boolean, labelValue: String): ByteArray {
+        require(!canAnswer || ringing)
+        val label = ascii(labelValue, 48)
+        val flags = (if (ringing) 1 else 0) or (if (active) 2 else 0) or
+            (if (muted) 4 else 0) or (if (canAnswer) 8 else 0) or
+            (if (canReject) 16 else 0)
+        return ByteBuffer.allocate(4 + label.size).put(VERSION).put(8).put(flags.toByte())
+            .put(label.size.toByte()).put(label).array()
     }
     fun parseAction(frame: ByteArray): WatchAction? {
         if (frame.size < 2 || frame[0] != VERSION) return null
@@ -63,6 +107,10 @@ object NightglassProtocol {
                         textBytes.toString(Charsets.US_ASCII))
                 }
             }
+            0x14 -> if (frame.size == 4 && (frame[3].toInt() and 0xff) in 1..3)
+                WatchAction.Call(frame[2].toInt() and 0xff, frame[3].toInt() and 0xff) else null
+            0x15 -> if (frame.size == 4 && (frame[3].toInt() and 0xff) in 1..3)
+                WatchAction.Phone(frame[2].toInt() and 0xff, frame[3].toInt() and 0xff) else null
             else -> null
         }
     }
