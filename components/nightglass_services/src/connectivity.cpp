@@ -230,13 +230,15 @@ int gap_event(ble_gap_event *event, void *) {
                 // Wearable-oriented parameters: 40-60 ms connection interval
                 // with peripheral latency 4 gives a bounded ~300 ms worst-case
                 // notification delay while allowing the controller to sleep
-                // between connection events. The central may negotiate nearby
-                // values; failure is non-fatal and leaves the link usable.
+                // between connection events. Use a 20-second supervision window:
+                // the previous 6-second value was brittle when both Samsung and
+                // the ESP32 controller entered power-saving states simultaneously.
+                // The central may negotiate nearby values; failure is non-fatal.
                 const ble_gap_upd_params power_params{
                     .itvl_min = 32,
                     .itvl_max = 48,
                     .latency = 4,
-                    .supervision_timeout = 600,
+                    .supervision_timeout = 2000,
                     .min_ce_len = 0,
                     .max_ce_len = 0,
                 };
