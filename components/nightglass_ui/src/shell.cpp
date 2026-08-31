@@ -1,6 +1,7 @@
 #include "nightglass/ui/shell.hpp"
 
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -684,6 +685,47 @@ void Shell::audio_capture_callback(lv_event_t *event) {
     lv_label_set_text(self->audio_detail_, "Microphone sample queued off the UI task");
 }
 
+void Shell::audio_volume_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::audio_service().snapshot().settings;
+    settings.volume_percent = settings.volume_percent >= 100
+                                  ? 0
+                                  : static_cast<std::uint8_t>(settings.volume_percent + 10);
+    const auto status = nightglass::services::audio_service().update_settings(settings);
+    if (!status.is_ok()) {
+        set_state(self->audio_state_, "SAVE FAILED", kRed);
+        lv_label_set_text(self->audio_detail_, status.detail);
+        return;
+    }
+    self->refresh_audio();
+}
+
+void Shell::audio_mute_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::audio_service().snapshot().settings;
+    settings.muted = !settings.muted;
+    const auto status = nightglass::services::audio_service().update_settings(settings);
+    if (!status.is_ok()) {
+        set_state(self->audio_state_, "SAVE FAILED", kRed);
+        lv_label_set_text(self->audio_detail_, status.detail);
+        return;
+    }
+    self->refresh_audio();
+}
+
+void Shell::audio_dnd_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::audio_service().snapshot().settings;
+    settings.do_not_disturb = !settings.do_not_disturb;
+    const auto status = nightglass::services::audio_service().update_settings(settings);
+    if (!status.is_ok()) {
+        set_state(self->audio_state_, "SAVE FAILED", kRed);
+        lv_label_set_text(self->audio_detail_, status.detail);
+        return;
+    }
+    self->refresh_audio();
+}
+
 void Shell::dismiss_alert_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     nightglass::services::clock_service().dismiss_alerts();
@@ -804,13 +846,51 @@ void Shell::connectivity_callback(lv_event_t *event) {
 }
 
 void Shell::notifications_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    self->selected_notification_id_ = 0;
+    self->navigate(nightglass::core::NavigationAction::open_notifications);
+}
+
+void Shell::media_app_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
-        nightglass::core::NavigationAction::open_notifications);
+        nightglass::core::NavigationAction::open_media);
+}
+
+void Shell::notification_detail_callback(lv_event_t *event) {
+    auto *context = static_cast<NotificationActionContext *>(lv_event_get_user_data(event));
+    if (!context || !context->shell || context->id == 0) return;
+    context->shell->selected_notification_id_ = context->id;
+    context->shell->render_route();
+}
+
+void Shell::notification_list_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    self->selected_notification_id_ = 0;
+    self->render_route();
+}
+
+void Shell::notification_reply_send_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (!self || !self->notification_reply_box_ || self->selected_notification_id_ == 0) return;
+    const char *text = lv_textarea_get_text(self->notification_reply_box_);
+    const bool sent = text && text[0] != '\0' &&
+                      nightglass::services::connectivity_service().reply_notification(
+                          self->selected_notification_id_, text);
+    set_button_text(lv_event_get_current_target_obj(event),
+                    sent ? "SENDING..." : "FAILED");
+    if (sent) lv_textarea_set_text(self->notification_reply_box_, "");
 }
 
 void Shell::notification_action_callback(lv_event_t *event) {
     auto *context = static_cast<NotificationActionContext *>(lv_event_get_user_data(event));
     if (!context || !context->shell || context->id == 0) return;
+    if (context->reply != nullptr) {
+        const bool sent = nightglass::services::connectivity_service().reply_notification(
+            context->id, context->reply);
+        set_button_text(lv_event_get_current_target_obj(event),
+                        sent ? "SENDING..." : "FAILED");
+        return;
+    }
     const bool sent = nightglass::services::connectivity_service().mark_notification(
         context->id, context->dismiss);
     if (!context->dismiss || !sent) {
@@ -829,7 +909,11 @@ void Shell::connectivity_toggle_callback(lv_event_t *event) {
 void Shell::media_callback(lv_event_t *event) {
     const auto command = static_cast<nightglass::services::MediaCommand>(
         reinterpret_cast<std::uintptr_t>(lv_event_get_user_data(event)));
-    nightglass::services::connectivity_service().send_media(command);
+    const bool sent = nightglass::services::connectivity_service().send_media(command);
+    if (auto *self = &instance; self->media_state_) {
+        set_state(self->media_state_, sent ? "COMMAND SENT" : "COMMAND FAILED",
+                  sent ? kGreen : kRed);
+    }
 }
 
 void Shell::face_action_callback(lv_event_t *event) {
@@ -911,6 +995,9 @@ void Shell::render_route() {
             break;
         case nightglass::core::Route::connectivity:
             render_connectivity();
+            break;
+        case nightglass::core::Route::media:
+            render_media();
             break;
         case nightglass::core::Route::notifications:
             render_notifications();
@@ -1098,13 +1185,15 @@ void Shell::render_launcher() {
                 kSurface, kPrimary, weather_callback, this);
     make_button(scroller, 0, 6 * gap, kSafeContentWidth - 16, row_height, "PHONE",
                 kSurface, kPrimary, connectivity_callback, this);
-    make_button(scroller, 0, 7 * gap, kSafeContentWidth - 16, row_height, "NOTIFICATIONS",
+    make_button(scroller, 0, 7 * gap, kSafeContentWidth - 16, row_height, "MEDIA",
+                kSurface, kPrimary, media_app_callback, this);
+    make_button(scroller, 0, 8 * gap, kSafeContentWidth - 16, row_height, "NOTIFICATIONS",
                 kSurface, kPrimary, notifications_callback, this);
-    make_button(scroller, 0, 8 * gap, kSafeContentWidth - 16, row_height, "AUDIO",
+    make_button(scroller, 0, 9 * gap, kSafeContentWidth - 16, row_height, "AUDIO",
                 kSurface, kPrimary, audio_callback, this);
-    make_button(scroller, 0, 9 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
+    make_button(scroller, 0, 10 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
                 kSurface, kPrimary, diagnostics_callback, this);
-    make_button(scroller, 0, 10 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
+    make_button(scroller, 0, 11 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
                 kSurface, kPrimary, about_callback, this);
 }
 
@@ -1121,11 +1210,13 @@ void Shell::render_settings() {
                 kSurface, kPrimary, activity_callback, this);
     make_button(scroller, 0, 360, kSafeContentWidth - 16, 76, "NETWORK & WEATHER",
                 kSurface, kPrimary, weather_callback, this);
-    make_button(scroller, 0, 450, kSafeContentWidth - 16, 76, "PHONE & MEDIA",
+    make_button(scroller, 0, 450, kSafeContentWidth - 16, 76, "PHONE",
                 kSurface, kPrimary, connectivity_callback, this);
+    make_button(scroller, 0, 540, kSafeContentWidth - 16, 76, "SOUND & DND",
+                kSurface, kPrimary, audio_callback, this);
     auto *note = label(scroller, "All settings are stored on the watch.",
                        &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(note, 8, 540);
+    lv_obj_set_pos(note, 8, 630);
     lv_obj_set_width(note, kSafeContentWidth - 32);
     lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
 }
@@ -1218,7 +1309,7 @@ void Shell::render_weather() {
 }
 
 void Shell::render_connectivity() {
-    add_header(content_host_, "PHONE & MEDIA", back_callback, this);
+    add_header(content_host_, "PHONE", back_callback, this);
     auto *card = make_route_card(content_host_, 112, 145);
     connectivity_state_ = label(card, "BLUETOOTH", &lv_font_montserrat_20, kGreen);
     lv_obj_set_pos(connectivity_state_, 0, 4);
@@ -1230,30 +1321,132 @@ void Shell::render_connectivity() {
     connectivity_toggle_ = make_button(content_host_, kSafeInset, 274, kSafeContentWidth, 58,
                                        "", kSurface, kPrimary,
                                        connectivity_toggle_callback, this);
-    make_button(content_host_, kSafeInset, 416, kSafeContentWidth, 52, "NOTIFICATIONS",
+    make_button(content_host_, kSafeInset, 356, kSafeContentWidth, 58, "NOTIFICATIONS",
                 kSurface, kPrimary, notifications_callback, this);
-    make_button(content_host_, kSafeInset, 346, 108, 58, "PREV", kSurface, kPrimary,
-                media_callback,
-                reinterpret_cast<void *>(static_cast<std::uintptr_t>(
-                    nightglass::services::MediaCommand::previous)));
-    make_button(content_host_, 151, 346, 108, 58, "PLAY", kSurface, kPrimary,
-                media_callback,
-                reinterpret_cast<void *>(static_cast<std::uintptr_t>(
-                    nightglass::services::MediaCommand::play_pause)));
-    make_button(content_host_, 274, 346, 108, 58, "NEXT", kSurface, kPrimary,
-                media_callback,
-                reinterpret_cast<void *>(static_cast<std::uintptr_t>(
-                    nightglass::services::MediaCommand::next)));
     configure_refresh_timer(1000);
     refresh_connectivity();
 }
 
+void Shell::render_media() {
+    add_header(content_host_, "MEDIA", back_callback, this);
+    auto *card = make_route_card(content_host_, 112, 170);
+    media_state_ = label(card, "PHONE DISCONNECTED", &lv_font_montserrat_14, kAmber);
+    lv_obj_set_pos(media_state_, 0, 0);
+    media_title_ = label(card, "Nothing playing", &lv_font_montserrat_20, kPrimary);
+    lv_obj_set_pos(media_title_, 0, 34);
+    lv_obj_set_width(media_title_, kSafeContentWidth - 44);
+    lv_label_set_long_mode(media_title_, LV_LABEL_LONG_MODE_DOTS);
+    media_artist_ = label(card, "", &lv_font_montserrat_16, kSecondary);
+    lv_obj_set_pos(media_artist_, 0, 76);
+    lv_obj_set_width(media_artist_, kSafeContentWidth - 44);
+    lv_label_set_long_mode(media_artist_, LV_LABEL_LONG_MODE_DOTS);
+    make_button(content_host_, kSafeInset, 300, 108, 58, "PREV", kSurface, kPrimary,
+                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::previous)));
+    make_button(content_host_, 151, 300, 108, 58, "PLAY", kCyan, kVoid,
+                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::play_pause)));
+    make_button(content_host_, 274, 300, 108, 58, "NEXT", kSurface, kPrimary,
+                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::next)));
+    make_button(content_host_, kSafeInset, 374, 170, 58, "VOLUME -", kSurface, kPrimary,
+                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::volume_down)));
+    make_button(content_host_, 212, 374, 170, 58, "VOLUME +", kSurface, kPrimary,
+                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::volume_up)));
+    configure_refresh_timer(1000);
+    refresh_media();
+}
+
 void Shell::render_notifications() {
+    const auto snapshot = nightglass::services::connectivity_service().snapshot();
+    notification_sequence_ = snapshot.notification_sequence;
+    notification_action_count_ = 0;
+
+    if (selected_notification_id_ != 0) {
+        const auto selected = std::find_if(
+            snapshot.notifications.begin(), snapshot.notifications.end(),
+            [this](const auto &notification) {
+                return notification.valid && notification.id == selected_notification_id_;
+            });
+        if (selected == snapshot.notifications.end()) selected_notification_id_ = 0;
+        else {
+            add_header(content_host_, "NOTIFICATION", notification_list_callback, this);
+            auto *detail = make_scroller(content_host_);
+            auto *app = label(detail, selected->app.data(), &lv_font_montserrat_14, kGreen);
+            lv_obj_set_pos(app, 8, 0);
+            auto *title = label(detail, selected->title.data(), &lv_font_montserrat_20, kPrimary);
+            lv_obj_set_pos(title, 8, 30);
+            lv_obj_set_width(title, kSafeContentWidth - 32);
+            lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_WRAP);
+            auto *body = label(detail, selected->body.data(), &lv_font_montserrat_16, kSecondary);
+            lv_obj_set_pos(body, 8, 92);
+            lv_obj_set_width(body, kSafeContentWidth - 32);
+            lv_obj_set_height(body, 150);
+            lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_WRAP);
+            auto &open = notification_actions_[notification_action_count_++];
+            open = {this, selected->id, false, nullptr};
+            make_button(detail, 0, 252, 174, 50, "OPEN ON PHONE", kSurface, kPrimary,
+                        notification_action_callback, &open);
+            auto &dismiss = notification_actions_[notification_action_count_++];
+            dismiss = {this, selected->id, true, nullptr};
+            make_button(detail, 190, 252, 174, 50, "DISMISS", kSurface, kAmber,
+                        notification_action_callback, &dismiss);
+            if (selected->replyable) {
+                auto *heading = label(detail, "QUICK REPLY", &lv_font_montserrat_14, kSecondary);
+                lv_obj_set_pos(heading, 8, 322);
+                constexpr std::array<const char *, 4> replies{
+                    "Yes", "No", "On my way", "I'll follow up"};
+                for (std::size_t index = 0; index < replies.size(); ++index) {
+                    auto &reply = notification_actions_[notification_action_count_++];
+                    reply = {this, selected->id, false, replies[index]};
+                    make_button(detail, index % 2 == 0 ? 0 : 190,
+                                352 + static_cast<int>(index / 2) * 58,
+                                174, 48, replies[index], kSurface, kPrimary,
+                                notification_action_callback, &reply);
+                }
+                if (snapshot.reply_notification_id == selected->id) {
+                    const char *reply_state = snapshot.reply_pending
+                                                  ? "SENDING REPLY..."
+                                                  : snapshot.reply_status == 0
+                                                        ? "SENT TO PHONE"
+                                                        : "REPLY FAILED";
+                    auto *result = label(detail, reply_state, &lv_font_montserrat_14,
+                                         snapshot.reply_pending ? kAmber
+                                                                : snapshot.reply_status == 0
+                                                                      ? kGreen : kRed);
+                    lv_obj_set_pos(result, 8, 474);
+                }
+                auto *custom = label(detail, "TYPE A REPLY", &lv_font_montserrat_14,
+                                     kSecondary);
+                lv_obj_set_pos(custom, 8, 512);
+                notification_reply_box_ = lv_textarea_create(detail);
+                lv_obj_set_size(notification_reply_box_, kSafeContentWidth - 24, 68);
+                lv_obj_set_pos(notification_reply_box_, 0, 540);
+                lv_textarea_set_one_line(notification_reply_box_, true);
+                lv_textarea_set_max_length(notification_reply_box_, 96);
+                lv_textarea_set_placeholder_text(notification_reply_box_, "Reply text");
+                auto *keyboard = lv_keyboard_create(detail);
+                lv_obj_set_size(keyboard, kSafeContentWidth - 24, 190);
+                lv_obj_set_pos(keyboard, 0, 620);
+                lv_keyboard_set_textarea(keyboard, notification_reply_box_);
+                make_button(detail, 0, 824, kSafeContentWidth - 16, 52, "SEND REPLY",
+                            kCyan, kVoid, notification_reply_send_callback, this);
+            } else {
+                auto *note = label(detail, "This app did not expose an inline reply action.",
+                                   &lv_font_montserrat_14, kSecondary);
+                lv_obj_set_pos(note, 8, 326);
+                lv_obj_set_width(note, kSafeContentWidth - 32);
+                lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
+            }
+            configure_refresh_timer(500);
+            return;
+        }
+    }
+
     add_header(content_host_, "NOTIFICATIONS", back_callback, this);
     auto *scroller = make_scroller(content_host_);
-    const auto snapshot = nightglass::services::connectivity_service().snapshot();
-    notification_sequence_ = snapshot.sequence;
-    notification_action_count_ = 0;
 
     auto *status = lv_obj_create(scroller);
     lv_obj_set_size(status, kSafeContentWidth - 16, 76);
@@ -1279,7 +1472,7 @@ void Shell::render_notifications() {
 
     int y = 90;
     for (const auto &notification : snapshot.notifications) {
-        if (!notification.valid || notification_action_count_ + 2 > 12) continue;
+        if (!notification.valid || notification_action_count_ + 2 > 24) continue;
         auto *card = lv_obj_create(scroller);
         lv_obj_set_size(card, kSafeContentWidth - 16, 174);
         lv_obj_set_pos(card, 0, y);
@@ -1300,12 +1493,12 @@ void Shell::render_notifications() {
         lv_obj_set_height(body, 46);
         lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_DOTS);
 
-        auto &read_context = notification_actions_[notification_action_count_++];
-        read_context = {this, notification.id, false};
-        make_button(card, 12, 118, 128, 44, "MARK READ", kSurface, kPrimary,
-                    notification_action_callback, &read_context);
+        auto &view_context = notification_actions_[notification_action_count_++];
+        view_context = {this, notification.id, false, nullptr};
+        make_button(card, 12, 118, 128, 44, "VIEW", kSurface, kPrimary,
+                    notification_detail_callback, &view_context);
         auto &dismiss_context = notification_actions_[notification_action_count_++];
-        dismiss_context = {this, notification.id, true};
+        dismiss_context = {this, notification.id, true, nullptr};
         make_button(card, 158, 118, 152, 44, "DISMISS", kSurface, kAmber,
                     notification_action_callback, &dismiss_context);
         y += 186;
@@ -1410,7 +1603,7 @@ void Shell::render_alarm() {
                 alarm_minute_callback, this);
     alarm_toggle_ = make_button(content_host_, kSafeInset, 338, kSafeContentWidth, 70, "",
                                 kCyan, kVoid, alarm_enabled_callback, this);
-    auto *note = label(content_host_, "Visual alert only | wakes light sleep",
+    auto *note = label(content_host_, "Visual + audio alert | wakes light sleep",
                        &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(note, kSafeInset, 430);
     lv_obj_set_width(note, kSafeContentWidth);
@@ -1434,7 +1627,7 @@ void Shell::render_countdown() {
                                     kCyan, kVoid, countdown_toggle_callback, this);
     make_button(content_host_, 262, 350, 120, 70, "RESET", kSurface, kPrimary,
                 countdown_reset_callback, this);
-    auto *note = label(content_host_, "Visual alert only", &lv_font_montserrat_14, kSecondary);
+    auto *note = label(content_host_, "Visual + audio timer alert", &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(note, kSafeInset, 440);
     configure_refresh_timer(250);
     refresh_countdown();
@@ -1460,8 +1653,15 @@ void Shell::render_stopwatch() {
 }
 
 void Shell::render_audio() {
-    add_header(content_host_, "AUDIO", back_callback, this);
-    auto *card = make_route_card(content_host_, 112, 154);
+    add_header(content_host_, "SOUND & DND", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    auto *card = lv_obj_create(scroller);
+    lv_obj_set_size(card, kSafeContentWidth - 16, 154);
+    lv_obj_set_pos(card, 0, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(chrome_palette().border), 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     auto *heading = label(card, "ES8311 OUT / ES7210 IN", &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(heading, 0, 0);
     audio_state_ = label(card, "WAIT", &lv_font_montserrat_20, kAmber);
@@ -1470,12 +1670,18 @@ void Shell::render_audio() {
     lv_obj_set_pos(audio_detail_, 0, 66);
     lv_obj_set_width(audio_detail_, kSafeContentWidth - 44);
     lv_label_set_long_mode(audio_detail_, LV_LABEL_LONG_MODE_WRAP);
-    audio_level_ = label(content_host_, "Mic level: not sampled", &lv_font_montserrat_16,
+    audio_level_ = label(scroller, "Mic level: not sampled", &lv_font_montserrat_16,
                          kSecondary);
-    lv_obj_set_pos(audio_level_, kSafeInset, 284);
-    make_button(content_host_, kSafeInset, 320, kSafeContentWidth, 60, "PLAY TEST TONE",
+    lv_obj_set_pos(audio_level_, 4, 166);
+    audio_volume_ = make_button(scroller, 0, 204, kSafeContentWidth - 16, 54, "",
+                                kSurface, kPrimary, audio_volume_callback, this);
+    audio_mute_ = make_button(scroller, 0, 270, kSafeContentWidth - 16, 54, "",
+                              kSurface, kPrimary, audio_mute_callback, this);
+    audio_dnd_ = make_button(scroller, 0, 336, kSafeContentWidth - 16, 54, "",
+                             kSurface, kPrimary, audio_dnd_callback, this);
+    make_button(scroller, 0, 408, kSafeContentWidth - 16, 60, "PLAY TEST TONE",
                 kCyan, kVoid, audio_play_callback, this);
-    make_button(content_host_, kSafeInset, 394, kSafeContentWidth, 60, "SAMPLE MICROPHONE",
+    make_button(scroller, 0, 480, kSafeContentWidth - 16, 60, "SAMPLE MICROPHONE",
                 kSurface, kPrimary, audio_capture_callback, this);
     configure_refresh_timer(1000);
     refresh_audio();
@@ -1571,6 +1777,9 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::connectivity:
             refresh_connectivity();
             break;
+        case nightglass::core::Route::media:
+            refresh_media();
+            break;
         case nightglass::core::Route::notifications:
             refresh_notifications();
             break;
@@ -1596,7 +1805,7 @@ void Shell::refresh_active_route() {
 
 void Shell::refresh_notifications() {
     const auto snapshot = nightglass::services::connectivity_service().snapshot();
-    if (snapshot.sequence != notification_sequence_) render_route();
+    if (snapshot.notification_sequence != notification_sequence_) render_route();
 }
 
 void Shell::refresh_activity() {
@@ -1691,6 +1900,25 @@ void Shell::refresh_connectivity() {
     lv_label_set_text(connectivity_detail_, text);
     set_button_text(connectivity_toggle_, snapshot.settings.enabled ? "BLUETOOTH  ON"
                                                                     : "BLUETOOTH  OFF");
+}
+
+void Shell::refresh_media() {
+    if (!media_state_) return;
+    const auto snapshot = nightglass::services::connectivity_service().snapshot();
+    const bool connected = snapshot.state ==
+                           nightglass::services::CompanionLinkState::connected_encrypted;
+    set_state(media_state_, !connected ? "PHONE DISCONNECTED"
+                                      : snapshot.media.playing ? "PLAYING"
+                                                               : snapshot.media.available
+                                                                     ? "PAUSED"
+                                                                     : "NO MEDIA SESSION",
+              connected && snapshot.media.available ? kGreen : kAmber);
+    lv_label_set_text(media_title_, snapshot.media.available && snapshot.media.title[0]
+                                         ? snapshot.media.title.data()
+                                         : "Nothing playing");
+    lv_label_set_text(media_artist_, snapshot.media.available
+                                          ? snapshot.media.artist.data()
+                                          : "Start music on the phone");
 }
 
 void Shell::refresh_home() {
@@ -2000,6 +2228,14 @@ void Shell::refresh_stopwatch() {
 void Shell::refresh_audio() {
     if (!audio_state_) return;
     const auto snapshot = nightglass::services::audio_service().snapshot();
+    char setting[48]{};
+    std::snprintf(setting, sizeof(setting), "WATCH VOLUME  %u%%",
+                  snapshot.settings.volume_percent);
+    set_button_text(audio_volume_, setting);
+    set_button_text(audio_mute_, snapshot.settings.muted ? "WATCH SOUND  MUTED"
+                                                         : "WATCH SOUND  ON");
+    set_button_text(audio_dnd_, snapshot.settings.do_not_disturb ? "DO NOT DISTURB  ON"
+                                                                 : "DO NOT DISTURB  OFF");
     if (!snapshot.enabled) {
         set_state(audio_state_, "DISABLED", kAmber);
         lv_label_set_text(audio_detail_, "Audio is disabled in this build");
@@ -2044,7 +2280,7 @@ void Shell::refresh_audio() {
         set_state(audio_state_, "CAPTURED", kGreen);
         lv_label_set_text(audio_level_, capture_buffer);
         std::snprintf(buffer, sizeof(buffer),
-                      "%s | 16 kHz stereo\nRX %lu | TX %lu frames\nErrors %lu/%lu\nPA OFF",
+                      "%s | 16 kHz mono\nRX %lu | TX %lu frames\nErrors %lu/%lu\nPA OFF",
                       capture_buffer,
                       static_cast<unsigned long>(snapshot.frames_captured),
                       static_cast<unsigned long>(snapshot.frames_played),
@@ -2054,7 +2290,7 @@ void Shell::refresh_audio() {
                snapshot.last_operation_ok) {
         set_state(audio_state_, "PLAYED", kGreen);
         std::snprintf(buffer, sizeof(buffer),
-                      "440 Hz test transfer %lu B | PA OFF\nRX %lu | TX %lu frames\nErrors %lu/%lu",
+                      "880 Hz / 2 s test %lu B | PA OFF\nRX %lu | TX %lu frames\nErrors %lu/%lu",
                       static_cast<unsigned long>(snapshot.last_transfer_bytes),
                       static_cast<unsigned long>(snapshot.frames_captured),
                       static_cast<unsigned long>(snapshot.frames_played),
@@ -2065,7 +2301,7 @@ void Shell::refresh_audio() {
                                                                       : "PA CHECK",
                   snapshot.amplifier_disabled_verified ? kGreen : kAmber);
         std::snprintf(buffer, sizeof(buffer),
-                      "%lu Hz stereo | test-only\nRX %lu | TX %lu frames\nErrors %lu/%lu\nCodec idle; PA OFF",
+                      "%lu Hz mono | cue catalog\nRX %lu | TX %lu frames\nErrors %lu/%lu\nCodec idle; PA OFF",
                       static_cast<unsigned long>(snapshot.sample_rate_hz),
                       static_cast<unsigned long>(snapshot.frames_captured),
                       static_cast<unsigned long>(snapshot.frames_played),
@@ -2077,6 +2313,35 @@ void Shell::refresh_audio() {
 
 void Shell::refresh_system_overlay() {
     if (!overlay_layer_) return;
+    constexpr std::uint8_t kPairingOverlay = 0xfe;
+    const auto connectivity = nightglass::services::connectivity_service().snapshot();
+    if (connectivity.pairing_passkey_active) {
+        if (alert_card_ && displayed_alert_kind_ == kPairingOverlay) return;
+        lv_obj_clean(overlay_layer_);
+        lv_obj_set_style_bg_color(overlay_layer_, lv_color_hex(kVoid), 0);
+        lv_obj_set_style_bg_opa(overlay_layer_, LV_OPA_90, 0);
+        lv_obj_remove_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(overlay_layer_);
+        alert_card_ = make_route_card(overlay_layer_, 112, 250);
+        auto *heading = label(alert_card_, "PAIR PHONE", &lv_font_montserrat_26, kPrimary);
+        lv_obj_align(heading, LV_ALIGN_TOP_MID, 0, 12);
+        char code[16]{};
+        std::snprintf(code, sizeof(code), "%06lu",
+                      static_cast<unsigned long>(connectivity.pairing_passkey));
+        auto *passkey = label(alert_card_, code, &lv_font_montserrat_48, kCyan);
+        lv_obj_align(passkey, LV_ALIGN_CENTER, 0, 8);
+        auto *note = label(overlay_layer_, "Enter this code on the phone",
+                           &lv_font_montserrat_16, kSecondary);
+        lv_obj_align(note, LV_ALIGN_BOTTOM_MID, 0, -72);
+        displayed_alert_kind_ = kPairingOverlay;
+        return;
+    }
+    if (alert_card_ && displayed_alert_kind_ == kPairingOverlay) {
+        lv_obj_clean(overlay_layer_);
+        lv_obj_add_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
+        alert_card_ = nullptr;
+        displayed_alert_kind_ = 0;
+    }
     const auto kind = nightglass::services::clock_service().active_alert();
     const auto encoded = static_cast<std::uint8_t>(kind);
     if (kind == nightglass::services::AlertKind::none) {
@@ -2111,7 +2376,7 @@ void Shell::refresh_system_overlay() {
                                                                            : "ALARMS DUE";
     auto *heading = label(alert_card_, title, &lv_font_montserrat_32, kPrimary);
     lv_obj_align(heading, LV_ALIGN_TOP_MID, 0, 18);
-    auto *note = label(alert_card_, "Visual alert\nAudio and haptics unavailable",
+    auto *note = label(alert_card_, "Visual + audio alert\nHaptics unavailable",
                        &lv_font_montserrat_16, kSecondary);
     lv_obj_align(note, LV_ALIGN_CENTER, 0, 16);
     lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
@@ -2212,6 +2477,7 @@ void Shell::refresh_diagnostics() {
 }
 
 void Shell::clear_route_objects() {
+    if (notification_reply_box_) lv_textarea_set_text(notification_reply_box_, "");
     home_time_ = nullptr;
     home_time_state_ = nullptr;
     home_day_ = nullptr;
@@ -2249,6 +2515,9 @@ void Shell::clear_route_objects() {
     audio_state_ = nullptr;
     audio_detail_ = nullptr;
     audio_level_ = nullptr;
+    audio_volume_ = nullptr;
+    audio_mute_ = nullptr;
+    audio_dnd_ = nullptr;
     home_alarm_ = nullptr;
     home_timer_ = nullptr;
     home_connectivity_ = nullptr;
@@ -2272,7 +2541,11 @@ void Shell::clear_route_objects() {
     connectivity_state_ = nullptr;
     connectivity_detail_ = nullptr;
     connectivity_toggle_ = nullptr;
+    media_state_ = nullptr;
+    media_title_ = nullptr;
+    media_artist_ = nullptr;
     notification_status_ = nullptr;
+    notification_reply_box_ = nullptr;
     notification_action_count_ = 0;
 }
 

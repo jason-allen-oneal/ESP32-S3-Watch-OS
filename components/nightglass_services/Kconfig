@@ -10,4 +10,14 @@ config NIGHTGLASS_AUDIO_ENABLED
         low. Codec, I2S DMA, microphones, and the one-shot worker exist only
         during a user-initiated test. Disable this to omit the service.
 
+config NIGHTGLASS_AUDIO_BOOT_SELF_TEST
+    bool "Run one audio hardware self-test after boot"
+    depends on NIGHTGLASS_AUDIO_ENABLED
+    default n
+    help
+        Queue one bounded microphone capture followed by one bounded speaker
+        tone after the normal Nightglass shell reaches ready state. Results
+        are emitted to the serial log and no captured samples are retained.
+        This is a bench/HIL gate only and must remain disabled in production.
+
 endmenu

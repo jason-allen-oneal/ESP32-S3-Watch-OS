@@ -6,10 +6,10 @@ companion adapter.
 
 ## Security and privacy
 
-- Pairing uses bonded LE Secure Connections. The current screen has no passkey
-  ceremony, so pairing is encrypted but uses Just Works and is not MITM
-  authenticated. A future passkey UI can raise that guarantee without changing
-  the protocol.
+- Pairing uses bonded LE Secure Connections with a random six-digit passkey
+  displayed on the watch. GATT reads, writes, and notifications require an
+  authenticated encrypted link. The Android companion pins the successfully
+  authenticated device address for subsequent reconnects.
 - Notification and command characteristics require link encryption.
 - Notification content is never written to logs or NVS. The six-item inbox is
   RAM-only and disappears on reboot.
@@ -40,17 +40,33 @@ Service UUID: `7a3b4001-6b6f-4f72-726f-772d6e696768`
 
 All multibyte integers are little-endian. Upsert frames contain version `1`,
 opcode `1`, notification ID, category, app/title/body lengths, then the three
-strings. Opcodes `2` and `3` remove one or clear all notifications. Outbound
-opcodes `0x10`, `0x11`, and `0x12` represent media, dismiss, and mark-read
-actions.
+strings. Category bit 7 marks a newly posted alert; cache synchronization and
+reconnect replay leave it clear so the watch updates silently. Opcodes `2` and
+`3` remove one or clear all notifications. Opcode `0x04` carries bounded media
+state (available/playing flags plus title and artist). Outbound opcodes `0x10`,
+`0x11`, and `0x12` represent media, dismiss, and open-on-phone actions.
+Notification category bit 6 means Android exposed one unambiguous free-form
+inline reply action.
+
+Reply opcode `0x13` contains sequence, opaque notification handle, random
+request nonce, one-byte text length, and 1-96 printable ASCII bytes. Android
+deduplicates the nonce before invoking `RemoteInput`; it returns opcode `0x24`
+with status, handle, and nonce. The watch permits one in-flight reply, clears it
+on disconnect or after 15 seconds, and reports only "sent to phone" because a
+notification action cannot prove downstream SMS/email delivery. Notification
+handles are random, RAM-only, collision-checked, and invalidated on listener
+resynchronization.
+
+Notification audio requires the matching companion build that sets category
+bit 7 for live posts. Older version-1 companions remain wire-compatible for
+notification display, but intentionally produce silent notifications because
+they cannot distinguish a live post from reconnect/cache replay.
 
 Provisioning opcodes are accepted only on the encrypted phone-to-watch
 characteristic. `0x20` carries bounded SSID/password lengths followed by their
 bytes, `0x21` carries weather enable/location/unit/refresh settings, and `0x22`
 clears the runtime Wi-Fi credential. Credentials are never returned over GATT or
-written to logs. Just Works pairing protects against passive interception but
-does not provide MITM authentication; a passkey ceremony remains required for
-hostile-radio environments.
+written to logs.
 
 Opcode `0x23` carries the phone weather proxy snapshot in exactly 18 bytes:
 `version`, `opcode`, flags (metric bit 0, day bit 1), zero reserved byte,

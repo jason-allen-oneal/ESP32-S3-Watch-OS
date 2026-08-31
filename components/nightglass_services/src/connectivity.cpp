@@ -7,6 +7,8 @@
 #include <cstring>
 
 #include "esp_log.h"
+#include "esp_random.h"
+#include "esp_timer.h"
 #include "host/ble_hs.h"
 #include "host/ble_store.h"
 #include "host/util/util.h"
@@ -17,7 +19,9 @@
 #include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "nightglass/services/audio.hpp"
 #include "nightglass/services/network_weather.hpp"
+#include "nightglass/services/power.hpp"
 
 extern "C" void ble_store_config_init(void);
 
@@ -55,6 +59,7 @@ std::atomic_bool outbound_subscribed{false};
 std::uint8_t own_address_type{};
 std::atomic<std::uint8_t> outbound_sequence{0};
 bool host_started{};
+std::int64_t reply_started_us{};
 
 void secure_wipe(void *memory, std::size_t length) {
     auto *bytes = static_cast<volatile std::uint8_t *>(memory);
@@ -113,7 +118,43 @@ void remove_notification_locked(std::uint32_t id) {
         [](const auto &notification) { return notification.valid; }));
 }
 
+SoundCue notification_cue(NotificationCategory category) {
+    switch (category) {
+        case NotificationCategory::message: return SoundCue::notification;
+        case NotificationCategory::call: return SoundCue::call;
+        case NotificationCategory::email: return SoundCue::email;
+        case NotificationCategory::calendar: return SoundCue::calendar;
+        case NotificationCategory::social:
+        case NotificationCategory::other:
+            return SoundCue::notification;
+    }
+    return SoundCue::notification;
+}
+
 bool apply_message(const CompanionMessage &message) {
+    if (message.kind == CompanionMessageKind::media_state) {
+        portENTER_CRITICAL(&state_lock);
+        current.media = message.media;
+        ++current.sequence;
+        portEXIT_CRITICAL(&state_lock);
+        return true;
+    }
+    if (message.kind == CompanionMessageKind::reply_result) {
+        portENTER_CRITICAL(&state_lock);
+        const bool matches = current.reply_pending &&
+                             current.reply_notification_id ==
+                                 message.reply_result.notification_id &&
+                             current.reply_nonce == message.reply_result.request_nonce;
+        if (matches) {
+            current.reply_status = message.reply_result.status;
+            current.reply_pending = false;
+            reply_started_us = 0;
+            ++current.sequence;
+            ++current.notification_sequence;
+        }
+        portEXIT_CRITICAL(&state_lock);
+        return true;
+    }
     if (message.kind == CompanionMessageKind::wifi_provision) {
         return network_weather_service().provision_credentials(
             message.wifi.ssid.data(), message.wifi.ssid_length,
@@ -147,6 +188,8 @@ bool apply_message(const CompanionMessage &message) {
                                             : WeatherUnits::imperial,
             weather).is_ok();
     }
+    bool queue_alert = false;
+    SoundCue alert_cue = SoundCue::notification;
     portENTER_CRITICAL(&state_lock);
     if (message.kind == CompanionMessageKind::notification_clear) {
         current.notifications = {};
@@ -154,6 +197,11 @@ bool apply_message(const CompanionMessage &message) {
     } else if (message.kind == CompanionMessageKind::notification_remove) {
         remove_notification_locked(message.notification_id);
     } else if (message.kind == CompanionMessageKind::notification_upsert) {
+        const bool existing = std::any_of(
+            current.notifications.begin(), current.notifications.end(),
+            [&](const auto &notification) {
+                return notification.valid && notification.id == message.notification_id;
+            });
         remove_notification_locked(message.notification_id);
         for (std::size_t index = current.notifications.size() - 1; index > 0; --index) {
             current.notifications[index] = current.notifications[index - 1];
@@ -162,9 +210,17 @@ bool apply_message(const CompanionMessage &message) {
         current.notification_count = static_cast<std::uint8_t>(std::count_if(
             current.notifications.begin(), current.notifications.end(),
             [](const auto &notification) { return notification.valid; }));
+        queue_alert = message.notification.alert && !existing;
+        alert_cue = notification_cue(message.notification.category);
+    }
+    if (message.kind == CompanionMessageKind::notification_clear ||
+        message.kind == CompanionMessageKind::notification_remove ||
+        message.kind == CompanionMessageKind::notification_upsert) {
+        ++current.notification_sequence;
     }
     ++current.sequence;
     portEXIT_CRITICAL(&state_lock);
+    if (queue_alert) (void)audio_service().request_sound(alert_cue);
     return true;
 }
 
@@ -203,14 +259,17 @@ int gatt_access(std::uint16_t, std::uint16_t attr_handle, ble_gatt_access_ctxt *
 const ble_gatt_chr_def gatt_characteristics[]{
     {.uuid = &kStatusUuid.u,
      .access_cb = gatt_access,
-     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_NOTIFY,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
+              BLE_GATT_CHR_F_READ_AUTHEN | BLE_GATT_CHR_F_NOTIFY |
+              BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN,
      .val_handle = &status_handle},
     {.uuid = &kInboundUuid.u,
      .access_cb = gatt_access,
-     .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC},
+     .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+              BLE_GATT_CHR_F_WRITE_AUTHEN},
     {.uuid = &kOutboundUuid.u,
      .access_cb = gatt_access,
-     .flags = BLE_GATT_CHR_F_NOTIFY,
+     .flags = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN,
      .val_handle = &outbound_handle},
     {}};
 
@@ -267,8 +326,15 @@ int gap_event(ble_gap_event *event, void *) {
             current.state = should_advertise ? CompanionLinkState::advertising
                                              : CompanionLinkState::disabled;
             current.encrypted = false;
+            current.reply_pending = false;
+            current.reply_notification_id = 0;
+            current.reply_nonce = 0;
+            reply_started_us = 0;
+            current.pairing_passkey = 0;
+            current.pairing_passkey_active = false;
             set_detail_locked(should_advertise ? "Advertising" : "Bluetooth disabled");
             ++current.sequence;
+            ++current.notification_sequence;
             portEXIT_CRITICAL(&state_lock);
             if (should_advertise) advertise();
             return 0;
@@ -277,16 +343,43 @@ int gap_event(ble_gap_event *event, void *) {
             ble_gap_conn_desc descriptor{};
             if (ble_gap_conn_find(event->enc_change.conn_handle, &descriptor) == 0) {
                 portENTER_CRITICAL(&state_lock);
-                current.encrypted = descriptor.sec_state.encrypted;
+                const bool authenticated = descriptor.sec_state.encrypted &&
+                                           descriptor.sec_state.authenticated;
+                current.encrypted = authenticated;
                 current.bonded = descriptor.sec_state.bonded;
                 current.state = current.encrypted ? CompanionLinkState::connected_encrypted
                                                   : CompanionLinkState::connected_unsecured;
-                set_detail_locked(current.encrypted ? "Companion connected"
-                                                    : "Companion link is not encrypted");
+                set_detail_locked(current.encrypted ? "Companion authenticated"
+                                                    : "Passkey authentication required");
+                current.pairing_passkey = 0;
+                current.pairing_passkey_active = false;
                 ++current.sequence;
+                ++current.notification_sequence;
                 portEXIT_CRITICAL(&state_lock);
+                if (descriptor.sec_state.encrypted && !descriptor.sec_state.authenticated) {
+                    (void)ble_store_util_delete_peer(&descriptor.peer_id_addr);
+                    (void)ble_gap_terminate(event->enc_change.conn_handle,
+                                            BLE_ERR_REM_USER_CONN_TERM);
+                }
             }
             return 0;
+        }
+        case BLE_GAP_EVENT_PASSKEY_ACTION: {
+            if (event->passkey.params.action != BLE_SM_IOACT_DISP) return 0;
+            ble_sm_io passkey{};
+            passkey.action = BLE_SM_IOACT_DISP;
+            passkey.passkey = esp_random() % 1'000'000U;
+            char detail[64]{};
+            std::snprintf(detail, sizeof(detail), "Enter %06lu on phone",
+                          static_cast<unsigned long>(passkey.passkey));
+            portENTER_CRITICAL(&state_lock);
+            set_detail_locked(detail);
+            current.pairing_passkey = passkey.passkey;
+            current.pairing_passkey_active = true;
+            ++current.sequence;
+            portEXIT_CRITICAL(&state_lock);
+            power_service().note_activity(nightglass::core::WakeReason::notification);
+            return ble_sm_inject_io(event->passkey.conn_handle, &passkey);
         }
         case BLE_GAP_EVENT_SUBSCRIBE:
             if (event->subscribe.attr_handle == outbound_handle) {
@@ -416,10 +509,10 @@ nightglass::core::Status ConnectivityService::start() {
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-    ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
+    ble_hs_cfg.sm_io_cap = BLE_HS_IO_DISPLAY_ONLY;
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_sc = 1;
-    ble_hs_cfg.sm_mitm = 0;  // Just Works until the on-watch passkey UI exists.
+    ble_hs_cfg.sm_mitm = 1;
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_svc_gap_init();
@@ -438,6 +531,14 @@ nightglass::core::Status ConnectivityService::start() {
 
 ConnectivitySnapshot ConnectivityService::snapshot() const {
     portENTER_CRITICAL(&state_lock);
+    if (current.reply_pending && reply_started_us > 0 &&
+        esp_timer_get_time() - reply_started_us > 15'000'000) {
+        current.reply_pending = false;
+        current.reply_status = 5;
+        reply_started_us = 0;
+        ++current.sequence;
+        ++current.notification_sequence;
+    }
     const auto snapshot = current;
     portEXIT_CRITICAL(&state_lock);
     return snapshot;
@@ -489,8 +590,45 @@ bool ConnectivityService::mark_notification(std::uint32_t id, bool dismiss) {
         portENTER_CRITICAL(&state_lock);
         remove_notification_locked(id);
         ++current.sequence;
+        ++current.notification_sequence;
         portEXIT_CRITICAL(&state_lock);
     }
+    return true;
+}
+
+bool ConnectivityService::reply_notification(std::uint32_t id, const char *reply) {
+    if (id == 0 || reply == nullptr || reply[0] == '\0') return false;
+    bool replyable = false;
+    bool pending = false;
+    portENTER_CRITICAL(&state_lock);
+    replyable = std::any_of(current.notifications.begin(), current.notifications.end(),
+                            [id](const auto &notification) {
+                                return notification.valid && notification.id == id &&
+                                       notification.replyable;
+                            });
+    if (current.reply_pending && reply_started_us > 0 &&
+        esp_timer_get_time() - reply_started_us > 15'000'000) {
+        current.reply_pending = false;
+        current.reply_status = 5;
+        reply_started_us = 0;
+        ++current.sequence;
+    }
+    pending = current.reply_pending;
+    portEXIT_CRITICAL(&state_lock);
+    if (!replyable || pending) return false;
+    std::uint32_t nonce{};
+    while (nonce == 0) nonce = esp_random();
+    const auto frame = encode_notification_reply(
+        id, outbound_sequence.fetch_add(1) + 1, nonce, reply);
+    if (frame.size == 0 || !notify_outbound(frame.bytes.data(), frame.size)) return false;
+    portENTER_CRITICAL(&state_lock);
+    current.reply_notification_id = id;
+    current.reply_nonce = nonce;
+    current.reply_status = 0xff;
+    current.reply_pending = true;
+    reply_started_us = esp_timer_get_time();
+    ++current.sequence;
+    portEXIT_CRITICAL(&state_lock);
     return true;
 }
 

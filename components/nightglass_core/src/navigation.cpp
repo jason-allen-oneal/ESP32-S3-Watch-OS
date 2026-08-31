@@ -57,6 +57,9 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
         case NavigationAction::open_connectivity:
             push_route(state, Route::connectivity);
             break;
+        case NavigationAction::open_media:
+            push_route(state, Route::media);
+            break;
         case NavigationAction::open_notifications:
             push_route(state, Route::notifications);
             break;

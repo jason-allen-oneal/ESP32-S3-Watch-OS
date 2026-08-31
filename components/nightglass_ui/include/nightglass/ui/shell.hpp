@@ -39,6 +39,10 @@ private:
     static void weather_clear_wifi_callback(lv_event_t *event);
     static void connectivity_callback(lv_event_t *event);
     static void notifications_callback(lv_event_t *event);
+    static void media_app_callback(lv_event_t *event);
+    static void notification_detail_callback(lv_event_t *event);
+    static void notification_list_callback(lv_event_t *event);
+    static void notification_reply_send_callback(lv_event_t *event);
     static void notification_action_callback(lv_event_t *event);
     static void connectivity_toggle_callback(lv_event_t *event);
     static void media_callback(lv_event_t *event);
@@ -64,6 +68,9 @@ private:
     static void audio_callback(lv_event_t *event);
     static void audio_play_callback(lv_event_t *event);
     static void audio_capture_callback(lv_event_t *event);
+    static void audio_volume_callback(lv_event_t *event);
+    static void audio_mute_callback(lv_event_t *event);
+    static void audio_dnd_callback(lv_event_t *event);
     static void dismiss_alert_callback(lv_event_t *event);
     static void diagnostics_callback(lv_event_t *event);
     static void about_callback(lv_event_t *event);
@@ -80,6 +87,7 @@ private:
     void render_activity();
     void render_weather();
     void render_connectivity();
+    void render_media();
     void render_notifications();
     void render_classic_home();
     void render_pack_home();
@@ -97,6 +105,7 @@ private:
     void refresh_activity();
     void refresh_weather();
     void refresh_connectivity();
+    void refresh_media();
     void refresh_notifications();
     void refresh_alarm();
     void refresh_countdown();
@@ -141,16 +150,22 @@ private:
     lv_obj_t *connectivity_state_{nullptr};
     lv_obj_t *connectivity_detail_{nullptr};
     lv_obj_t *connectivity_toggle_{nullptr};
+    lv_obj_t *media_state_{nullptr};
+    lv_obj_t *media_title_{nullptr};
+    lv_obj_t *media_artist_{nullptr};
     lv_obj_t *notification_status_{nullptr};
 
     struct NotificationActionContext {
         Shell *shell{nullptr};
         std::uint32_t id{0};
         bool dismiss{false};
+        const char *reply{nullptr};
     };
-    NotificationActionContext notification_actions_[12]{};
+    NotificationActionContext notification_actions_[24]{};
     std::uint8_t notification_action_count_{0};
     std::uint32_t notification_sequence_{0};
+    std::uint32_t selected_notification_id_{0};
+    lv_obj_t *notification_reply_box_{nullptr};
 
     // Core clock app widgets.
     lv_obj_t *alarm_time_{nullptr};
@@ -164,6 +179,9 @@ private:
     lv_obj_t *audio_state_{nullptr};
     lv_obj_t *audio_detail_{nullptr};
     lv_obj_t *audio_level_{nullptr};
+    lv_obj_t *audio_volume_{nullptr};
+    lv_obj_t *audio_mute_{nullptr};
+    lv_obj_t *audio_dnd_{nullptr};
     lv_obj_t *alert_card_{nullptr};
     std::uint8_t displayed_alert_kind_{0};
 

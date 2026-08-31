@@ -5,7 +5,9 @@
 namespace nightglass::core {
 
 enum class PowerState { active, dim, ambient, screen_blank, light_sleep, deep_sleep };
-enum class WakeReason { cold_boot, button, touch, motion, alarm, timer, usb, unknown };
+enum class WakeReason {
+    cold_boot, button, touch, motion, notification, alarm, timer, usb, unknown
+};
 
 class IService {
 public:

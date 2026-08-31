@@ -11,6 +11,7 @@
 #include "nvs.h"
 #include "nightglass/core/health.hpp"
 #include "nightglass/core/service.hpp"
+#include "nightglass/services/audio.hpp"
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/power.hpp"
 
@@ -20,6 +21,8 @@ namespace {
 constexpr char kTag[] = "nightglass_clock";
 constexpr char kNvsNamespace[] = "ng_clock";
 constexpr TickType_t kPeriod = pdMS_TO_TICKS(100);
+constexpr std::int64_t kAlertAudioRepeatUs = 4'000'000;
+constexpr std::int64_t kAlertAudioRetryUs = 1'000'000;
 constexpr std::uint32_t kMinTimerSeconds = 60;
 constexpr std::uint32_t kMaxTimerSeconds = 24 * 60 * 60;
 
@@ -243,6 +246,7 @@ void handle_command(const Command &command, std::int64_t now_us) {
 
 void worker(void *) {
     TickType_t wake = xTaskGetTickCount();
+    std::int64_t next_alert_audio_us = 0;
     while (true) {
         Command command{};
         while (xQueueReceive(command_queue, &command, 0) == pdTRUE) {
@@ -325,8 +329,25 @@ void worker(void *) {
             power_service().note_activity(alarm_ringing
                                               ? nightglass::core::WakeReason::alarm
                                               : nightglass::core::WakeReason::timer);
-            ESP_LOGI(kTag, "Visual alert started alarm=%d timer=%d",
+            ESP_LOGI(kTag, "Alert started alarm=%d timer=%d",
                      alarm_ringing, timer_ringing);
+        }
+        if ((alarm_ringing || timer_ringing) &&
+            (alert_started || now_us >= next_alert_audio_us)) {
+            const auto audio_status = audio_service().request_sound(
+                alarm_ringing ? SoundCue::alarm : SoundCue::timer);
+            if (audio_status.is_ok()) {
+                next_alert_audio_us = now_us + kAlertAudioRepeatUs;
+            } else {
+                next_alert_audio_us = now_us + kAlertAudioRetryUs;
+                nightglass::core::health_registry().set(
+                    "clock", nightglass::core::HealthState::degraded,
+                    "visual alert active; audio cue unavailable");
+                ESP_LOGW(kTag, "Alert audio enqueue failed status=%u",
+                         static_cast<unsigned>(audio_status.code));
+            }
+        } else if (!alarm_ringing && !timer_ringing) {
+            next_alert_audio_us = 0;
         }
         vTaskDelayUntil(&wake, kPeriod);
     }
@@ -349,8 +370,8 @@ nightglass::core::Status ClockService::start() {
     }
     nightglass::core::health_registry().set(
         "clock", nightglass::core::HealthState::ok,
-        "Clock settings, alarm, countdown, and stopwatch active");
-    ESP_LOGI(kTag, "Clock service active; alerts are visual-only");
+        "Clock settings, alarm, countdown, stopwatch, and audio cues active");
+    ESP_LOGI(kTag, "Clock service active; alarm/timer cues enabled");
     return nightglass::core::Status::Ok();
 }
 

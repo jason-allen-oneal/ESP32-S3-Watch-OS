@@ -1,13 +1,30 @@
 #include "nightglass/bsp/board.hpp"
 
 #include "bsp/esp-bsp.h"
+#include "bsp/display.h"
+#include "bsp/touch.h"
 #include "driver/gpio.h"
+#include "esp_lvgl_port.h"
 #include "nightglass/core/health.hpp"
 
 namespace nightglass::bsp {
 
 namespace {
 Board instance;
+lv_display_t *display_handle = nullptr;
+lv_indev_t *touch_input = nullptr;
+esp_lcd_panel_handle_t panel_handle = nullptr;
+esp_lcd_panel_io_handle_t panel_io = nullptr;
+esp_lcd_touch_handle_t touch_handle = nullptr;
+
+void round_display_area(lv_area_t *area) {
+    area->x1 &= ~1;
+    area->y1 &= ~1;
+    area->x2 |= 1;
+    area->y2 |= 1;
+    if (area->x2 >= BSP_LCD_H_RES) area->x2 = BSP_LCD_H_RES - 1;
+    if (area->y2 >= BSP_LCD_V_RES) area->y2 = BSP_LCD_V_RES - 1;
+}
 
 bool configure_safe_output(gpio_num_t gpio, bool configure_sleep_pull_down) {
     const gpio_config_t config{
@@ -48,18 +65,68 @@ nightglass::core::Status Board::prepare_safe_outputs() {
 }
 
 nightglass::core::Status Board::start_essential() {
+    const lvgl_port_cfg_t lvgl_config = ESP_LVGL_PORT_INIT_CONFIG();
+    if (lvgl_port_init(&lvgl_config) != ESP_OK) {
+        return {nightglass::core::StatusCode::io_error, "LVGL port initialization failed"};
+    }
 
-    auto *display = bsp_display_start();
-    if (!display) {
+    // The vendor 1.0.7 convenience path incorrectly registers this QSPI
+    // SH8601 panel as an RGB panel. That writes an RGB callback table through
+    // an incompatible panel handle and corrupts TLSF metadata before BLE or
+    // audio starts. Build the public BSP primitives through the SPI/I80 LVGL
+    // path instead, and keep transfers bounded to the eight-row draw buffer.
+    const bsp_display_config_t panel_config{
+        .max_transfer_sz = BSP_LCD_H_RES * CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT *
+                           BSP_LCD_BITS_PER_PIXEL / 8,
+    };
+    if (bsp_display_new(&panel_config, &panel_handle, &panel_io) != ESP_OK) {
         nightglass::core::health_registry().set("display", nightglass::core::HealthState::failed,
                                            "BSP display initialization failed");
         return {nightglass::core::StatusCode::io_error, "display initialization failed"};
     }
 
-    if (!bsp_display_get_input_dev()) {
+    const lvgl_port_display_cfg_t display_config{
+        .io_handle = panel_io,
+        .panel_handle = panel_handle,
+        .control_handle = nullptr,
+        .buffer_size = BSP_LCD_H_RES * CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT,
+        .double_buffer = false,
+        .trans_size = 0,
+        .hres = BSP_LCD_H_RES,
+        .vres = BSP_LCD_V_RES,
+        .monochrome = false,
+        .rotation = {.swap_xy = false, .mirror_x = false, .mirror_y = false},
+        .rounder_cb = round_display_area,
+        .color_format = LV_COLOR_FORMAT_RGB565,
+        .flags = {
+            .buff_dma = true,
+            .buff_spiram = false,
+            .sw_rotate = true,
+            .swap_bytes = true,
+            .full_refresh = false,
+            .direct_mode = false,
+        },
+    };
+    display_handle = lvgl_port_add_disp(&display_config);
+    if (display_handle == nullptr || bsp_touch_new(nullptr, &touch_handle) != ESP_OK) {
         nightglass::core::health_registry().set("touch", nightglass::core::HealthState::failed,
                                            "BSP touch initialization failed");
         return {nightglass::core::StatusCode::io_error, "touch initialization failed"};
+    }
+    const lvgl_port_touch_cfg_t touch_config{
+        .disp = display_handle,
+        .handle = touch_handle,
+        .scale = {.x = 1.0F, .y = 1.0F},
+    };
+    touch_input = lvgl_port_add_touch(&touch_config);
+    if (touch_input == nullptr) {
+        nightglass::core::health_registry().set("touch", nightglass::core::HealthState::failed,
+                                           "BSP touch initialization failed");
+        return {nightglass::core::StatusCode::io_error, "touch initialization failed"};
+    }
+
+    if (bsp_display_brightness_init() != ESP_OK) {
+        return {nightglass::core::StatusCode::io_error, "brightness initialization failed"};
     }
 
     // The vendor BSP powers the AMOLED up at 100%. Use a conservative bench

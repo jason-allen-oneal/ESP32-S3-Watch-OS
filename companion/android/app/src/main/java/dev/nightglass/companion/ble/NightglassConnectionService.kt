@@ -28,8 +28,11 @@ class NightglassConnectionService : Service() {
         const val ACTION_DISCONNECT = "dev.nightglass.DISCONNECT"
         const val ACTION_WRITE = "dev.nightglass.WRITE"
         const val ACTION_REFRESH_WEATHER = "dev.nightglass.REFRESH_WEATHER"
+        const val ACTION_FORGET_PIN = "dev.nightglass.FORGET_PIN"
         const val EXTRA_FRAME = "frame"
         const val CHANNEL = "nightglass_connection"
+        private const val PREFS = "nightglass_link"
+        private const val PINNED_ADDRESS = "pinned_address"
         @Volatile private var current: NightglassConnectionService? = null
         fun send(context: Context, frame: ByteArray): Boolean = runCatching {
             val intent = Intent(context, NightglassConnectionService::class.java)
@@ -98,6 +101,15 @@ class NightglassConnectionService : Service() {
         startForeground(7, connectionNotification(connectionStatus))
         when (intent?.action) {
             ACTION_DISCONNECT -> { explicitDisconnect = true; reconnectHandler.removeCallbacks(reconnect); stopScan(); closeGatt(); stopSelf() }
+            ACTION_FORGET_PIN -> {
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(PINNED_ADDRESS).apply()
+                explicitDisconnect = true
+                reconnectHandler.removeCallbacks(reconnect)
+                stopScan()
+                closeGatt()
+                update("Pinned Nightglass cleared; remove the system bond before pairing again")
+                stopSelf()
+            }
             ACTION_WRITE -> {
                 explicitDisconnect = false
                 intent.getByteArrayExtra(EXTRA_FRAME)?.let(::write)
@@ -118,8 +130,11 @@ class NightglassConnectionService : Service() {
             scan()
             return
         }
+        val pinned = getSharedPreferences(PREFS, MODE_PRIVATE)
+            .getString(PINNED_ADDRESS, null)
         val bondedNightglass = adapter.bondedDevices.firstOrNull { device ->
-            runCatching { device.name == "Nightglass" }.getOrDefault(false)
+            if (pinned != null) device.address == pinned
+            else runCatching { device.name == "Nightglass" }.getOrDefault(false)
         }
         if (bondedNightglass != null) connect(bondedNightglass) else scan()
     }
@@ -151,6 +166,9 @@ class NightglassConnectionService : Service() {
     }
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(type: Int, result: ScanResult) {
+            val pinned = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString(PINNED_ADDRESS, null)
+            if (pinned != null && result.device.address != pinned) return
             val advertisedServices = result.scanRecord?.serviceUuids.orEmpty()
             val advertisedName = result.scanRecord?.deviceName ?: runCatching { result.device.name }.getOrNull()
             if (advertisedServices.none { it.uuid == NightglassProtocol.SERVICE } && advertisedName != "Nightglass") return
@@ -234,7 +252,13 @@ class NightglassConnectionService : Service() {
                 writeNextLocked()
             }
             Log.i(TAG, "Secure Nightglass link ready")
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(PINNED_ADDRESS, client.device.address).apply()
             update("Nightglass connected")
+            // Rebuild the phone's active-notification cache as silent sync
+            // frames. Live posts received while the link was unavailable are
+            // never replayed later as surprise audible alerts.
+            NightglassNotificationListener.syncCurrent()
             scheduleWeatherRefresh(0)
         }
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
@@ -262,6 +286,12 @@ class NightglassConnectionService : Service() {
     private fun receive(frame: ByteArray) { when (val action = NightglassProtocol.parseAction(frame)) {
         is NightglassProtocol.WatchAction.Media -> handleMedia(action.command)
         is NightglassProtocol.WatchAction.Notification -> NightglassNotificationListener.perform(action.id, action.dismiss)
+        is NightglassProtocol.WatchAction.Reply -> {
+            val status = NightglassNotificationListener.reply(
+                action.id, action.nonce, action.text)
+            write(NightglassProtocol.replyResult(
+                action.sequence, status, action.id, action.nonce))
+        }
         null -> Unit
     } }
     private fun handleMedia(command: Int) {
@@ -270,7 +300,19 @@ class NightglassConnectionService : Service() {
         audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, key)); audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, key))
     }
     private fun write(frame: ByteArray) {
-        synchronized(writes) { if (writes.size >= 32) writes.removeFirst(); writes.add(frame.copyOf()); writeNextLocked() }
+        synchronized(writes) {
+            if (writes.size >= 32) writes.removeFirst()
+            val queued = frame.copyOf()
+            if (!linkReady) silenceNotificationAlert(queued)
+            writes.add(queued)
+            writeNextLocked()
+        }
+    }
+    private fun silenceNotificationAlert(frame: ByteArray) {
+        if (frame.size >= 7 && frame[0] == NightglassProtocol.VERSION &&
+            (frame[1].toInt() and 0xff) == 1) {
+            frame[6] = (frame[6].toInt() and 0x7f).toByte()
+        }
     }
     private fun writeNextLocked() {
         if (writePending || !linkReady) return
@@ -301,7 +343,12 @@ class NightglassConnectionService : Service() {
         reconnectHandler.postDelayed(reconnect, delay)
     }
     private fun resetLinkState() {
-        synchronized(writes) { writePending = false; linkReady = false }
+        synchronized(writes) {
+            writePending = false
+            linkReady = false
+            writes.removeIf { frame -> frame.getOrNull(1)?.toInt()?.and(0xff) == 0x24 }
+            writes.forEach(::silenceNotificationAlert)
+        }
         negotiatedPayload = 20
     }
     private fun recoverDeadLink(client: BluetoothGatt) {

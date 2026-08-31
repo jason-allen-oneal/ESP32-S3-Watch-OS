@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace nightglass::services {
 
@@ -24,12 +25,30 @@ struct CompanionNotification {
     std::array<char, 25> app{};
     std::array<char, 49> title{};
     std::array<char, 97> body{};
+    // True only for a newly posted phone notification. Replayed cache syncs
+    // remain silent so reconnecting cannot produce an alert storm.
+    bool alert{false};
+    // True only when Android exposes a Notification.Action with RemoteInput.
+    bool replyable{false};
     bool valid{false};
+};
+
+struct CompanionMediaState {
+    std::array<char, 49> title{};
+    std::array<char, 49> artist{};
+    bool playing{false};
+    bool available{false};
+};
+
+struct CompanionReplyResult {
+    std::uint32_t notification_id{0};
+    std::uint32_t request_nonce{0};
+    std::uint8_t status{0};
 };
 
 enum class CompanionMessageKind : std::uint8_t {
     invalid = 0, notification_upsert, notification_remove, notification_clear,
-    wifi_provision, wifi_clear, weather_settings, weather_snapshot,
+    media_state, reply_result, wifi_provision, wifi_clear, weather_settings, weather_snapshot,
 };
 
 struct CompanionWifiProvisioning {
@@ -66,6 +85,13 @@ struct CompanionMessage {
     CompanionWifiProvisioning wifi{};
     CompanionWeatherSettings weather{};
     CompanionWeatherSnapshot weather_snapshot{};
+    CompanionMediaState media{};
+    CompanionReplyResult reply_result{};
+};
+
+struct EncodedReply {
+    std::array<std::uint8_t, 108> bytes{};
+    std::size_t size{0};
 };
 
 [[nodiscard]] bool parse_companion_message(std::span<const std::uint8_t> frame,
@@ -74,5 +100,8 @@ struct CompanionMessage {
                                                                std::uint8_t sequence) noexcept;
 [[nodiscard]] std::array<std::uint8_t, 7> encode_notification_action(
     bool dismiss, std::uint32_t notification_id, std::uint8_t sequence) noexcept;
+[[nodiscard]] EncodedReply encode_notification_reply(
+    std::uint32_t notification_id, std::uint8_t sequence,
+    std::uint32_t request_nonce, std::string_view reply) noexcept;
 
 }  // namespace nightglass::services

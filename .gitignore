@@ -8,3 +8,4 @@ sdkconfig.old
 *.elf
 *.map
 *.log
+components/nightglass_services/assets/*.wav

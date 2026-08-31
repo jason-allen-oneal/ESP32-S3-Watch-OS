@@ -7,7 +7,7 @@
 3. **Modern shell** — Obsidian components, navigation, launcher, quick settings,
    notification shell, fallback watch face.
 4. **Watch essentials** — timezone/DST, alarms, persistent timers, stopwatch,
-   and visual system alerts. Sound/haptic feedback remains hardware-dependent.
+   and visual plus audio system alerts. Haptic feedback remains hardware-dependent.
 5. **Power and activity** — measured sleep/wake, battery policy, steps,
    tap/raise wake, activity summaries.
 6. **Connectivity** — BLE provisioning and companion protocol, asynchronous
@@ -36,7 +36,7 @@ core release.
 
 The daily shell provides a persistent root, bounded Home/Launcher/App
 navigation, timezone/DST and 12/24-hour settings, a daily alarm, countdown,
-stopwatch, visual system alerts, lifecycle-bound diagnostics, and persistent
+stopwatch, visual/audio system alerts, lifecycle-bound diagnostics, and persistent
 selection between built-in declarative watch-face packs. Every surface uses
 the rounded panel safe area and lists only working features.
 

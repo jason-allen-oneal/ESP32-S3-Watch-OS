@@ -7,13 +7,16 @@ namespace {
 constexpr std::uint8_t kUpsert = 0x01;
 constexpr std::uint8_t kRemove = 0x02;
 constexpr std::uint8_t kClear = 0x03;
+constexpr std::uint8_t kMediaState = 0x04;
 constexpr std::uint8_t kMedia = 0x10;
 constexpr std::uint8_t kDismiss = 0x11;
 constexpr std::uint8_t kRead = 0x12;
+constexpr std::uint8_t kReply = 0x13;
 constexpr std::uint8_t kWifiProvision = 0x20;
 constexpr std::uint8_t kWeatherSettings = 0x21;
 constexpr std::uint8_t kWifiClear = 0x22;
 constexpr std::uint8_t kWeatherSnapshot = 0x23;
+constexpr std::uint8_t kReplyResult = 0x24;
 
 std::uint32_t read_u32(const std::uint8_t *data) {
     return static_cast<std::uint32_t>(data[0]) |
@@ -68,6 +71,29 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
         message.kind = CompanionMessageKind::notification_remove;
         message.notification_id = read_u32(frame.data() + 2);
         return message.notification_id != 0;
+    }
+    if (frame[1] == kMediaState) {
+        if (frame.size() < 5 || (frame[2] & ~std::uint8_t{0x03}) != 0) return false;
+        const auto title_length = static_cast<std::size_t>(frame[3]);
+        const auto artist_length = static_cast<std::size_t>(frame[4]);
+        if (title_length > 48 || artist_length > 48 ||
+            frame.size() != 5U + title_length + artist_length) return false;
+        message.media.playing = (frame[2] & 0x01U) != 0;
+        message.media.available = (frame[2] & 0x02U) != 0;
+        copy_ascii(message.media.title, frame.data() + 5, title_length);
+        copy_ascii(message.media.artist, frame.data() + 5 + title_length, artist_length);
+        message.kind = CompanionMessageKind::media_state;
+        return true;
+    }
+    if (frame[1] == kReplyResult) {
+        if (frame.size() != 12 || frame[3] > 5) return false;
+        message.reply_result.status = frame[3];
+        message.reply_result.notification_id = read_u32(frame.data() + 4);
+        message.reply_result.request_nonce = read_u32(frame.data() + 8);
+        if (message.reply_result.notification_id == 0 ||
+            message.reply_result.request_nonce == 0) return false;
+        message.kind = CompanionMessageKind::reply_result;
+        return true;
     }
     if (frame[1] == kWifiClear) {
         if (frame.size() != 2) return false;
@@ -137,8 +163,12 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
     auto &notification = message.notification;
     notification.id = read_u32(frame.data() + 2);
     if (notification.id == 0) return false;
-    notification.category = frame[6] <= static_cast<std::uint8_t>(NotificationCategory::social)
-                                ? static_cast<NotificationCategory>(frame[6])
+    const auto raw_category = frame[6];
+    const auto category = static_cast<std::uint8_t>(raw_category & 0x3fU);
+    notification.alert = (raw_category & 0x80U) != 0;
+    notification.replyable = (raw_category & 0x40U) != 0;
+    notification.category = category <= static_cast<std::uint8_t>(NotificationCategory::social)
+                                ? static_cast<NotificationCategory>(category)
                                 : NotificationCategory::other;
     auto offset = std::size_t{11};
     copy_ascii(notification.app, frame.data() + offset, app_length);
@@ -150,6 +180,27 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
     message.kind = CompanionMessageKind::notification_upsert;
     message.notification_id = notification.id;
     return true;
+}
+
+EncodedReply encode_notification_reply(std::uint32_t notification_id,
+                                       std::uint8_t sequence,
+                                       std::uint32_t request_nonce,
+                                       std::string_view reply) noexcept {
+    EncodedReply frame{};
+    if (notification_id == 0 || request_nonce == 0 || reply.empty()) return frame;
+    const auto length = std::min<std::size_t>(reply.size(), 96);
+    frame.bytes[0] = kCompanionProtocolVersion;
+    frame.bytes[1] = kReply;
+    frame.bytes[2] = sequence;
+    write_u32(frame.bytes.data() + 3, notification_id);
+    write_u32(frame.bytes.data() + 7, request_nonce);
+    frame.bytes[11] = static_cast<std::uint8_t>(length);
+    for (std::size_t index = 0; index < length; ++index) {
+        const auto value = static_cast<unsigned char>(reply[index]);
+        frame.bytes[12 + index] = value >= 0x20 && value <= 0x7e ? value : '?';
+    }
+    frame.size = 12 + length;
+    return frame;
 }
 
 std::array<std::uint8_t, 4> encode_media_command(MediaCommand command,

@@ -24,12 +24,20 @@ struct ConnectivitySettings {
 
 struct ConnectivitySnapshot {
     std::uint32_t sequence{0};
+    std::uint32_t notification_sequence{0};
     ConnectivitySettings settings{};
     CompanionLinkState state{CompanionLinkState::disabled};
     bool bonded{false};
     bool encrypted{false};
     std::uint8_t notification_count{0};
     std::array<CompanionNotification, kNotificationCapacity> notifications{};
+    CompanionMediaState media{};
+    std::uint32_t reply_notification_id{0};
+    std::uint32_t reply_nonce{0};
+    std::uint8_t reply_status{0};
+    bool reply_pending{false};
+    std::uint32_t pairing_passkey{0};
+    bool pairing_passkey_active{false};
     std::array<char, 64> detail{"Not started"};
 };
 
@@ -42,6 +50,7 @@ public:
     nightglass::core::Status update_settings(const ConnectivitySettings &settings);
     bool send_media(MediaCommand command);
     bool mark_notification(std::uint32_t id, bool dismiss);
+    bool reply_notification(std::uint32_t id, const char *reply);
 };
 
 ConnectivityService &connectivity_service();

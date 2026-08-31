@@ -1,5 +1,12 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
+
+#if CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
 
 #include "nightglass/bsp/board.hpp"
 #include "nightglass/core/health.hpp"
@@ -15,6 +22,70 @@
 
 namespace {
 constexpr char kTag[] = "nightglass_boot";
+
+#if CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST
+bool wait_for_audio_completion(std::uint32_t initial_sequence,
+                               nightglass::services::AudioSnapshot &snapshot) {
+    constexpr std::uint32_t kPollMs = 20;
+    constexpr std::uint32_t kTimeoutMs = 3000;
+    for (std::uint32_t waited = 0; waited < kTimeoutMs; waited += kPollMs) {
+        vTaskDelay(pdMS_TO_TICKS(kPollMs));
+        snapshot = nightglass::services::audio_service().snapshot();
+        if (!snapshot.operation_pending && snapshot.sequence > initial_sequence &&
+            snapshot.last_io_us > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void run_audio_boot_self_test() {
+    auto &audio = nightglass::services::audio_service();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    ESP_LOGI(kTag, "AUDIO_HIL heap internal_free=%lu internal_largest=%lu dma_free=%lu dma_largest=%lu",
+             static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+             static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA)));
+
+    auto before = audio.snapshot();
+    auto request_status = audio.request_microphone_sample();
+    nightglass::services::AudioSnapshot capture{};
+    const bool capture_completed = request_status.is_ok() &&
+                                   wait_for_audio_completion(before.sequence, capture);
+    const bool capture_ok = capture_completed && capture.last_operation_ok &&
+                            capture.last_transfer_bytes == 2048 &&
+                            capture.last_capture_rms > 0 &&
+                            capture.amplifier_disabled_verified;
+    ESP_LOGI(kTag,
+             "AUDIO_HIL capture ok=%u bytes=%lu rms=%lu pa_off=%u status=%u",
+             capture_ok, static_cast<unsigned long>(capture.last_transfer_bytes),
+             static_cast<unsigned long>(capture.last_capture_rms),
+             capture.amplifier_disabled_verified, capture.last_operation_status);
+
+    before = audio.snapshot();
+    request_status = audio.request_sound(nightglass::services::SoundCue::notification);
+    nightglass::services::AudioSnapshot playback{};
+    const bool playback_completed = request_status.is_ok() &&
+                                    wait_for_audio_completion(before.sequence, playback);
+    const bool playback_ok = playback_completed && playback.last_operation_ok &&
+                             playback.last_transfer_bytes ==
+                                 nightglass::services::sound_cue_transfer_bytes(
+                                     nightglass::services::SoundCue::notification) &&
+                             playback.amplifier_disabled_verified;
+    ESP_LOGI(kTag,
+             "AUDIO_HIL playback ok=%u bytes=%lu pa_off=%u status=%u",
+             playback_ok, static_cast<unsigned long>(playback.last_transfer_bytes),
+             playback.amplifier_disabled_verified, playback.last_operation_status);
+
+    if (capture_ok && playback_ok) {
+        ESP_LOGI(kTag, "AUDIO_HIL PASS");
+    } else {
+        ESP_LOGE(kTag, "AUDIO_HIL FAIL");
+    }
+}
+#endif
 }
 
 extern "C" void app_main() {
@@ -98,4 +169,8 @@ extern "C" void app_main() {
     nightglass::core::health_registry().set("ui", nightglass::core::HealthState::ok,
                                        "Daily watch shell active");
     ESP_LOGI(kTag, "Nightglass daily shell active");
+
+#if CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST
+    run_audio_boot_self_test();
+#endif
 }
