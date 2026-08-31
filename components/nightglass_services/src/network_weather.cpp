@@ -92,7 +92,7 @@ std::atomic_bool sleep_suspended{false};
 std::atomic_bool fetch_in_flight{false};
 std::atomic<std::int64_t> next_connect_us{0};
 std::atomic<std::int64_t> next_fetch_us{0};
-std::int64_t last_good_us = 0;
+std::atomic<std::int64_t> last_good_us{0};
 std::uint32_t configuration_generation = 0;
 CredentialBlob runtime_credentials{};
 std::atomic<std::uint8_t> weather_failure_attempt{0};
@@ -459,10 +459,11 @@ void update_age(std::int64_t now) {
             portEXIT_CRITICAL(&state_mux);
             return;
         }
+        const auto last_good = last_good_us.load();
         const auto age = wall_age_valid
                              ? static_cast<std::int64_t>(wall_age)
-                             : last_good_us > 0
-                                   ? std::max<std::int64_t>(0, now - last_good_us) / 1'000'000
+                             : last_good > 0
+                                   ? std::max<std::int64_t>(0, now - last_good) / 1'000'000
                                    : 0;
         current.age_seconds = age > std::numeric_limits<std::uint32_t>::max()
                                   ? std::numeric_limits<std::uint32_t>::max()
@@ -607,9 +608,9 @@ void worker(void *) {
                     "Last-good weather cache persistence failed");
             }
             weather_failure_attempt.store(0);
-            last_good_us = esp_timer_get_time();
+            last_good_us.store(esp_timer_get_time());
             next_fetch_us.store(
-                last_good_us +
+                last_good_us.load() +
                 static_cast<std::int64_t>(snapshot.settings.refresh_minutes) * 60'000'000);
             nightglass::core::health_registry().set(
                 "weather", nightglass::core::HealthState::ok,
@@ -883,7 +884,7 @@ nightglass::core::Status NetworkWeatherService::accept_phone_weather(
     ++current.sequence;
     saved = current;
     portEXIT_CRITICAL(&state_mux);
-    last_good_us = esp_timer_get_time();
+    last_good_us.store(esp_timer_get_time());
     if (save_cache(saved) != ESP_OK) {
         nightglass::core::health_registry().set(
             "weather", nightglass::core::HealthState::degraded,

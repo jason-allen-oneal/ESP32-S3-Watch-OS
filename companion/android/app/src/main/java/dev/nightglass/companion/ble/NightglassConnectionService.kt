@@ -48,6 +48,7 @@ class NightglassConnectionService : Service() {
     private var explicitDisconnect = false
     private val reconnect = Runnable { if (!explicitDisconnect && gatt == null) scan() }
     private val weatherExecutor = Executors.newSingleThreadExecutor()
+    @Volatile private var destroyed = false
     private var weatherFetchInFlight = false
     private val weatherRefresh = Runnable { fetchPhoneWeather() }
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -64,6 +65,7 @@ class NightglassConnectionService : Service() {
     }
     override fun onCreate() {
         super.onCreate()
+        destroyed = false
         current = this
         createChannel()
         ContextCompat.registerReceiver(this, bondReceiver,
@@ -73,6 +75,7 @@ class NightglassConnectionService : Service() {
             .registerDefaultNetworkCallback(networkCallback) }
     }
     override fun onDestroy() {
+        destroyed = true
         explicitDisconnect = true
         reconnectHandler.removeCallbacks(reconnect)
         current = null
@@ -241,6 +244,7 @@ class NightglassConnectionService : Service() {
     private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false; linkReady = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
 
     private fun scheduleWeatherRefresh(delayMs: Long? = null) {
+        if (destroyed) return
         reconnectHandler.removeCallbacks(weatherRefresh)
         val config = PhoneWeatherProxy.load(this) ?: return
         val delay = delayMs ?: config.refreshMinutes * 60_000L
@@ -254,6 +258,7 @@ class NightglassConnectionService : Service() {
         weatherExecutor.execute {
             val frame = runCatching { PhoneWeatherProxy.fetch(config) }.getOrNull()
             reconnectHandler.post {
+                if (destroyed) return@post
                 weatherFetchInFlight = false
                 if (frame != null && linkReady) write(frame)
                 scheduleWeatherRefresh(if (frame == null) 5 * 60_000L else null)
