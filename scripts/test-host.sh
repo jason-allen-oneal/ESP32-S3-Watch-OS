@@ -12,7 +12,8 @@ day_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-day-test.XXXXXX")"
 weather_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-weather-test.XXXXXX")"
 navigation_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-navigation-test.XXXXXX")"
 audio_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-audio-test.XXXXXX")"
-trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}"' EXIT
+update_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-update-test.XXXXXX")"
+trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}"' EXIT
 
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
 
@@ -87,5 +88,13 @@ python3 "${project_dir}/scripts/check-runtime-glyphs.py"
   "${project_dir}/tests/audio_test.cpp" \
   -o "${audio_binary}"
 "${audio_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_update/include" \
+  "${project_dir}/components/nightglass_update/src/manifest.cpp" \
+  "${project_dir}/components/nightglass_update/src/policy.cpp" \
+  "${project_dir}/tests/update_manifest_test.cpp" \
+  -o "${update_binary}"
+"${update_binary}"
 
 printf 'Nightglass host tests passed\n'

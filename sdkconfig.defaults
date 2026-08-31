@@ -37,6 +37,10 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_NIGHTGLASS_OTA_ENABLED=y
+# The repository does not contain a firmware-signing public key/verifier.
+# Unsigned OTA remains fail-closed unless a developer explicitly changes this.
+CONFIG_NIGHTGLASS_OTA_ALLOW_UNSIGNED_DEVELOPMENT=n
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 
 # Nightglass companion radio: BLE-only NimBLE peripheral with bonded LE Secure

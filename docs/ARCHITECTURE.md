@@ -22,8 +22,11 @@ drivers do not know that LVGL exists.
 8. Mark a pending OTA image valid only after the sixty-second health gate.
 
 No optional peripheral may prevent the watch face from appearing. Three
-consecutive unhealthy boots enter safe mode with custom assets, networking,
-audio, SD, and nonessential apps disabled.
+consecutive boots that do not clear the sixty-second health gate enter safe
+mode. The current safe-mode slice stops optional sensor hardware, networking,
+audio, activity, and their boot tests while retaining the system shell and
+compiled fallback face. A dedicated recovery UI and runtime custom-asset/SD
+loader remain future work.
 
 ## Runtime ownership
 
@@ -132,6 +135,12 @@ The 32 MB partition table supplies two 6 MB OTA slots, OTA metadata, NVS,
 coredumps, and a 19.375 MB asset filesystem. An update must verify board ID,
 partition revision, size, SHA-256, and signature before selecting the inactive
 slot. Bootloader rollback remains armed until the runtime health gate succeeds.
+
+The backend now enforces those metadata, stream, inactive-slot, embedded image,
+and 60-second rollback checks. The production-default signature policy is
+fail-closed because no verifier or public key has been provisioned. Companion
+transport, update/recovery UI, and production key selection remain open. See
+`docs/UPDATE_RECOVERY.md`.
 
 Secure Boot V2 and flash encryption remain deferred because their eFuse changes
 are irreversible. They require a separately approved production-recovery plan.

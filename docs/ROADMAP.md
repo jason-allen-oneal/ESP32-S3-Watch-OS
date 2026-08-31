@@ -16,8 +16,10 @@
 8. **Customization** — external face-pack loading, complication assignment,
    themes, glance tiles, and import/export. The built-in manifest registry and
    persistent face selection already ship in the daily-use slice.
-9. **Release hardening** — signed OTA, rollback, safe mode, soak tests,
-   diagnostic export, optional secure-boot plan.
+9. **Release hardening** — inactive-slot streaming, rollback health gate, and
+   basic safe mode are implemented. Production signature verifier/key,
+   companion transport/UI, soak tests, diagnostic export, and the optional
+   secure-boot plan remain.
 
 Every milestone produces a tagged known-good artifact. A feature is incomplete
 until degraded hardware, restart persistence, sleep/resume, and rollback paths

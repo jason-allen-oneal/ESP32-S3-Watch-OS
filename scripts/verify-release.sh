@@ -5,6 +5,7 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 idf_dir="${NIGHTGLASS_IDF_PATH:-${IDF_PATH:-${HOME}/esp/esp-idf-v5.5.5}}"
 
 "${project_dir}/scripts/verify-idf.sh" "${idf_dir}"
+python3 "${project_dir}/scripts/verify-partitions.py" "${project_dir}/partitions.csv" >/dev/null
 
 if [[ -n "$(git -C "${project_dir}" status --porcelain)" ]]; then
   echo "Release verification requires a clean Git worktree" >&2

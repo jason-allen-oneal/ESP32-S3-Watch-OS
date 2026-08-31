@@ -19,6 +19,7 @@
 #include "nightglass/services/watchface.hpp"
 #include "nightglass/services/audio.hpp"
 #include "nightglass/ui/shell.hpp"
+#include "nightglass/update/service.hpp"
 
 namespace {
 constexpr char kTag[] = "nightglass_boot";
@@ -109,20 +110,38 @@ extern "C" void app_main() {
                                            "NVS initialized");
     }
 
+    auto &update = nightglass::update::update_service();
+    const bool recovery_button = nightglass::update::recovery_button_held_at_boot();
+    const auto recovery_status = update.begin_boot(nvs_result == ESP_OK, recovery_button);
+    if (!recovery_status.is_ok()) {
+        ESP_LOGE(kTag, "Recovery supervisor failed: %s", recovery_status.detail);
+    }
+    const auto gate_status = update.arm_health_gate();
+    if (!gate_status.is_ok()) {
+        ESP_LOGE(kTag, "Health gate failed to arm: %s", gate_status.detail);
+    }
+    const bool safe_mode = update.snapshot().safe_mode;
+    if (safe_mode) {
+        ESP_LOGW(kTag, "SAFE MODE: optional hardware, audio, activity, and radios disabled");
+    }
+
     const auto board_status = board.start_essential();
     if (!board_status.is_ok()) {
         ESP_LOGE(kTag, "Essential board startup failed: %s", board_status.detail);
         return;
     }
 
-    const auto hardware_status = nightglass::services::hardware_service().start(board.i2c_bus());
-    if (!hardware_status.is_ok()) {
-        ESP_LOGW(kTag, "Hardware services degraded: %s", hardware_status.detail);
-    }
+    if (!safe_mode) {
+        const auto hardware_status =
+            nightglass::services::hardware_service().start(board.i2c_bus());
+        if (!hardware_status.is_ok()) {
+            ESP_LOGW(kTag, "Hardware services degraded: %s", hardware_status.detail);
+        }
 
-    const auto audio_status = nightglass::services::audio_service().start(board.i2c_bus());
-    if (!audio_status.is_ok()) {
-        ESP_LOGI(kTag, "Audio service unavailable: %s", audio_status.detail);
+        const auto audio_status = nightglass::services::audio_service().start(board.i2c_bus());
+        if (!audio_status.is_ok()) {
+            ESP_LOGI(kTag, "Audio service unavailable: %s", audio_status.detail);
+        }
     }
 
     const auto power_status = nightglass::services::power_service().start();
@@ -135,9 +154,11 @@ extern "C" void app_main() {
         ESP_LOGW(kTag, "Clock service degraded: %s", clock_status.detail);
     }
 
-    const auto activity_status = nightglass::services::activity_service().start();
-    if (!activity_status.is_ok()) {
-        ESP_LOGW(kTag, "Activity service degraded: %s", activity_status.detail);
+    if (!safe_mode) {
+        const auto activity_status = nightglass::services::activity_service().start();
+        if (!activity_status.is_ok()) {
+            ESP_LOGW(kTag, "Activity service degraded: %s", activity_status.detail);
+        }
     }
 
     const auto face_status = nightglass::services::watchface_service().start();
@@ -145,14 +166,16 @@ extern "C" void app_main() {
         ESP_LOGW(kTag, "Watch face service degraded: %s", face_status.detail);
     }
 
-    const auto connectivity_status = nightglass::services::connectivity_service().start();
-    if (!connectivity_status.is_ok()) {
-        ESP_LOGW(kTag, "Connectivity service degraded: %s", connectivity_status.detail);
-    }
+    if (!safe_mode) {
+        const auto connectivity_status = nightglass::services::connectivity_service().start();
+        if (!connectivity_status.is_ok()) {
+            ESP_LOGW(kTag, "Connectivity service degraded: %s", connectivity_status.detail);
+        }
 
-    const auto network_status = nightglass::services::network_weather_service().start();
-    if (!network_status.is_ok()) {
-        ESP_LOGW(kTag, "Network/weather service degraded: %s", network_status.detail);
+        const auto network_status = nightglass::services::network_weather_service().start();
+        if (!network_status.is_ok()) {
+            ESP_LOGW(kTag, "Network/weather service degraded: %s", network_status.detail);
+        }
     }
 
     if (!board.lock_display(0)) {
@@ -171,6 +194,6 @@ extern "C" void app_main() {
     ESP_LOGI(kTag, "Nightglass daily shell active");
 
 #if CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST
-    run_audio_boot_self_test();
+    if (!safe_mode) run_audio_boot_self_test();
 #endif
 }

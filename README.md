@@ -48,3 +48,9 @@ checks before any device write.
 The release gate requires a clean tree, performs a deterministic double build,
 validates the partition and ESP32-S3 image formats, enforces the OTA-slot size
 boundary, and prints the exact flash-artifact hashes.
+
+The runtime inactive-slot backend, fail-closed signature interface, rollback
+health gate, safe-mode policy, and unsigned package tooling are documented in
+[`docs/UPDATE_RECOVERY.md`](docs/UPDATE_RECOVERY.md). No update transport or
+production signing key/verifier is included yet, so default firmware refuses
+OTA installation rather than treating unsigned images as signed.

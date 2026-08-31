@@ -1,0 +1,21 @@
+menu "Nightglass update and recovery"
+
+config NIGHTGLASS_OTA_ENABLED
+    bool "Enable the OTA update backend"
+    default y
+    help
+        Build the inactive-slot streaming update backend and boot recovery
+        supervisor. This does not provide a network or companion transport.
+
+config NIGHTGLASS_OTA_ALLOW_UNSIGNED_DEVELOPMENT
+    bool "DEVELOPMENT ONLY: accept unsigned OTA manifests"
+    depends on NIGHTGLASS_OTA_ENABLED
+    default n
+    help
+        Permit an update only when the signature verifier reports that no
+        verifier is installed. A rejected signature is never bypassed. This
+        setting is unsafe for distributed firmware and must remain disabled
+        for production. Snapshots and logs explicitly identify this mode as
+        unsigned development, never as signature verified.
+
+endmenu
