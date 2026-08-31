@@ -9,4 +9,4 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES nightglass_core nightglass_bsp esp_driver_i2c esp_driver_gpio esp_timer
              esp_driver_usb_serial_jtag esp_hw_support nvs_flash bt esp_wifi esp_event
-             esp_netif esp_http_client mbedtls esp_codec_dev esp_driver_i2s)
+             esp_netif esp_http_client mbedtls esp_codec_dev esp_driver_i2s esp_pm)

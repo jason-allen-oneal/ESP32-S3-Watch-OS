@@ -4,8 +4,10 @@ config NIGHTGLASS_AUDIO_ENABLED
     bool "Enable audio input/output"
     default y
     help
-        Enable the bounded ES8311/ES7210 I2S audio service. The Audio app
-        provides explicit playback and microphone tests; no recording is
-        stored or transmitted. Disable this to omit codec initialization.
+        Enable the supervised ES8311/ES7210 diagnostic surface. The Audio app
+        provides explicit bounded playback and microphone tests; no recording
+        is stored or transmitted. Boot only arms the service with the PA gate
+        low. Codec, I2S DMA, microphones, and the one-shot worker exist only
+        during a user-initiated test. Disable this to omit the service.
 
 endmenu

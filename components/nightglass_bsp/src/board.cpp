@@ -8,21 +8,41 @@ namespace nightglass::bsp {
 
 namespace {
 Board instance;
+
+bool configure_safe_output(gpio_num_t gpio, bool configure_sleep_pull_down) {
+    const gpio_config_t config{
+        .pin_bit_mask = 1ULL << gpio,
+        .mode = GPIO_MODE_INPUT_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&config) != ESP_OK || gpio_set_level(gpio, 0) != ESP_OK ||
+        gpio_get_level(gpio) != 0) {
+        return false;
+    }
+    if (!configure_sleep_pull_down) return true;
+
+    // GPIO46 drives the active-high audio PA. During light sleep, release the
+    // active output and retain a pull-down rather than trusting the last
+    // output latch. This is a separate physical barrier from codec mute.
+    return gpio_sleep_set_direction(gpio, GPIO_MODE_DISABLE) == ESP_OK &&
+           gpio_sleep_set_pull_mode(gpio, GPIO_PULLDOWN_ONLY) == ESP_OK &&
+           gpio_sleep_sel_en(gpio) == ESP_OK;
+}
 }
 
 nightglass::core::Status Board::prepare_safe_outputs() {
     // Fail-safe the transistor-driven vibration output before any peripheral
     // or UI startup can delay service initialization.
-    const gpio_config_t haptic_safe_config{
-        .pin_bit_mask = 1ULL << GPIO_NUM_18,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    if (gpio_config(&haptic_safe_config) != ESP_OK ||
-        gpio_set_level(GPIO_NUM_18, 0) != ESP_OK) {
+    if (!configure_safe_output(GPIO_NUM_18, false)) {
         return {nightglass::core::StatusCode::io_error, "haptic fail-safe failed"};
+    }
+    // GPIO46 is the ES8311 power-amplifier enable. Keep it physically low
+    // before the display, I2C, or any codec code starts. The audio service
+    // alone may raise it during a bounded explicit speaker diagnostic.
+    if (!configure_safe_output(GPIO_NUM_46, true)) {
+        return {nightglass::core::StatusCode::io_error, "audio PA fail-safe failed"};
     }
     return nightglass::core::Status::Ok();
 }

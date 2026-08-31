@@ -662,10 +662,10 @@ void Shell::audio_callback(lv_event_t *event) {
 
 void Shell::audio_play_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    const auto status = nightglass::services::audio_service().play_test_tone();
+    const auto status = nightglass::services::audio_service().request_test_tone();
     if (status.is_ok()) {
-        set_state(self->audio_state_, "PLAYED", kGreen);
-        lv_label_set_text(self->audio_detail_, "440 Hz stereo tone | output muted");
+        set_state(self->audio_state_, "QUEUED", kAmber);
+        lv_label_set_text(self->audio_detail_, "Speaker test queued off the UI task");
     } else {
         set_state(self->audio_state_, "FAILED", kRed);
         lv_label_set_text(self->audio_detail_, status.detail);
@@ -674,22 +674,14 @@ void Shell::audio_play_callback(lv_event_t *event) {
 
 void Shell::audio_capture_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    std::array<std::int16_t, 1024> samples{};
-    const auto bytes = std::span<std::uint8_t>(
-        reinterpret_cast<std::uint8_t *>(samples.data()), sizeof(samples));
-    const auto status = nightglass::services::audio_service().capture(bytes);
+    const auto status = nightglass::services::audio_service().request_microphone_sample();
     if (!status.is_ok()) {
         set_state(self->audio_state_, "FAILED", kRed);
         lv_label_set_text(self->audio_detail_, status.detail);
         return;
     }
-    const auto rms = nightglass::services::pcm16_rms(samples.data(), samples.size());
-    char buffer[96]{};
-    std::snprintf(buffer, sizeof(buffer), "MIC RMS %lu | 16 kHz stereo",
-                  static_cast<unsigned long>(rms));
-    set_state(self->audio_state_, "CAPTURED", kGreen);
-    lv_label_set_text(self->audio_detail_, buffer);
-    lv_label_set_text(self->audio_level_, buffer);
+    set_state(self->audio_state_, "QUEUED", kAmber);
+    lv_label_set_text(self->audio_detail_, "Microphone sample queued off the UI task");
 }
 
 void Shell::dismiss_alert_callback(lv_event_t *event) {
@@ -2013,21 +2005,73 @@ void Shell::refresh_audio() {
         lv_label_set_text(audio_detail_, "Audio is disabled in this build");
         return;
     }
-    if (!snapshot.input_ready || !snapshot.output_ready) {
+    if (snapshot.hardware_failed) {
         set_state(audio_state_, "UNAVAILABLE", kRed);
-        lv_label_set_text(audio_detail_, "Codec input/output not ready");
+        lv_label_set_text(audio_detail_, snapshot.amplifier_disabled_verified
+                                             ? "Audio cleanup failed; restart required"
+                                             : "PA low was not verified; audio locked");
         return;
     }
-    set_state(audio_state_, snapshot.output_muted ? "READY | MUTED" : "READY", kGreen);
+    if (snapshot.operation_pending) {
+        set_state(audio_state_, "RUNNING", kAmber);
+        lv_label_set_text(audio_detail_,
+                          snapshot.operation == nightglass::services::AudioOperation::capture
+                              ? "Microphone sample in progress"
+                              : "Speaker test in progress");
+        return;
+    }
+    if (snapshot.operation != nightglass::services::AudioOperation::none &&
+        !snapshot.last_operation_ok) {
+        set_state(audio_state_, "FAILED", kRed);
+        lv_label_set_text(audio_detail_,
+                          snapshot.operation == nightglass::services::AudioOperation::capture
+                              ? "Microphone capture failed"
+                              : "Speaker test failed; output was shut down");
+        return;
+    }
+    if (!snapshot.hardware_initialized) {
+        set_state(audio_state_, "READY TO TEST", kAmber);
+        lv_label_set_text(audio_detail_, "Codec opens only for an explicit test");
+        return;
+    }
     char buffer[160]{};
-    std::snprintf(buffer, sizeof(buffer),
-                  "%lu Hz stereo | volume %u\nRX %lu | TX %lu frames\nErrors %lu/%lu",
-                  static_cast<unsigned long>(snapshot.sample_rate_hz),
-                  static_cast<unsigned>(snapshot.output_volume),
-                  static_cast<unsigned long>(snapshot.frames_captured),
-                  static_cast<unsigned long>(snapshot.frames_played),
-                  static_cast<unsigned long>(snapshot.read_errors),
-                  static_cast<unsigned long>(snapshot.write_errors));
+    if (snapshot.operation == nightglass::services::AudioOperation::capture &&
+        snapshot.last_operation_ok) {
+        char capture_buffer[96]{};
+        std::snprintf(capture_buffer, sizeof(capture_buffer), "MIC RMS %lu | %lu B",
+                      static_cast<unsigned long>(snapshot.last_capture_rms),
+                      static_cast<unsigned long>(snapshot.last_transfer_bytes));
+        set_state(audio_state_, "CAPTURED", kGreen);
+        lv_label_set_text(audio_level_, capture_buffer);
+        std::snprintf(buffer, sizeof(buffer),
+                      "%s | 16 kHz stereo\nRX %lu | TX %lu frames\nErrors %lu/%lu\nPA OFF",
+                      capture_buffer,
+                      static_cast<unsigned long>(snapshot.frames_captured),
+                      static_cast<unsigned long>(snapshot.frames_played),
+                      static_cast<unsigned long>(snapshot.read_errors),
+                      static_cast<unsigned long>(snapshot.write_errors));
+    } else if (snapshot.operation == nightglass::services::AudioOperation::playback &&
+               snapshot.last_operation_ok) {
+        set_state(audio_state_, "PLAYED", kGreen);
+        std::snprintf(buffer, sizeof(buffer),
+                      "440 Hz test transfer %lu B | PA OFF\nRX %lu | TX %lu frames\nErrors %lu/%lu",
+                      static_cast<unsigned long>(snapshot.last_transfer_bytes),
+                      static_cast<unsigned long>(snapshot.frames_captured),
+                      static_cast<unsigned long>(snapshot.frames_played),
+                      static_cast<unsigned long>(snapshot.read_errors),
+                      static_cast<unsigned long>(snapshot.write_errors));
+    } else {
+        set_state(audio_state_, snapshot.amplifier_disabled_verified ? "ARMED | PA OFF"
+                                                                      : "PA CHECK",
+                  snapshot.amplifier_disabled_verified ? kGreen : kAmber);
+        std::snprintf(buffer, sizeof(buffer),
+                      "%lu Hz stereo | test-only\nRX %lu | TX %lu frames\nErrors %lu/%lu\nCodec idle; PA OFF",
+                      static_cast<unsigned long>(snapshot.sample_rate_hz),
+                      static_cast<unsigned long>(snapshot.frames_captured),
+                      static_cast<unsigned long>(snapshot.frames_played),
+                      static_cast<unsigned long>(snapshot.read_errors),
+                      static_cast<unsigned long>(snapshot.write_errors));
+    }
     lv_label_set_text(audio_detail_, buffer);
 }
 

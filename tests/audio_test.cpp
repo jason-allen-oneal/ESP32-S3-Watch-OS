@@ -8,6 +8,8 @@ int main() {
     using nightglass::services::pcm16_rms;
     const std::int16_t samples[] = {-3, 4, 0, 0};
     assert(bounded_audio_bytes(0) == 0);
+    assert(bounded_audio_bytes(3) == 0);
+    assert(bounded_audio_bytes(7) == 4);
     assert(bounded_audio_bytes(4096) == 4096);
     assert(bounded_audio_bytes(4097) == 4096);
     assert(pcm16_rms(samples, 4) == 2);
