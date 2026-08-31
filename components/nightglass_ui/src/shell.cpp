@@ -601,26 +601,135 @@ void Shell::dst_callback(lv_event_t *event) {
 
 void Shell::alarm_hour_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    auto alarm = nightglass::services::clock_service().snapshot().alarm;
+    auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
     alarm.hour = static_cast<std::uint8_t>((alarm.hour + 1) % 24);
-    nightglass::services::clock_service().update_alarm(alarm);
+    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
     self->refresh_alarm();
 }
 
 void Shell::alarm_minute_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    auto alarm = nightglass::services::clock_service().snapshot().alarm;
+    auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
     alarm.minute = static_cast<std::uint8_t>((alarm.minute + 5) % 60);
-    nightglass::services::clock_service().update_alarm(alarm);
+    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
     self->refresh_alarm();
 }
 
 void Shell::alarm_enabled_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    auto alarm = nightglass::services::clock_service().snapshot().alarm;
+    auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
     alarm.enabled = !alarm.enabled;
-    nightglass::services::clock_service().update_alarm(alarm);
+    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
     self->refresh_alarm();
+}
+
+void Shell::alarm_slot_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    self->alarm_slot_index_ = static_cast<std::uint8_t>(
+        (self->alarm_slot_index_ + 1) % nightglass::services::kAlarmCapacity);
+    self->refresh_alarm();
+}
+
+void Shell::alarm_repeat_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
+    alarm.repeat_days = alarm.repeat_days == nightglass::services::kEveryDayMask
+                            ? nightglass::services::kWeekdayMask
+                            : alarm.repeat_days == nightglass::services::kWeekdayMask
+                                  ? nightglass::services::kWeekendMask
+                                  : nightglass::services::kEveryDayMask;
+    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
+    self->refresh_alarm();
+}
+
+void Shell::alarm_label_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
+    constexpr std::array<const char *, 4> labels{"Wake up", "Work", "Medication", "Exercise"};
+    std::size_t selected = 0;
+    for (std::size_t index = 0; index < labels.size(); ++index) {
+        if (std::strcmp(alarm.label.data(), labels[index]) == 0) selected = index + 1;
+    }
+    alarm.label.fill('\0');
+    std::strncpy(alarm.label.data(), labels[selected % labels.size()], alarm.label.size() - 1);
+    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
+    self->refresh_alarm();
+}
+
+void Shell::alarm_snooze_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::clock_service().snooze_alarm(10);
+    self->refresh_system_overlay();
+}
+
+void Shell::quiet_toggle_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto quiet = nightglass::services::clock_service().snapshot().quiet_hours;
+    quiet.enabled = !quiet.enabled;
+    nightglass::services::clock_service().update_quiet_hours(quiet);
+    self->refresh_alarm();
+}
+
+void Shell::quiet_start_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto quiet = nightglass::services::clock_service().snapshot().quiet_hours;
+    quiet.start_minute = static_cast<std::uint16_t>((quiet.start_minute + 30) % (24 * 60));
+    nightglass::services::clock_service().update_quiet_hours(quiet);
+    self->refresh_alarm();
+}
+
+void Shell::quiet_end_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto quiet = nightglass::services::clock_service().snapshot().quiet_hours;
+    quiet.end_minute = static_cast<std::uint16_t>((quiet.end_minute + 30) % (24 * 60));
+    nightglass::services::clock_service().update_quiet_hours(quiet);
+    self->refresh_alarm();
+}
+
+void Shell::quick_settings_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    self->quick_settings_open_ = true;
+    self->render_route();
+}
+
+void Shell::quick_settings_back_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    self->quick_settings_open_ = false;
+    self->render_route();
+}
+
+void Shell::quick_brightness_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::power_service().snapshot().settings;
+    constexpr std::uint8_t values[]{20, 30, 50, 75, 100};
+    settings.active_brightness = next_value(settings.active_brightness, values);
+    if (settings.dim_brightness >= settings.active_brightness) settings.dim_brightness = 8;
+    nightglass::services::power_service().update_settings(settings);
+    self->refresh_quick_settings();
+}
+
+void Shell::quick_mute_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::audio_service().snapshot().settings;
+    settings.muted = !settings.muted;
+    (void)nightglass::services::audio_service().update_settings(settings);
+    self->refresh_quick_settings();
+}
+
+void Shell::quick_dnd_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::audio_service().snapshot().settings;
+    settings.do_not_disturb = !settings.do_not_disturb;
+    (void)nightglass::services::audio_service().update_settings(settings);
+    self->refresh_quick_settings();
+}
+
+void Shell::quick_bluetooth_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::connectivity_service().snapshot().settings;
+    settings.enabled = !settings.enabled;
+    (void)nightglass::services::connectivity_service().update_settings(settings);
+    self->refresh_quick_settings();
 }
 
 void Shell::countdown_duration_callback(lv_event_t *event) {
@@ -957,6 +1066,10 @@ void Shell::render_route() {
     const auto &chrome = chrome_palette();
     lv_obj_set_style_bg_color(content_host_, lv_color_hex(chrome.background), 0);
     lv_obj_set_style_bg_opa(content_host_, LV_OPA_COVER, 0);
+    if (quick_settings_open_) {
+        render_quick_settings();
+        return;
+    }
     if (navigation_.route != nightglass::core::Route::home &&
         nightglass::services::valid_face_pack(pack) &&
         pack.chrome.route_background_asset != nightglass::services::FaceAsset::none) {
@@ -1024,6 +1137,15 @@ void Shell::render_route() {
 }
 
 void Shell::render_home() {
+    const auto power = nightglass::services::power_service().snapshot();
+    home_aod_active_ = power.state == nightglass::core::PowerState::dim ||
+                       power.state == nightglass::core::PowerState::ambient;
+    if (home_aod_active_) {
+        render_aod_home();
+        configure_refresh_timer(1000);
+        refresh_home();
+        return;
+    }
     const auto &pack = nightglass::services::watchface_service().selected();
     if (pack.layout == nightglass::services::FaceLayout::full_background) {
         render_pack_home();
@@ -1032,6 +1154,22 @@ void Shell::render_home() {
     }
     configure_refresh_timer(1000);
     refresh_home();
+}
+
+void Shell::render_aod_home() {
+    constexpr std::uint32_t kAodPrimary = 0x303832;
+    constexpr std::uint32_t kAodSecondary = 0x202620;
+    lv_obj_set_style_bg_color(content_host_, lv_color_hex(kVoid), 0);
+    home_time_ = label(content_host_, "--:--", &lv_font_montserrat_48, kAodPrimary);
+    lv_obj_set_pos(home_time_, 82, 178);
+    home_date_ = label(content_host_, "---- -- --", &lv_font_montserrat_16, kAodSecondary);
+    lv_obj_set_pos(home_date_, 145, 244);
+    home_time_state_ = label(content_host_, "AOD", &lv_font_montserrat_14, kAodSecondary);
+    lv_obj_set_pos(home_time_state_, 186, 278);
+    home_battery_ = label(content_host_, "--%", &lv_font_montserrat_14, kAodSecondary);
+    lv_obj_set_pos(home_battery_, 182, 318);
+    home_motion_ = label(content_host_, "", &lv_font_montserrat_14, kAodSecondary);
+    lv_obj_set_pos(home_motion_, 145, 350);
 }
 
 void Shell::render_classic_home() {
@@ -1195,6 +1333,26 @@ void Shell::render_launcher() {
                 kSurface, kPrimary, diagnostics_callback, this);
     make_button(scroller, 0, 11 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
                 kSurface, kPrimary, about_callback, this);
+    make_button(scroller, 0, 12 * gap, kSafeContentWidth - 16, row_height, "QUICK SETTINGS",
+                kSurface, kPrimary, quick_settings_callback, this);
+}
+
+void Shell::render_quick_settings() {
+    add_header(content_host_, "QUICK SETTINGS", quick_settings_back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    quick_brightness_ = make_button(scroller, 0, 0, kSafeContentWidth - 16, 64, "",
+                                    kSurface, kPrimary, quick_brightness_callback, this);
+    quick_mute_ = make_button(scroller, 0, 74, kSafeContentWidth - 16, 64, "",
+                              kSurface, kPrimary, quick_mute_callback, this);
+    quick_dnd_ = make_button(scroller, 0, 148, kSafeContentWidth - 16, 64, "",
+                             kSurface, kPrimary, quick_dnd_callback, this);
+    quick_bluetooth_ = make_button(scroller, 0, 222, kSafeContentWidth - 16, 64, "",
+                                   kSurface, kPrimary, quick_bluetooth_callback, this);
+    auto *note = label(scroller, "Scheduled quiet hours are configured in Alarms.",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, 8, 310);
+    lv_obj_set_width(note, kSafeContentWidth - 32);
+    refresh_quick_settings();
 }
 
 void Shell::render_settings() {
@@ -1588,25 +1746,42 @@ void Shell::refresh_settings_labels() {
 }
 
 void Shell::render_alarm() {
-    add_header(content_host_, "ALARM", back_callback, this);
-    auto *card = make_route_card(content_host_, 110, 126);
-    auto *heading = label(card, "DAILY ALARM", &lv_font_montserrat_14, kSecondary);
+    add_header(content_host_, "ALARMS", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    auto *card = lv_obj_create(scroller);
+    lv_obj_set_size(card, kSafeContentWidth - 16, 142);
+    lv_obj_set_pos(card, 0, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(chrome_palette().border), 0);
+    auto *heading = label(card, "PERSISTENT ALARM", &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(heading, 0, 0);
     alarm_time_ = label(card, "07:00", &lv_font_montserrat_48, kPrimary);
     lv_obj_set_pos(alarm_time_, 0, 27);
     alarm_state_ = label(card, "OFF", &lv_font_montserrat_16, kAmber);
     lv_obj_align(alarm_state_, LV_ALIGN_BOTTOM_RIGHT, 0, -8);
-
-    make_button(content_host_, kSafeInset, 256, 170, 64, "HOUR +", kSurface, kPrimary,
+    alarm_slot_ = make_button(scroller, 0, 156, kSafeContentWidth - 16, 54, "", kSurface,
+                              kPrimary, alarm_slot_callback, this);
+    alarm_label_ = make_button(scroller, 0, 220, kSafeContentWidth - 16, 54, "", kSurface,
+                               kPrimary, alarm_label_callback, this);
+    make_button(scroller, 0, 284, 174, 54, "HOUR +", kSurface, kPrimary,
                 alarm_hour_callback, this);
-    make_button(content_host_, 212, 256, 170, 64, "MIN +5", kSurface, kPrimary,
+    make_button(scroller, 190, 284, 174, 54, "MIN +5", kSurface, kPrimary,
                 alarm_minute_callback, this);
-    alarm_toggle_ = make_button(content_host_, kSafeInset, 338, kSafeContentWidth, 70, "",
+    alarm_repeat_ = make_button(scroller, 0, 348, kSafeContentWidth - 16, 54, "", kSurface,
+                                kPrimary, alarm_repeat_callback, this);
+    alarm_toggle_ = make_button(scroller, 0, 412, kSafeContentWidth - 16, 60, "",
                                 kCyan, kVoid, alarm_enabled_callback, this);
-    auto *note = label(content_host_, "Visual + audio alert | wakes light sleep",
+    quiet_toggle_ = make_button(scroller, 0, 490, kSafeContentWidth - 16, 54, "", kSurface,
+                                kPrimary, quiet_toggle_callback, this);
+    quiet_start_ = make_button(scroller, 0, 554, 174, 54, "", kSurface, kPrimary,
+                               quiet_start_callback, this);
+    quiet_end_ = make_button(scroller, 190, 554, 174, 54, "", kSurface, kPrimary,
+                             quiet_end_callback, this);
+    auto *note = label(scroller, "Quiet hours silence notifications; alarms and timers still sound.",
                        &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(note, kSafeInset, 430);
-    lv_obj_set_width(note, kSafeContentWidth);
+    lv_obj_set_pos(note, 8, 624);
+    lv_obj_set_width(note, kSafeContentWidth - 32);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
     configure_refresh_timer(1000);
     refresh_alarm();
@@ -1923,11 +2098,19 @@ void Shell::refresh_media() {
 
 void Shell::refresh_home() {
     if (!home_time_) return;
+    const auto power = nightglass::services::power_service().snapshot();
+    const bool should_use_aod = power.state == nightglass::core::PowerState::dim ||
+                                power.state == nightglass::core::PowerState::ambient;
+    if (should_use_aod != home_aod_active_) {
+        home_aod_active_ = should_use_aod;
+        render_route();
+        return;
+    }
     const auto snapshot = nightglass::services::hardware_service().snapshot();
     const auto clock = nightglass::services::clock_service().snapshot();
     const auto now = esp_timer_get_time();
     const auto &pack = nightglass::services::watchface_service().selected();
-    const bool full_background = pack.layout ==
+    const bool full_background = !home_aod_active_ && pack.layout ==
                                  nightglass::services::FaceLayout::full_background;
     char buffer[96]{};
 
@@ -2150,6 +2333,19 @@ void Shell::refresh_home() {
         }
         lv_label_set_text(home_timer_, buffer);
     }
+    if (home_aod_active_) {
+        constexpr std::uint32_t kAodPrimary = 0x303832;
+        constexpr std::uint32_t kAodSecondary = 0x202620;
+        const int shift_x = clock.time_valid ? (clock.local_time.minute % 3) * 4 - 4 : 0;
+        const int shift_y = clock.time_valid ? (clock.local_time.minute % 2) * 4 - 2 : 0;
+        lv_obj_set_pos(home_time_, 82 + shift_x, 178 + shift_y);
+        lv_obj_set_pos(home_date_, 145 - shift_x, 244 - shift_y);
+        lv_obj_set_style_text_color(home_time_, lv_color_hex(kAodPrimary), 0);
+        lv_obj_set_style_text_color(home_date_, lv_color_hex(kAodSecondary), 0);
+        lv_obj_set_style_text_color(home_time_state_, lv_color_hex(kAodSecondary), 0);
+        lv_obj_set_style_text_color(home_battery_, lv_color_hex(kAodSecondary), 0);
+        lv_obj_set_style_text_color(home_motion_, lv_color_hex(kAodSecondary), 0);
+    }
 }
 
 void Shell::refresh_clock_settings() {
@@ -2186,21 +2382,47 @@ void Shell::refresh_clock_settings() {
 void Shell::refresh_alarm() {
     if (!alarm_time_) return;
     const auto snapshot = nightglass::services::clock_service().snapshot();
+    const auto &alarm = snapshot.alarms[alarm_slot_index_];
     nightglass::services::CivilTime alarm_time{};
-    alarm_time.hour = snapshot.alarm.hour;
-    alarm_time.minute = snapshot.alarm.minute;
+    alarm_time.hour = alarm.hour;
+    alarm_time.minute = alarm.minute;
     char buffer[64]{};
     const char *period = "";
     format_time(buffer, sizeof(buffer), alarm_time, snapshot.settings.use_24_hour, &period);
     char display[64]{};
     std::snprintf(display, sizeof(display), "%s%s%s", buffer, period[0] ? " " : "", period);
     lv_label_set_text(alarm_time_, display);
-    set_state(alarm_state_, snapshot.alarm_ringing ? "RINGING"
-                           : snapshot.alarm.enabled ? "ON" : "OFF",
-              snapshot.alarm_ringing ? kRed : snapshot.alarm.enabled ? kGreen : kAmber);
+    const bool selected_ringing = snapshot.alarm_ringing &&
+                                  snapshot.ringing_alarm_index == alarm_slot_index_;
+    set_state(alarm_state_, selected_ringing ? "RINGING" : alarm.enabled ? "ON" : "OFF",
+              selected_ringing ? kRed : alarm.enabled ? kGreen : kAmber);
     if (alarm_toggle_) {
-        set_button_text(alarm_toggle_, snapshot.alarm.enabled ? "DISABLE" : "ENABLE");
+        set_button_text(alarm_toggle_, alarm.enabled ? "DISABLE THIS ALARM" : "ENABLE THIS ALARM");
     }
+    std::snprintf(buffer, sizeof(buffer), "ALARM %u OF %u", alarm_slot_index_ + 1,
+                  static_cast<unsigned>(nightglass::services::kAlarmCapacity));
+    set_button_text(alarm_slot_, buffer);
+    std::snprintf(buffer, sizeof(buffer), "LABEL  %s", alarm.label.data());
+    set_button_text(alarm_label_, buffer);
+    const char *repeat = alarm.repeat_days == nightglass::services::kEveryDayMask
+                             ? "EVERY DAY"
+                             : alarm.repeat_days == nightglass::services::kWeekdayMask
+                                   ? "WEEKDAYS" : "WEEKENDS";
+    std::snprintf(buffer, sizeof(buffer), "REPEAT  %s", repeat);
+    set_button_text(alarm_repeat_, buffer);
+    set_button_text(quiet_toggle_, snapshot.quiet_hours.enabled
+                                       ? snapshot.quiet_hours_active
+                                             ? "QUIET HOURS  ACTIVE"
+                                             : "QUIET HOURS  ON"
+                                       : "QUIET HOURS  OFF");
+    std::snprintf(buffer, sizeof(buffer), "START  %02u:%02u",
+                  snapshot.quiet_hours.start_minute / 60,
+                  snapshot.quiet_hours.start_minute % 60);
+    set_button_text(quiet_start_, buffer);
+    std::snprintf(buffer, sizeof(buffer), "END  %02u:%02u",
+                  snapshot.quiet_hours.end_minute / 60,
+                  snapshot.quiet_hours.end_minute % 60);
+    set_button_text(quiet_end_, buffer);
 }
 
 void Shell::refresh_countdown() {
@@ -2235,7 +2457,8 @@ void Shell::refresh_audio() {
     set_button_text(audio_mute_, snapshot.settings.muted ? "WATCH SOUND  MUTED"
                                                          : "WATCH SOUND  ON");
     set_button_text(audio_dnd_, snapshot.settings.do_not_disturb ? "DO NOT DISTURB  ON"
-                                                                 : "DO NOT DISTURB  OFF");
+                               : snapshot.scheduled_dnd ? "QUIET HOURS  ACTIVE"
+                                                        : "DO NOT DISTURB  OFF");
     if (!snapshot.enabled) {
         set_state(audio_state_, "DISABLED", kAmber);
         lv_label_set_text(audio_detail_, "Audio is disabled in this build");
@@ -2311,6 +2534,23 @@ void Shell::refresh_audio() {
     lv_label_set_text(audio_detail_, buffer);
 }
 
+void Shell::refresh_quick_settings() {
+    if (!quick_brightness_) return;
+    const auto power = nightglass::services::power_service().snapshot();
+    const auto audio = nightglass::services::audio_service().snapshot();
+    const auto phone = nightglass::services::connectivity_service().snapshot();
+    char text[48]{};
+    std::snprintf(text, sizeof(text), "BRIGHTNESS  %u%%", power.settings.active_brightness);
+    set_button_text(quick_brightness_, text);
+    set_button_text(quick_mute_, audio.settings.muted ? "WATCH SOUND  MUTED"
+                                                      : "WATCH SOUND  ON");
+    set_button_text(quick_dnd_, audio.settings.do_not_disturb ? "DO NOT DISTURB  ON"
+                               : audio.scheduled_dnd ? "QUIET HOURS  ACTIVE"
+                                                     : "DO NOT DISTURB  OFF");
+    set_button_text(quick_bluetooth_, phone.settings.enabled ? "BLUETOOTH  ON"
+                                                             : "BLUETOOTH  OFF");
+}
+
 void Shell::refresh_system_overlay() {
     if (!overlay_layer_) return;
     constexpr std::uint8_t kPairingOverlay = 0xfe;
@@ -2376,12 +2616,26 @@ void Shell::refresh_system_overlay() {
                                                                            : "ALARMS DUE";
     auto *heading = label(alert_card_, title, &lv_font_montserrat_32, kPrimary);
     lv_obj_align(heading, LV_ALIGN_TOP_MID, 0, 18);
-    auto *note = label(alert_card_, "Visual + audio alert\nHaptics unavailable",
+    const auto clock = nightglass::services::clock_service().snapshot();
+    const char *alarm_label = clock.ringing_alarm_index < clock.alarms.size()
+                                  ? clock.alarms[clock.ringing_alarm_index].label.data()
+                                  : "Visual + audio alert";
+    auto *note = label(alert_card_, kind == nightglass::services::AlertKind::countdown
+                                        ? "Countdown complete\nVisual + audio alert"
+                                        : alarm_label,
                        &lv_font_montserrat_16, kSecondary);
     lv_obj_align(note, LV_ALIGN_CENTER, 0, 16);
     lv_obj_set_style_text_align(note, LV_TEXT_ALIGN_CENTER, 0);
-    make_button(overlay_layer_, kSafeInset, 370, kSafeContentWidth, 70, "DISMISS",
-                kCyan, kVoid, dismiss_alert_callback, this);
+    if (kind == nightglass::services::AlertKind::alarm ||
+        kind == nightglass::services::AlertKind::both) {
+        make_button(overlay_layer_, kSafeInset, 350, 170, 70, "SNOOZE 10",
+                    kSurface, kPrimary, alarm_snooze_callback, this);
+        make_button(overlay_layer_, 212, 350, 170, 70, "DISMISS",
+                    kCyan, kVoid, dismiss_alert_callback, this);
+    } else {
+        make_button(overlay_layer_, kSafeInset, 370, kSafeContentWidth, 70, "DISMISS",
+                    kCyan, kVoid, dismiss_alert_callback, this);
+    }
     displayed_alert_kind_ = encoded;
 }
 
@@ -2507,6 +2761,12 @@ void Shell::clear_route_objects() {
     alarm_time_ = nullptr;
     alarm_state_ = nullptr;
     alarm_toggle_ = nullptr;
+    alarm_slot_ = nullptr;
+    alarm_repeat_ = nullptr;
+    alarm_label_ = nullptr;
+    quiet_toggle_ = nullptr;
+    quiet_start_ = nullptr;
+    quiet_end_ = nullptr;
     countdown_time_ = nullptr;
     countdown_duration_ = nullptr;
     countdown_toggle_ = nullptr;
@@ -2518,6 +2778,10 @@ void Shell::clear_route_objects() {
     audio_volume_ = nullptr;
     audio_mute_ = nullptr;
     audio_dnd_ = nullptr;
+    quick_brightness_ = nullptr;
+    quick_mute_ = nullptr;
+    quick_dnd_ = nullptr;
+    quick_bluetooth_ = nullptr;
     home_alarm_ = nullptr;
     home_timer_ = nullptr;
     home_connectivity_ = nullptr;

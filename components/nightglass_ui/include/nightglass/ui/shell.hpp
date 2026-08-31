@@ -60,6 +60,19 @@ private:
     static void alarm_hour_callback(lv_event_t *event);
     static void alarm_minute_callback(lv_event_t *event);
     static void alarm_enabled_callback(lv_event_t *event);
+    static void alarm_slot_callback(lv_event_t *event);
+    static void alarm_repeat_callback(lv_event_t *event);
+    static void alarm_label_callback(lv_event_t *event);
+    static void alarm_snooze_callback(lv_event_t *event);
+    static void quiet_toggle_callback(lv_event_t *event);
+    static void quiet_start_callback(lv_event_t *event);
+    static void quiet_end_callback(lv_event_t *event);
+    static void quick_settings_callback(lv_event_t *event);
+    static void quick_settings_back_callback(lv_event_t *event);
+    static void quick_brightness_callback(lv_event_t *event);
+    static void quick_mute_callback(lv_event_t *event);
+    static void quick_dnd_callback(lv_event_t *event);
+    static void quick_bluetooth_callback(lv_event_t *event);
     static void countdown_duration_callback(lv_event_t *event);
     static void countdown_toggle_callback(lv_event_t *event);
     static void countdown_reset_callback(lv_event_t *event);
@@ -91,6 +104,8 @@ private:
     void render_notifications();
     void render_classic_home();
     void render_pack_home();
+    void render_aod_home();
+    void render_quick_settings();
     void render_alarm();
     void render_countdown();
     void render_stopwatch();
@@ -111,6 +126,7 @@ private:
     void refresh_countdown();
     void refresh_stopwatch();
     void refresh_audio();
+    void refresh_quick_settings();
     void refresh_system_overlay();
     void refresh_diagnostics();
     void clear_route_objects();
@@ -171,6 +187,13 @@ private:
     lv_obj_t *alarm_time_{nullptr};
     lv_obj_t *alarm_state_{nullptr};
     lv_obj_t *alarm_toggle_{nullptr};
+    lv_obj_t *alarm_slot_{nullptr};
+    lv_obj_t *alarm_repeat_{nullptr};
+    lv_obj_t *alarm_label_{nullptr};
+    lv_obj_t *quiet_toggle_{nullptr};
+    lv_obj_t *quiet_start_{nullptr};
+    lv_obj_t *quiet_end_{nullptr};
+    std::uint8_t alarm_slot_index_{0};
     lv_obj_t *countdown_time_{nullptr};
     lv_obj_t *countdown_duration_{nullptr};
     lv_obj_t *countdown_toggle_{nullptr};
@@ -184,6 +207,11 @@ private:
     lv_obj_t *audio_dnd_{nullptr};
     lv_obj_t *alert_card_{nullptr};
     std::uint8_t displayed_alert_kind_{0};
+    bool quick_settings_open_{false};
+    lv_obj_t *quick_brightness_{nullptr};
+    lv_obj_t *quick_mute_{nullptr};
+    lv_obj_t *quick_dnd_{nullptr};
+    lv_obj_t *quick_bluetooth_{nullptr};
 
     // Home route widgets.
     lv_obj_t *home_time_{nullptr};
@@ -205,6 +233,7 @@ private:
         nightglass::services::WeatherIcon::cloudy};
     std::uint32_t home_weather_icon_color_{0};
     lv_obj_t *home_notifications_{nullptr};
+    bool home_aod_active_{false};
 
     // Diagnostics widgets exist only while that route is active.
     lv_obj_t *diagnostics_rtc_state_{nullptr};

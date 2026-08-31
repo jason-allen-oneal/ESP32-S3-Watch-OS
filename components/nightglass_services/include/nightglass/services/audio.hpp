@@ -115,6 +115,9 @@ struct AudioSnapshot {
     std::uint8_t last_operation_status{0};
     std::int64_t last_io_us{0};
     AudioSettings settings{};
+    // Transient schedule-owned suppression; persisted quiet-hour settings live
+    // with the clock because they depend on local civil time.
+    bool scheduled_dnd{false};
 };
 
 // Pure helpers are intentionally small so protocol/audio policy can be tested
@@ -133,6 +136,7 @@ public:
     nightglass::core::Status request_test_tone();
     nightglass::core::Status request_sound(SoundCue cue);
     nightglass::core::Status update_settings(const AudioSettings &settings);
+    void set_scheduled_dnd(bool active);
     [[nodiscard]] AudioSnapshot snapshot() const;
 };
 

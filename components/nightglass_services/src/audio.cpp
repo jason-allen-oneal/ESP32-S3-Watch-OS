@@ -849,8 +849,11 @@ void audio_worker_task(void *) {
         if (xQueueReceive(audio_queue, &command, portMAX_DELAY) != pdTRUE) continue;
         portENTER_CRITICAL(&state_mux);
         const bool locked = state.hardware_failed;
+        auto effective_settings = state.settings;
+        effective_settings.do_not_disturb = effective_settings.do_not_disturb ||
+                                             state.scheduled_dnd;
         const bool allowed = command.operation != AudioOperation::playback ||
-                             audio_cue_allowed(command.cue, state.settings);
+                             audio_cue_allowed(command.cue, effective_settings);
         if (locked) {
             state.operation = command.operation;
             state.cue = command.cue;
@@ -1073,6 +1076,7 @@ nightglass::core::Status AudioService::request_sound(SoundCue cue) {
     AudioSettings settings{};
     portENTER_CRITICAL(&state_mux);
     settings = state.settings;
+    settings.do_not_disturb = settings.do_not_disturb || state.scheduled_dnd;
     portEXIT_CRITICAL(&state_mux);
     if (!audio_cue_allowed(cue, settings)) {
         return nightglass::core::Status::Ok();
@@ -1084,6 +1088,19 @@ nightglass::core::Status AudioService::request_sound(SoundCue cue) {
         wake_reason = nightglass::core::WakeReason::touch;
     }
     return request(AudioOperation::playback, cue, wake_reason);
+#endif
+}
+
+void AudioService::set_scheduled_dnd(bool active) {
+#if NIGHTGLASS_AUDIO_RUNTIME
+    portENTER_CRITICAL(&state_mux);
+    if (state.scheduled_dnd != active) {
+        state.scheduled_dnd = active;
+        ++state.sequence;
+    }
+    portEXIT_CRITICAL(&state_mux);
+#else
+    (void)active;
 #endif
 }
 
