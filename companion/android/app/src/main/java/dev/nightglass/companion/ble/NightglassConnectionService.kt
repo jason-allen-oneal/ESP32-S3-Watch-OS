@@ -189,7 +189,11 @@ class NightglassConnectionService : Service() {
         }
         override fun onDescriptorWrite(client: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (descriptor.uuid != NightglassProtocol.CCCD) return
-            if (status != BluetoothGatt.GATT_SUCCESS) return update("Could not enable Nightglass notifications")
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                update("Nightglass subscription failed; reconnecting")
+                recoverDeadLink(client)
+                return
+            }
             reconnectAttempt = 0
             synchronized(writes) {
                 linkReady = true
@@ -208,7 +212,11 @@ class NightglassConnectionService : Service() {
         }
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             Log.i(TAG, "Nightglass frame completion: opcode=$pendingOpcode status=$status")
-            if (status != BluetoothGatt.GATT_SUCCESS) update("Nightglass rejected frame $pendingOpcode")
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                update("Nightglass link failed; reconnecting")
+                recoverDeadLink(client)
+                return
+            }
             synchronized(writes) { writePending = false; pendingOpcode = -1; writeNextLocked() }
         }
         @Deprecated("API compatibility")
@@ -267,6 +275,13 @@ class NightglassConnectionService : Service() {
     private fun resetLinkState() {
         synchronized(writes) { writePending = false; linkReady = false }
         negotiatedPayload = 20
+    }
+    private fun recoverDeadLink(client: BluetoothGatt) {
+        resetLinkState()
+        client.disconnect()
+        client.close()
+        if (gatt === client) gatt = null
+        scheduleReconnect()
     }
     private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false; linkReady = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
 
