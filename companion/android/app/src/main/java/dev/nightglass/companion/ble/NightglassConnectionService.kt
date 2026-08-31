@@ -147,7 +147,8 @@ class NightglassConnectionService : Service() {
         }
     }
     private fun connect(device: BluetoothDevice) {
-        closeGatt()
+        if (gatt != null) return
+        resetLinkState()
         gatt = device.connectGatt(this, false, callback, BluetoothDevice.TRANSPORT_LE)
         update("Connecting")
     }
@@ -160,6 +161,7 @@ class NightglassConnectionService : Service() {
                 if (!client.requestMtu(247)) client.discoverServices()
             }
             else {
+                resetLinkState()
                 client.close()
                 if (gatt === client) gatt = null
                 update("Disconnected; reconnecting")
@@ -240,6 +242,10 @@ class NightglassConnectionService : Service() {
         val delay = minOf(60_000L, 1_000L shl minOf(reconnectAttempt, 5))
         reconnectAttempt++
         reconnectHandler.postDelayed(reconnect, delay)
+    }
+    private fun resetLinkState() {
+        synchronized(writes) { writePending = false; linkReady = false }
+        negotiatedPayload = 20
     }
     private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false; linkReady = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
 
