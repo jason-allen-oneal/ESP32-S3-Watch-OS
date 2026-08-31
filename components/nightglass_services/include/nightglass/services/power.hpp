@@ -26,6 +26,7 @@ struct PowerSnapshot {
     bool side_key_ready{false};
     bool side_key_pressed{false};
     bool light_sleep_enabled{false};
+    bool automatic_light_sleep_enabled{false};
     bool sleeping{false};
     bool wake_touch_pending{false};
     std::uint32_t sleep_count{0};

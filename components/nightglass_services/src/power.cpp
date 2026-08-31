@@ -3,6 +3,7 @@
 #include "driver/gpio.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -50,6 +51,13 @@ bool valid_settings(const PowerSettings &settings) {
            settings.blank_after_seconds > settings.dim_after_seconds &&
            settings.blank_after_seconds <= 1800 &&
            settings.sleep_after_blank_seconds <= 3600;
+}
+
+bool enable_automatic_light_sleep() {
+    esp_pm_config_t config{};
+    if (esp_pm_get_configuration(&config) != ESP_OK) return false;
+    config.light_sleep_enable = true;
+    return esp_pm_configure(&config) == ESP_OK;
 }
 
 PowerSettings load_settings() {
@@ -340,6 +348,7 @@ nightglass::core::Status PowerService::start() {
     }
 
     const auto settings = load_settings();
+    const bool automatic_light_sleep_enabled = enable_automatic_light_sleep();
     const auto now = esp_timer_get_time();
     const bool side_key_pressed = gpio_get_level(kSideKeyGpio) > 0;
     portENTER_CRITICAL(&snapshot_mux);
@@ -351,6 +360,7 @@ nightglass::core::Status PowerService::start() {
     current.side_key_pressed = side_key_pressed;
     current.last_activity_us = now;
     current.light_sleep_enabled = settings.sleep_after_blank_seconds > 0;
+    current.automatic_light_sleep_enabled = automatic_light_sleep_enabled;
     current.settings = settings;
     ++current.sequence;
     portEXIT_CRITICAL(&snapshot_mux);
@@ -368,11 +378,16 @@ nightglass::core::Status PowerService::start() {
     }
 
     nightglass::core::health_registry().set(
-        "power", nightglass::core::HealthState::ok,
-        "Configurable brightness and GPIO light sleep active");
-    ESP_LOGI(kTag, "Power supervisor active: dim=%us blank=%us sleep=%us GPIO10=%d",
+        "power", automatic_light_sleep_enabled ? nightglass::core::HealthState::ok
+                                                : nightglass::core::HealthState::degraded,
+        automatic_light_sleep_enabled
+            ? "DFS, automatic light sleep, and GPIO wake active"
+            : "GPIO wake active; automatic light sleep unavailable");
+    ESP_LOGI(kTag,
+             "Power supervisor active: dim=%us blank=%us sleep=%us auto_light_sleep=%d GPIO10=%d",
              settings.dim_after_seconds, settings.blank_after_seconds,
-             settings.sleep_after_blank_seconds, side_key_pressed);
+             settings.sleep_after_blank_seconds, automatic_light_sleep_enabled,
+             side_key_pressed);
     return nightglass::core::Status::Ok();
 }
 
