@@ -16,6 +16,7 @@
 #include "nightglass/services/connectivity.hpp"
 #include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/power.hpp"
+#include "nightglass/services/storage.hpp"
 #include "nightglass/services/watchface.hpp"
 #include "nightglass/services/audio.hpp"
 #include "nightglass/ui/shell.hpp"
@@ -132,6 +133,11 @@ extern "C" void app_main() {
     }
 
     if (!safe_mode) {
+        const auto storage_status = nightglass::services::storage_service().start();
+        if (!storage_status.is_ok()) {
+            ESP_LOGW(kTag, "Runtime assets unavailable: %s", storage_status.detail);
+        }
+
         const auto hardware_status =
             nightglass::services::hardware_service().start(board.i2c_bus());
         if (!hardware_status.is_ok()) {
