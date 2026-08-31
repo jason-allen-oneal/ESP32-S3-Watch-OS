@@ -7,6 +7,8 @@ import android.bluetooth.le.*
 import android.content.*
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.*
 import android.view.KeyEvent
 import androidx.core.app.ActivityCompat
@@ -14,13 +16,16 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import dev.nightglass.companion.protocol.NightglassProtocol
 import dev.nightglass.companion.notifications.NightglassNotificationListener
+import dev.nightglass.companion.weather.PhoneWeatherProxy
 import java.util.ArrayDeque
+import java.util.concurrent.Executors
 
 class NightglassConnectionService : Service() {
     companion object {
         const val ACTION_CONNECT = "dev.nightglass.CONNECT"
         const val ACTION_DISCONNECT = "dev.nightglass.DISCONNECT"
         const val ACTION_WRITE = "dev.nightglass.WRITE"
+        const val ACTION_REFRESH_WEATHER = "dev.nightglass.REFRESH_WEATHER"
         const val EXTRA_FRAME = "frame"
         const val CHANNEL = "nightglass_connection"
         @Volatile private var current: NightglassConnectionService? = null
@@ -42,6 +47,12 @@ class NightglassConnectionService : Service() {
     private var reconnectAttempt = 0
     private var explicitDisconnect = false
     private val reconnect = Runnable { if (!explicitDisconnect && gatt == null) scan() }
+    private val weatherExecutor = Executors.newSingleThreadExecutor()
+    private var weatherFetchInFlight = false
+    private val weatherRefresh = Runnable { fetchPhoneWeather() }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) { scheduleWeatherRefresh(0) }
+    }
 
     private val bondReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -51,13 +62,26 @@ class NightglassConnectionService : Service() {
                 device.bondState == BluetoothDevice.BOND_BONDED) gatt?.requestMtu(247)
         }
     }
-    override fun onCreate() { super.onCreate(); current = this; createChannel(); ContextCompat.registerReceiver(this, bondReceiver, IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED), ContextCompat.RECEIVER_EXPORTED) }
+    override fun onCreate() {
+        super.onCreate()
+        current = this
+        createChannel()
+        ContextCompat.registerReceiver(this, bondReceiver,
+            IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+            ContextCompat.RECEIVER_EXPORTED)
+        runCatching { getSystemService(ConnectivityManager::class.java)
+            .registerDefaultNetworkCallback(networkCallback) }
+    }
     override fun onDestroy() {
         explicitDisconnect = true
         reconnectHandler.removeCallbacks(reconnect)
         current = null
         unregisterReceiver(bondReceiver)
+        runCatching { getSystemService(ConnectivityManager::class.java)
+            .unregisterNetworkCallback(networkCallback) }
         stopScan()
+        reconnectHandler.removeCallbacks(weatherRefresh)
+        weatherExecutor.shutdownNow()
         closeGatt()
         super.onDestroy()
     }
@@ -69,6 +93,11 @@ class NightglassConnectionService : Service() {
             ACTION_WRITE -> {
                 explicitDisconnect = false
                 intent.getByteArrayExtra(EXTRA_FRAME)?.let(::write)
+                if (gatt == null) scan()
+            }
+            ACTION_REFRESH_WEATHER -> {
+                explicitDisconnect = false
+                scheduleWeatherRefresh(0)
                 if (gatt == null) scan()
             }
             else -> { explicitDisconnect = false; scan() }
@@ -154,6 +183,7 @@ class NightglassConnectionService : Service() {
             reconnectAttempt = 0
             synchronized(writes) { linkReady = true; writeNextLocked() }
             update("Nightglass connected")
+            scheduleWeatherRefresh(0)
         }
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) update("Nightglass rejected a settings frame")
@@ -209,6 +239,27 @@ class NightglassConnectionService : Service() {
         reconnectHandler.postDelayed(reconnect, delay)
     }
     private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false; linkReady = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
+
+    private fun scheduleWeatherRefresh(delayMs: Long? = null) {
+        reconnectHandler.removeCallbacks(weatherRefresh)
+        val config = PhoneWeatherProxy.load(this) ?: return
+        val delay = delayMs ?: config.refreshMinutes * 60_000L
+        reconnectHandler.postDelayed(weatherRefresh, delay)
+    }
+
+    private fun fetchPhoneWeather() {
+        if (!linkReady || weatherFetchInFlight) return
+        val config = PhoneWeatherProxy.load(this) ?: return
+        weatherFetchInFlight = true
+        weatherExecutor.execute {
+            val frame = runCatching { PhoneWeatherProxy.fetch(config) }.getOrNull()
+            reconnectHandler.post {
+                weatherFetchInFlight = false
+                if (frame != null && linkReady) write(frame)
+                scheduleWeatherRefresh(if (frame == null) 5 * 60_000L else null)
+            }
+        }
+    }
     private fun hasConnectPermissions() = Build.VERSION.SDK_INT < 31 || (ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED)
     private fun createChannel() { getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "Watch connection", NotificationManager.IMPORTANCE_LOW)) }
     private fun update(text: String) { getSystemService(NotificationManager::class.java).notify(7, connectionNotification(text)) }

@@ -43,4 +43,23 @@ object NightglassProtocol {
         return ByteBuffer.allocate(14).order(ByteOrder.LITTLE_ENDIAN).put(VERSION).put(0x21).put(flags.toByte()).put(if (metric) 1 else 0).putShort(refreshMinutes.toShort()).putInt(latitudeE6).putInt(longitudeE6).array()
     }
     fun clearWifi() = byteArrayOf(VERSION, 0x22)
+
+    fun phoneWeather(observedEpochSeconds: Long, metric: Boolean, isDay: Boolean,
+                     temperature: Double, apparentTemperature: Double,
+                     weatherCode: Int, windSpeed: Double): ByteArray {
+        require(observedEpochSeconds in 1_577_836_800L..UInt.MAX_VALUE.toLong())
+        require(temperature in -150.0..150.0 && apparentTemperature in -150.0..150.0)
+        require(weatherCode in 0..999 && windSpeed in 0.0..500.0)
+        val temperatureTenths = kotlin.math.round(temperature * 10).toInt()
+        val apparentTenths = kotlin.math.round(apparentTemperature * 10).toInt()
+        val windTenths = kotlin.math.round(windSpeed * 10).toInt()
+        val flags = (if (metric) 1 else 0) or (if (isDay) 2 else 0)
+        return ByteBuffer.allocate(18).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x23).put(flags.toByte()).put(0)
+            .putInt(observedEpochSeconds.toInt())
+            .putShort(0) // The phone fetched this observation immediately.
+            .putShort(temperatureTenths.toShort())
+            .putShort(apparentTenths.toShort())
+            .putShort(weatherCode.toShort()).putShort(windTenths.toShort()).array()
+    }
 }

@@ -51,3 +51,11 @@ clears the runtime Wi-Fi credential. Credentials are never returned over GATT or
 written to logs. Just Works pairing protects against passive interception but
 does not provide MITM authentication; a passkey ceremony remains required for
 hostile-radio environments.
+
+Opcode `0x23` carries the phone weather proxy snapshot in exactly 18 bytes:
+`version`, `opcode`, flags (metric bit 0, day bit 1), zero reserved byte,
+observed Unix epoch `u32`, snapshot age seconds `u16`, temperature tenths `i16`, apparent-temperature
+tenths `i16`, WMO weather code `u16`, and wind-speed tenths `u16`. All integers
+are little-endian. The watch rejects unknown flags, nonzero reserved data,
+invalid ranges, observations older than six hours, observations more than five
+minutes in the future, unit mismatches, and data older than its current source.

@@ -45,4 +45,26 @@ int main() {
     assert(!weather_is_stale(3599, 30));
     assert(!weather_is_stale(3600, 30));
     assert(weather_is_stale(3601, 30));
+
+    assert(weather_candidate_wins(WeatherCandidateSource::none, 0,
+                                  WeatherCandidateSource::phone, 100));
+    assert(weather_candidate_wins(WeatherCandidateSource::direct, 100,
+                                  WeatherCandidateSource::phone, 101));
+    assert(!weather_candidate_wins(WeatherCandidateSource::phone, 101,
+                                   WeatherCandidateSource::direct, 100));
+    assert(weather_candidate_wins(WeatherCandidateSource::direct, 100,
+                                  WeatherCandidateSource::phone, 100));
+    assert(!weather_candidate_wins(WeatherCandidateSource::phone, 100,
+                                   WeatherCandidateSource::direct, 100));
+    std::uint32_t age = 99;
+    assert(weather_observation_age(100, 120, 5, age) && age == 20);
+    assert(weather_observation_age(123, 120, 5, age) && age == 0);
+    assert(!weather_observation_age(126, 120, 5, age));
+    assert(!weather_observation_age(0, 120, 5, age));
+    assert(weather_cache_is_usable(WeatherUnits::metric, WeatherUnits::metric,
+                                   100, 120, 5));
+    assert(!weather_cache_is_usable(WeatherUnits::imperial, WeatherUnits::metric,
+                                    100, 120, 5));
+    assert(!weather_cache_is_usable(WeatherUnits::metric, WeatherUnits::metric,
+                                    126, 120, 5));
 }

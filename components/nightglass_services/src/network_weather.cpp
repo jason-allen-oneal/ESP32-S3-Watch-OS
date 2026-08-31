@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -31,12 +32,15 @@ namespace {
 constexpr char kTag[] = "nightglass_net";
 constexpr char kNvsNamespace[] = "ng_network";
 constexpr char kSettingsKey[] = "settings";
+constexpr char kCacheKey[] = "weather_cache";
 constexpr std::uint32_t kSettingsMagic = 0x4E475753;    // NGWS
 constexpr std::uint8_t kStorageVersion = 1;
 constexpr std::size_t kMaxSsid = 32;
 constexpr std::size_t kMaxPassword = 64;
 constexpr std::size_t kMaxResponse = 4096;
 constexpr std::int64_t kWorkerPeriodUs = 1'000'000;
+constexpr std::uint32_t kMaximumProxyAgeSeconds = 6U * 60U * 60U;
+constexpr std::uint32_t kMaximumFutureSkewSeconds = 5U * 60U;
 
 struct CredentialBlob {
     std::uint8_t ssid_length{0};
@@ -55,6 +59,22 @@ struct SettingsBlob {
     std::int32_t longitude_e6{0};
     std::uint16_t refresh_minutes{30};
     std::uint16_t reserved{0};
+    std::uint32_t checksum{0};
+};
+
+struct CacheBlob {
+    std::uint32_t magic{0x4E475743};  // NGWC
+    std::uint8_t version{1};
+    std::uint8_t units{0};
+    std::uint8_t is_day{0};
+    std::uint8_t reserved{0};
+    std::uint32_t observed_epoch_seconds{0};
+    std::int32_t latitude_e6{0};
+    std::int32_t longitude_e6{0};
+    std::int16_t temperature_tenths{0};
+    std::int16_t apparent_tenths{0};
+    std::uint16_t weather_code{0};
+    std::uint16_t wind_tenths{0};
     std::uint32_t checksum{0};
 };
 
@@ -150,6 +170,45 @@ esp_err_t save_settings(const NetworkWeatherSettings &settings) {
     nvs_handle_t handle{};
     esp_err_t result = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
     if (result == ESP_OK) result = nvs_set_blob(handle, kSettingsKey, &blob, sizeof(blob));
+    if (result == ESP_OK) result = nvs_commit(handle);
+    if (handle) nvs_close(handle);
+    return result;
+}
+
+bool load_cache(CacheBlob &blob) {
+    nvs_handle_t handle{};
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
+    std::size_t length = sizeof(blob);
+    const esp_err_t result = nvs_get_blob(handle, kCacheKey, &blob, &length);
+    nvs_close(handle);
+    return result == ESP_OK && length == sizeof(blob) && blob.magic == 0x4E475743 &&
+           blob.version == 1 && blob.units <= 1 && blob.is_day <= 1 &&
+           blob.observed_epoch_seconds >= 1'577'836'800U &&
+           valid_coordinates(blob.latitude_e6, blob.longitude_e6) &&
+           blob.temperature_tenths >= -1500 && blob.temperature_tenths <= 1500 &&
+           blob.apparent_tenths >= -1500 && blob.apparent_tenths <= 1500 &&
+           blob.weather_code <= 999 && blob.wind_tenths <= 5000 &&
+           checksum(&blob, offsetof(CacheBlob, checksum)) == blob.checksum;
+}
+
+esp_err_t save_cache(const NetworkWeatherSnapshot &snapshot) {
+    CacheBlob blob{};
+    blob.units = snapshot.settings.units == WeatherUnits::metric ? 0 : 1;
+    blob.is_day = snapshot.current.is_day ? 1 : 0;
+    blob.observed_epoch_seconds = snapshot.observed_epoch_seconds;
+    blob.latitude_e6 = snapshot.settings.latitude_e6;
+    blob.longitude_e6 = snapshot.settings.longitude_e6;
+    blob.temperature_tenths = static_cast<std::int16_t>(
+        std::lround(snapshot.current.temperature * 10.0F));
+    blob.apparent_tenths = static_cast<std::int16_t>(
+        std::lround(snapshot.current.apparent_temperature * 10.0F));
+    blob.weather_code = snapshot.current.weather_code;
+    blob.wind_tenths = static_cast<std::uint16_t>(
+        std::lround(snapshot.current.wind_speed * 10.0F));
+    blob.checksum = checksum(&blob, offsetof(CacheBlob, checksum));
+    nvs_handle_t handle{};
+    esp_err_t result = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
+    if (result == ESP_OK) result = nvs_set_blob(handle, kCacheKey, &blob, sizeof(blob));
     if (result == ESP_OK) result = nvs_commit(handle);
     if (handle) nvs_close(handle);
     return result;
@@ -383,9 +442,28 @@ void connect_if_due(std::int64_t now) {
 }
 
 void update_age(std::int64_t now) {
+    const auto clock = clock_service().snapshot();
     portENTER_CRITICAL(&state_mux);
-    if (current.data_valid && last_good_us > 0) {
-        const auto age = std::max<std::int64_t>(0, now - last_good_us) / 1'000'000;
+    if (current.data_valid) {
+        std::uint32_t wall_age = 0;
+        const bool wall_age_valid = clock.time_valid && weather_observation_age(
+            current.observed_epoch_seconds, clock.utc_epoch_seconds,
+            kMaximumFutureSkewSeconds, wall_age);
+        if (clock.time_valid && current.observed_epoch_seconds > 0 && !wall_age_valid) {
+            current.data_valid = false;
+            current.stale = false;
+            current.source = WeatherSource::none;
+            current.weather_state = WeatherState::unavailable;
+            current.last_error = WeatherError::stale_payload;
+            ++current.sequence;
+            portEXIT_CRITICAL(&state_mux);
+            return;
+        }
+        const auto age = wall_age_valid
+                             ? static_cast<std::int64_t>(wall_age)
+                             : last_good_us > 0
+                                   ? std::max<std::int64_t>(0, now - last_good_us) / 1'000'000
+                                   : 0;
         current.age_seconds = age > std::numeric_limits<std::uint32_t>::max()
                                   ? std::numeric_limits<std::uint32_t>::max()
                                   : static_cast<std::uint32_t>(age);
@@ -411,6 +489,27 @@ void worker(void *) {
         portEXIT_CRITICAL(&state_mux);
 
         if (sleep_suspended.load()) continue;
+
+        update_age(now);
+        portENTER_CRITICAL(&state_mux);
+        snapshot = current;
+        portEXIT_CRITICAL(&state_mux);
+
+        // A fresh phone snapshot is the preferred path: keep the watch Wi-Fi
+        // radio off and let the companion use whatever Internet transport the
+        // phone currently owns (Wi-Fi or cellular).
+        if (snapshot.data_valid && snapshot.source == WeatherSource::phone &&
+            !snapshot.stale) {
+            if (wifi_started.load()) {
+                esp_wifi_disconnect();
+                esp_wifi_stop();
+                wifi_started.store(false);
+                got_ip.store(false);
+                connect_requested.store(false);
+            }
+            publish_network(NetworkState::disabled, false, WeatherError::none);
+            continue;
+        }
 
         if (!snapshot.settings.enabled || !snapshot.credentials_configured) {
             if (wifi_started.load()) {
@@ -455,8 +554,6 @@ void worker(void *) {
             next_connect_us.store(0);
         }
         connect_if_due(now);
-        update_age(now);
-
         portENTER_CRITICAL(&state_mux);
         snapshot = current;
         portEXIT_CRITICAL(&state_mux);
@@ -484,6 +581,7 @@ void worker(void *) {
         if (fetch == WeatherError::none) {
             wifi_ap_record_t ap{};
             const auto rssi = esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+            const auto observed_epoch = clock_service().snapshot().utc_epoch_seconds;
             portENTER_CRITICAL(&state_mux);
             if (configuration_generation != observed_generation ||
                 !current.settings.enabled || !current.credentials_configured ||
@@ -495,11 +593,19 @@ void worker(void *) {
             current.data_valid = true;
             current.stale = false;
             current.age_seconds = 0;
+            current.observed_epoch_seconds = observed_epoch;
+            current.source = WeatherSource::direct;
             current.rssi_dbm = static_cast<std::int8_t>(rssi);
             current.weather_state = WeatherState::fresh;
             current.last_error = WeatherError::none;
             ++current.sequence;
             portEXIT_CRITICAL(&state_mux);
+            const auto saved = instance.snapshot();
+            if (save_cache(saved) != ESP_OK) {
+                nightglass::core::health_registry().set(
+                    "weather", nightglass::core::HealthState::degraded,
+                    "Last-good weather cache persistence failed");
+            }
             weather_failure_attempt.store(0);
             last_good_us = esp_timer_get_time();
             next_fetch_us.store(
@@ -545,6 +651,15 @@ nightglass::core::Status NetworkWeatherService::start() {
     }
     const auto settings = load_settings();
     const bool provisioned = false;
+    CacheBlob cache{};
+    const auto clock = clock_service().snapshot();
+    const bool cache_valid = load_cache(cache) && clock.time_valid &&
+        settings.location_configured && cache.latitude_e6 == settings.latitude_e6 &&
+        cache.longitude_e6 == settings.longitude_e6 &&
+        weather_cache_is_usable(cache.units == 0 ? WeatherUnits::metric
+                                                 : WeatherUnits::imperial,
+                                settings.units, cache.observed_epoch_seconds,
+                                clock.utc_epoch_seconds, kMaximumFutureSkewSeconds);
 
     portENTER_CRITICAL(&state_mux);
     current = {};
@@ -556,6 +671,18 @@ nightglass::core::Status NetworkWeatherService::start() {
     current.weather_state = WeatherState::unavailable;
     current.last_error = settings.location_configured ? WeatherError::none
                                                        : WeatherError::no_location;
+    if (cache_valid) {
+        current.current.temperature = cache.temperature_tenths / 10.0F;
+        current.current.apparent_temperature = cache.apparent_tenths / 10.0F;
+        current.current.weather_code = cache.weather_code;
+        current.current.wind_speed = cache.wind_tenths / 10.0F;
+        current.current.is_day = cache.is_day != 0;
+        current.observed_epoch_seconds = cache.observed_epoch_seconds;
+        current.data_valid = true;
+        current.stale = true;
+        current.source = WeatherSource::cache;
+        current.weather_state = WeatherState::offline;
+    }
     ++current.sequence;
     portEXIT_CRITICAL(&state_mux);
 
@@ -596,7 +723,20 @@ nightglass::core::Status NetworkWeatherService::update_settings(
                 "network/weather settings persistence failed"};
     }
     portENTER_CRITICAL(&state_mux);
+    const bool data_scope_changed = current.settings.units != settings.units ||
+        current.settings.location_configured != settings.location_configured ||
+        current.settings.latitude_e6 != settings.latitude_e6 ||
+        current.settings.longitude_e6 != settings.longitude_e6;
     current.settings = settings;
+    if (data_scope_changed) {
+        current.current = {};
+        current.data_valid = false;
+        current.stale = false;
+        current.age_seconds = 0;
+        current.observed_epoch_seconds = 0;
+        current.source = WeatherSource::none;
+        current.weather_state = WeatherState::unavailable;
+    }
     current.network_state = !settings.enabled ? NetworkState::disabled
                             : current.credentials_configured ? NetworkState::connecting
                                                              : NetworkState::unprovisioned;
@@ -684,6 +824,77 @@ void NetworkWeatherService::request_refresh() {
     next_fetch_us.store(0);
     weather_failure_attempt.store(0);
     if (worker_task) xTaskNotifyGive(worker_task);
+}
+
+nightglass::core::Status NetworkWeatherService::accept_phone_weather(
+    std::uint32_t observed_epoch_seconds, WeatherUnits units,
+    const DecodedWeather &weather) {
+    const auto clock = clock_service().snapshot();
+    if (!clock.time_valid || clock.utc_epoch_seconds < 1'577'836'800U) {
+        return {nightglass::core::StatusCode::invalid_state,
+                "wall clock unavailable for weather freshness validation"};
+    }
+    if (units != WeatherUnits::metric && units != WeatherUnits::imperial) {
+        return {nightglass::core::StatusCode::invalid_state, "invalid weather units"};
+    }
+    const auto now = clock.utc_epoch_seconds;
+    std::uint32_t age_seconds = 0;
+    if (!weather_observation_age(observed_epoch_seconds, now,
+                                 kMaximumFutureSkewSeconds, age_seconds) ||
+        age_seconds > kMaximumProxyAgeSeconds) {
+        return {nightglass::core::StatusCode::invalid_state,
+                "phone weather snapshot outside freshness window"};
+    }
+    if (weather.temperature < -150.0F || weather.temperature > 150.0F ||
+        weather.apparent_temperature < -150.0F ||
+        weather.apparent_temperature > 150.0F || weather.wind_speed < 0.0F ||
+        weather.wind_speed > 500.0F || weather.weather_code > 999) {
+        return {nightglass::core::StatusCode::invalid_state,
+                "phone weather snapshot outside valid range"};
+    }
+
+    NetworkWeatherSnapshot saved{};
+    portENTER_CRITICAL(&state_mux);
+    if (!current.settings.enabled || !current.settings.location_configured ||
+        current.settings.units != units ||
+        !weather_candidate_wins(
+            current.source == WeatherSource::phone
+                ? WeatherCandidateSource::phone
+                : current.source == WeatherSource::direct
+                      ? WeatherCandidateSource::direct
+                      : current.source == WeatherSource::cache
+                            ? WeatherCandidateSource::cache
+                            : WeatherCandidateSource::none,
+            current.observed_epoch_seconds, WeatherCandidateSource::phone,
+            observed_epoch_seconds)) {
+        portEXIT_CRITICAL(&state_mux);
+        return {nightglass::core::StatusCode::invalid_state,
+                "phone weather snapshot does not supersede current data"};
+    }
+    current.current = weather;
+    current.observed_epoch_seconds = observed_epoch_seconds;
+    current.age_seconds = age_seconds;
+    current.data_valid = true;
+    current.stale = false;
+    current.source = WeatherSource::phone;
+    current.weather_state = WeatherState::fresh;
+    current.last_error = WeatherError::none;
+    ++configuration_generation;  // Invalidates any concurrent direct fetch.
+    ++current.sequence;
+    saved = current;
+    portEXIT_CRITICAL(&state_mux);
+    last_good_us = esp_timer_get_time();
+    if (save_cache(saved) != ESP_OK) {
+        nightglass::core::health_registry().set(
+            "weather", nightglass::core::HealthState::degraded,
+            "Phone weather is live but last-good cache persistence failed");
+    } else {
+        nightglass::core::health_registry().set(
+            "weather", nightglass::core::HealthState::ok,
+            "Current weather received from bonded phone proxy");
+    }
+    if (worker_task) xTaskNotifyGive(worker_task);
+    return nightglass::core::Status::Ok();
 }
 
 bool NetworkWeatherService::prepare_for_light_sleep() {

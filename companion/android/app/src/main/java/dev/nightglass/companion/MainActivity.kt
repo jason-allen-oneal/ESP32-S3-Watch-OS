@@ -13,6 +13,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import dev.nightglass.companion.ble.NightglassConnectionService
 import dev.nightglass.companion.protocol.NightglassProtocol
+import dev.nightglass.companion.weather.PhoneWeatherProxy
 
 class MainActivity : AppCompatActivity() {
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants -> if (grants.values.all { it }) connect() }
@@ -25,23 +26,30 @@ class MainActivity : AppCompatActivity() {
         root.addView(Button(this).apply { text = "Connect / pair Nightglass"; setOnClickListener { requestAndConnect() } })
         root.addView(Button(this).apply { text = "Grant notification access"; setOnClickListener { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } })
         root.addView(Button(this).apply { text = "Disconnect"; setOnClickListener { startService(Intent(this@MainActivity, NightglassConnectionService::class.java).setAction(NightglassConnectionService.ACTION_DISCONNECT)) } })
-        root.addView(TextView(this).apply { text = "Wi-Fi and weather location"; textSize = 20f; setPadding(0, pad, 0, 0) })
-        root.addView(TextView(this).apply { text = "Credentials and fixed weather location are sent only over the bonded encrypted link. Secrets are never saved or logged." })
-        val ssid = field("Wi-Fi network name")
-        val password = field("Wi-Fi password").apply { inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
+        root.addView(TextView(this).apply { text = "Phone weather proxy"; textSize = 20f; setPadding(0, pad, 0, 0) })
+        root.addView(TextView(this).apply { text = "Weather uses whichever Internet connection this phone has (Wi-Fi or cellular). Direct watch Wi-Fi is an optional fallback; its password is never saved or logged." })
+        val ssid = field("Optional direct watch Wi-Fi name")
+        val password = field("Optional direct watch Wi-Fi password").apply { inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
         val latitude = field("Latitude, e.g. 40.7128").apply { inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL or InputType.TYPE_NUMBER_FLAG_SIGNED }
         val longitude = field("Longitude, e.g. -74.0060").apply { inputType = latitude.inputType }
         val metric = CheckBox(this).apply { text = "Metric units"; isChecked = false }
         val refresh = field("Refresh minutes (15–360)").apply { inputType = InputType.TYPE_CLASS_NUMBER; setText("30") }
         listOf(ssid, password, latitude, longitude, metric, refresh).forEach(root::addView)
-        root.addView(Button(this).apply { text = "Send provisioning frame"; setOnClickListener {
+        root.addView(Button(this).apply { text = "Save and refresh weather"; setOnClickListener {
             val secret = password.text.toString().toCharArray()
             try {
                 val lat = ((latitude.text.toString().toDouble()) * 1_000_000).toInt()
                 val lon = ((longitude.text.toString().toDouble()) * 1_000_000).toInt()
-                val wifiQueued = NightglassConnectionService.send(this@MainActivity, NightglassProtocol.provisionWifi(ssid.text.toString(), secret))
-                val weatherQueued = NightglassConnectionService.send(this@MainActivity, NightglassProtocol.configureWeather(true, true, metric.isChecked, refresh.text.toString().toInt(), lat, lon))
-                Toast.makeText(this@MainActivity, if (wifiQueued && weatherQueued) "Wi-Fi and weather settings queued" else "Unable to start Nightglass link", Toast.LENGTH_SHORT).show()
+                val refreshMinutes = refresh.text.toString().toInt()
+                val proxyConfig = PhoneWeatherProxy.Config(lat, lon, metric.isChecked, refreshMinutes)
+                PhoneWeatherProxy.save(this@MainActivity, proxyConfig)
+                val wifiQueued = ssid.text.isBlank() || NightglassConnectionService.send(
+                    this@MainActivity, NightglassProtocol.provisionWifi(ssid.text.toString(), secret))
+                val weatherQueued = NightglassConnectionService.send(this@MainActivity, NightglassProtocol.configureWeather(true, true, metric.isChecked, refreshMinutes, lat, lon))
+                ContextCompat.startForegroundService(this@MainActivity,
+                    Intent(this@MainActivity, NightglassConnectionService::class.java)
+                        .setAction(NightglassConnectionService.ACTION_REFRESH_WEATHER))
+                Toast.makeText(this@MainActivity, if (wifiQueued && weatherQueued) "Phone weather refresh queued" else "Unable to start Nightglass link", Toast.LENGTH_SHORT).show()
             } catch (_: Exception) { Toast.makeText(this@MainActivity, "Check network name and coordinates", Toast.LENGTH_LONG).show() }
             finally { secret.fill('\u0000'); password.text?.clear() }
         } })

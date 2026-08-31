@@ -21,4 +21,13 @@ class NightglassProtocolTest {
         assertEquals(14, NightglassProtocol.configureWeather(true, true, false, 30, 12_345_678, -87_654_321).size)
         assertArrayEquals(byteArrayOf(1, 0x22), NightglassProtocol.clearWifi())
     }
+    @Test fun phoneWeatherUsesBoundedLittleEndianLayout() {
+        val frame = NightglassProtocol.phoneWeather(1_700_000_000L, false, true,
+            72.4, 74.1, 3, 8.7)
+        assertEquals(18, frame.size)
+        assertEquals(0x23, frame[1].toInt())
+        assertEquals(2, frame[2].toInt())
+        assertArrayEquals(byteArrayOf(0xD4.toByte(), 0x02), frame.copyOfRange(10, 12))
+        assertArrayEquals(byteArrayOf(0x57, 0), frame.copyOfRange(16, 18))
+    }
 }

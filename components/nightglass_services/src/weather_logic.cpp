@@ -126,4 +126,39 @@ bool weather_is_stale(std::uint32_t age_seconds, std::uint16_t refresh_minutes) 
     return refresh_seconds == 0 || age_seconds > refresh_seconds * 2U;
 }
 
+bool weather_candidate_wins(WeatherCandidateSource current_source,
+                            std::uint32_t current_observed,
+                            WeatherCandidateSource candidate_source,
+                            std::uint32_t candidate_observed) {
+    if (candidate_source == WeatherCandidateSource::none || candidate_observed == 0) {
+        return false;
+    }
+    if (current_source == WeatherCandidateSource::none || current_observed == 0) return true;
+    if (candidate_observed > current_observed) return true;
+    if (candidate_observed < current_observed) return false;
+    return static_cast<std::uint8_t>(candidate_source) >
+           static_cast<std::uint8_t>(current_source);
+}
+
+bool weather_observation_age(std::uint32_t observed_epoch, std::uint32_t now_epoch,
+                             std::uint32_t maximum_future_skew,
+                             std::uint32_t &age_seconds) {
+    age_seconds = 0;
+    if (observed_epoch == 0 || now_epoch == 0 ||
+        observed_epoch > now_epoch + maximum_future_skew) {
+        return false;
+    }
+    age_seconds = observed_epoch > now_epoch ? 0 : now_epoch - observed_epoch;
+    return true;
+}
+
+bool weather_cache_is_usable(WeatherUnits cached_units, WeatherUnits requested_units,
+                             std::uint32_t observed_epoch, std::uint32_t now_epoch,
+                             std::uint32_t maximum_future_skew) {
+    std::uint32_t ignored_age = 0;
+    return cached_units == requested_units &&
+           weather_observation_age(observed_epoch, now_epoch, maximum_future_skew,
+                                   ignored_age);
+}
+
 }  // namespace nightglass::services

@@ -1,6 +1,7 @@
 # Network and weather service
 
-Nightglass includes an asynchronous Wi-Fi station and current-weather service.
+Nightglass includes a phone-proxied current-weather service with an optional
+asynchronous watch Wi-Fi fallback.
 It starts disabled, performs no network work until explicitly enabled, and does
 not contain a default SSID, password, location, API token, or developer-network
 fallback.
@@ -26,8 +27,15 @@ the selected location before saving, and avoid retaining search history.
 
 ## Runtime behavior
 
+- The bonded Android companion fetches Open-Meteo over the phone's current
+  Internet connection (Wi-Fi or cellular) and forwards a bounded binary
+  snapshot. This is preferred and leaves the watch Wi-Fi radio off while phone
+  weather is fresh.
+- A direct watch fetch is attempted only when explicitly provisioned and phone
+  weather is unavailable or stale. A concurrent direct fetch cannot overwrite
+  a newer phone observation.
 - Station configuration uses `WIFI_STORAGE_RAM`; Nightglass owns the single NVS
-  credential record rather than leaving duplicate Wi-Fi configuration behind.
+  weather-settings/cache record and does not persist credentials.
 - Disconnects use bounded exponential reconnect backoff.
 - Open-Meteo current weather is fetched in a background task. Startup and UI
   rendering never wait for Wi-Fi or HTTP.
@@ -38,8 +46,9 @@ the selected location before saving, and avoid retaining search history.
   wind speed, and day/night state. Metric and imperial units are explicit.
 - Responses are limited to 4096 bytes and decoded with a bounded,
   allocation-free parser. Malformed or out-of-range data is rejected.
-- Last-good readings remain available with age and stale flags when refreshes
-  fail. Offline and error states remain explicit.
+- Last-good readings are checksummed and persisted without credentials. They
+  remain available with source, age, and stale flags when refreshes fail.
+  PHONE, DIRECT, and CACHED/OFFLINE states remain explicit.
 - Fetches are deferred while the display is blank or the system is sleeping.
   Wi-Fi modem power saving is enabled while awake. The power supervisor stops
   Wi-Fi before explicit light sleep as required by ESP-IDF, then the network

@@ -37,7 +37,10 @@ enum class WeatherError : std::uint8_t {
     invalid_response,
     persistence,
     time_unavailable,
+    stale_payload,
 };
+
+enum class WeatherSource : std::uint8_t { none, phone, direct, cache };
 
 struct NetworkWeatherSettings {
     bool enabled{false};
@@ -64,6 +67,8 @@ struct NetworkWeatherSnapshot {
     std::uint8_t reconnect_attempt{0};
     std::uint32_t retry_in_seconds{0};
     std::uint32_t age_seconds{0};
+    std::uint32_t observed_epoch_seconds{0};
+    WeatherSource source{WeatherSource::none};
     DecodedWeather current{};
 };
 
@@ -80,6 +85,9 @@ public:
                                                    std::size_t password_length);
     nightglass::core::Status clear_credentials();
     void request_refresh();
+    nightglass::core::Status accept_phone_weather(
+        std::uint32_t observed_epoch_seconds, WeatherUnits units,
+        const DecodedWeather &weather);
     [[nodiscard]] bool prepare_for_light_sleep();
     void resume_from_light_sleep();
 };

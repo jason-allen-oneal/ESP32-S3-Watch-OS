@@ -13,6 +13,7 @@ constexpr std::uint8_t kRead = 0x12;
 constexpr std::uint8_t kWifiProvision = 0x20;
 constexpr std::uint8_t kWeatherSettings = 0x21;
 constexpr std::uint8_t kWifiClear = 0x22;
+constexpr std::uint8_t kWeatherSnapshot = 0x23;
 
 std::uint32_t read_u32(const std::uint8_t *data) {
     return static_cast<std::uint32_t>(data[0]) |
@@ -23,6 +24,15 @@ std::uint32_t read_u32(const std::uint8_t *data) {
 
 std::int32_t read_i32(const std::uint8_t *data) {
     return static_cast<std::int32_t>(read_u32(data));
+}
+
+std::uint16_t read_u16(const std::uint8_t *data) {
+    return static_cast<std::uint16_t>(data[0]) |
+           (static_cast<std::uint16_t>(data[1]) << 8U);
+}
+
+std::int16_t read_i16(const std::uint8_t *data) {
+    return static_cast<std::int16_t>(read_u16(data));
 }
 
 template <std::size_t N>
@@ -91,6 +101,31 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
         message.kind = CompanionMessageKind::weather_settings;
         return message.weather.refresh_minutes >= 15 &&
                message.weather.refresh_minutes <= 360;
+    }
+    if (frame[1] == kWeatherSnapshot) {
+        if (frame.size() != 18) return false;
+        const std::uint8_t flags = frame[2];
+        if ((flags & ~std::uint8_t{0x03}) != 0 || frame[3] != 0) return false;
+        auto &weather = message.weather_snapshot;
+        weather.metric = (flags & 0x01) != 0;
+        weather.is_day = (flags & 0x02) != 0;
+        weather.observed_epoch_seconds = read_u32(frame.data() + 4);
+        weather.age_seconds = read_u16(frame.data() + 8);
+        weather.temperature_tenths = read_i16(frame.data() + 10);
+        weather.apparent_temperature_tenths = read_i16(frame.data() + 12);
+        weather.weather_code = read_u16(frame.data() + 14);
+        weather.wind_tenths = read_u16(frame.data() + 16);
+        if (weather.observed_epoch_seconds < 1'577'836'800U ||
+            weather.temperature_tenths < -1500 || weather.temperature_tenths > 1500 ||
+            weather.apparent_temperature_tenths < -1500 ||
+            weather.apparent_temperature_tenths > 1500 ||
+            weather.age_seconds > 21'600 || weather.weather_code > 999 ||
+            weather.wind_tenths > 5000 ||
+            weather.observed_epoch_seconds < weather.age_seconds) {
+            return false;
+        }
+        message.kind = CompanionMessageKind::weather_snapshot;
+        return true;
     }
     if (frame[1] != kUpsert || frame.size() < 11) return false;
     const auto app_length = static_cast<std::size_t>(frame[7]);

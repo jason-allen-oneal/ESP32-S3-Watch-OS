@@ -39,4 +39,28 @@ int main() {
     auto invalid_weather = weather;
     invalid_weather[4] = 5;
     assert(!parse_companion_message(invalid_weather, message));
+
+    const std::array<std::uint8_t, 18> proxy{
+        1, 0x23, 0x03, 0,
+        0x80, 0xD9, 0xB4, 0x68,  // 2025+ epoch, little-endian.
+        0x1E, 0x00,              // phone reports 30 seconds of age
+        0xD4, 0x02,              // 72.4
+        0xE5, 0x02,              // 74.1
+        0x03, 0x00,              // weather code 3
+        0x57, 0x00};             // wind 8.7
+    assert(parse_companion_message(proxy, message));
+    assert(message.kind == CompanionMessageKind::weather_snapshot);
+    assert(message.weather_snapshot.metric && message.weather_snapshot.is_day);
+    assert(message.weather_snapshot.age_seconds == 30);
+    assert(message.weather_snapshot.temperature_tenths == 724);
+    assert(message.weather_snapshot.apparent_temperature_tenths == 741);
+    assert(message.weather_snapshot.weather_code == 3);
+    assert(message.weather_snapshot.wind_tenths == 87);
+    auto invalid_proxy = proxy;
+    invalid_proxy[3] = 1;
+    assert(!parse_companion_message(invalid_proxy, message));
+    invalid_proxy = proxy;
+    invalid_proxy[14] = 0xE8;  // code 1000
+    invalid_proxy[15] = 0x03;
+    assert(!parse_companion_message(invalid_proxy, message));
 }

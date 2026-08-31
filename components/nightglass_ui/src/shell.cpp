@@ -1469,19 +1469,29 @@ void Shell::refresh_weather() {
     if (!weather_state_) return;
     const auto snapshot = nightglass::services::network_weather_service().snapshot();
     char text[128]{};
+    const char *source = snapshot.source == nightglass::services::WeatherSource::phone
+                             ? "PHONE"
+                             : snapshot.source == nightglass::services::WeatherSource::direct
+                                   ? "DIRECT"
+                                   : snapshot.source == nightglass::services::WeatherSource::cache
+                                         ? "CACHED"
+                                         : "NO DATA";
     if (snapshot.data_valid) {
-        std::snprintf(text, sizeof(text), "%.0f%s | CODE %u", snapshot.current.temperature,
+        std::snprintf(text, sizeof(text), "%.0f%s | %s", snapshot.current.temperature,
                       snapshot.settings.units == nightglass::services::WeatherUnits::metric
-                          ? " C" : " F", snapshot.current.weather_code);
+                          ? " C" : " F", source);
         set_state(weather_state_, text, snapshot.stale ? kAmber : kGreen);
-        std::snprintf(text, sizeof(text), "FEELS %.0f | WIND %.0f | AGE %lu min",
+        std::snprintf(text, sizeof(text), "FEELS %.0f | WIND %.0f | CODE %u\nAGE %lu min%s",
                       snapshot.current.apparent_temperature, snapshot.current.wind_speed,
-                      static_cast<unsigned long>(snapshot.age_seconds / 60));
+                      snapshot.current.weather_code,
+                      static_cast<unsigned long>(snapshot.age_seconds / 60),
+                      snapshot.stale ? " | OFFLINE" : "");
     } else {
-        set_state(weather_state_, snapshot.connected ? "WEATHER UNAVAILABLE" : "OFFLINE", kAmber);
+        set_state(weather_state_, "WEATHER UNAVAILABLE", kAmber);
         std::snprintf(text, sizeof(text), "%s | %s",
-                      snapshot.credentials_configured ? "Wi-Fi active this boot" : "Wi-Fi setup needed",
-                      snapshot.settings.location_configured ? "location set" : "location needed");
+                      snapshot.settings.location_configured ? "PHONE DATA WAITING" : "LOCATION NEEDED",
+                      snapshot.credentials_configured ? "DIRECT FALLBACK READY"
+                                                      : "PHONE PROXY PREFERRED");
     }
     lv_label_set_text(weather_detail_, text);
     std::snprintf(text, sizeof(text), "WEATHER  %s", snapshot.settings.enabled ? "ON" : "OFF");

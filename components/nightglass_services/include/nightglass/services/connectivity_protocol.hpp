@@ -29,7 +29,7 @@ struct CompanionNotification {
 
 enum class CompanionMessageKind : std::uint8_t {
     invalid = 0, notification_upsert, notification_remove, notification_clear,
-    wifi_provision, wifi_clear, weather_settings,
+    wifi_provision, wifi_clear, weather_settings, weather_snapshot,
 };
 
 struct CompanionWifiProvisioning {
@@ -48,12 +48,24 @@ struct CompanionWeatherSettings {
     std::int32_t longitude_e6{0};
 };
 
+struct CompanionWeatherSnapshot {
+    std::uint32_t observed_epoch_seconds{0};
+    std::uint16_t age_seconds{0};
+    std::int16_t temperature_tenths{0};
+    std::int16_t apparent_temperature_tenths{0};
+    std::uint16_t weather_code{0};
+    std::uint16_t wind_tenths{0};
+    bool metric{false};
+    bool is_day{false};
+};
+
 struct CompanionMessage {
     CompanionMessageKind kind{CompanionMessageKind::invalid};
     CompanionNotification notification{};
     std::uint32_t notification_id{0};
     CompanionWifiProvisioning wifi{};
     CompanionWeatherSettings weather{};
+    CompanionWeatherSnapshot weather_snapshot{};
 };
 
 [[nodiscard]] bool parse_companion_message(std::span<const std::uint8_t> frame,
