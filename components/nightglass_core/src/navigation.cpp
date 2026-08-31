@@ -72,6 +72,9 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
         case NavigationAction::open_diagnostics:
             push_route(state, Route::diagnostics);
             break;
+        case NavigationAction::open_audio:
+            push_route(state, Route::audio);
+            break;
         case NavigationAction::open_about:
             push_route(state, Route::about);
             break;

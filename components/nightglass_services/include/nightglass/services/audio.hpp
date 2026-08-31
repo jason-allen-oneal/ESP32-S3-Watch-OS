@@ -18,8 +18,10 @@ struct AudioSnapshot {
     bool enabled{false};
     bool input_ready{false};
     bool output_ready{false};
+    bool output_muted{true};
     bool stereo_requested{true};
     std::uint32_t sample_rate_hz{16000};
+    std::uint8_t output_volume{0};
     std::uint32_t frames_captured{0};
     std::uint32_t frames_played{0};
     std::uint32_t read_errors{0};
@@ -38,6 +40,9 @@ public:
     nightglass::core::Status start(i2c_master_bus_handle_t bus_handle);
     nightglass::core::Status capture(std::span<std::uint8_t> destination);
     nightglass::core::Status play(std::span<const std::uint8_t> samples);
+    // Plays one bounded 440 Hz stereo test tone and always returns the output
+    // path to mute, even when the codec write fails.
+    nightglass::core::Status play_test_tone();
     [[nodiscard]] AudioSnapshot snapshot() const;
 };
 

@@ -61,6 +61,9 @@ private:
     static void countdown_reset_callback(lv_event_t *event);
     static void stopwatch_toggle_callback(lv_event_t *event);
     static void stopwatch_reset_callback(lv_event_t *event);
+    static void audio_callback(lv_event_t *event);
+    static void audio_play_callback(lv_event_t *event);
+    static void audio_capture_callback(lv_event_t *event);
     static void dismiss_alert_callback(lv_event_t *event);
     static void diagnostics_callback(lv_event_t *event);
     static void about_callback(lv_event_t *event);
@@ -83,6 +86,7 @@ private:
     void render_alarm();
     void render_countdown();
     void render_stopwatch();
+    void render_audio();
     void render_diagnostics();
     void render_about();
     void configure_refresh_timer(std::uint32_t period_ms);
@@ -97,6 +101,7 @@ private:
     void refresh_alarm();
     void refresh_countdown();
     void refresh_stopwatch();
+    void refresh_audio();
     void refresh_system_overlay();
     void refresh_diagnostics();
     void clear_route_objects();
@@ -156,6 +161,9 @@ private:
     lv_obj_t *countdown_toggle_{nullptr};
     lv_obj_t *stopwatch_time_{nullptr};
     lv_obj_t *stopwatch_toggle_{nullptr};
+    lv_obj_t *audio_state_{nullptr};
+    lv_obj_t *audio_detail_{nullptr};
+    lv_obj_t *audio_level_{nullptr};
     lv_obj_t *alert_card_{nullptr};
     std::uint8_t displayed_alert_kind_{0};
 

@@ -51,7 +51,7 @@ extern "C" void app_main() {
 
     const auto audio_status = nightglass::services::audio_service().start(board.i2c_bus());
     if (!audio_status.is_ok()) {
-        ESP_LOGI(kTag, "Audio unavailable by policy: %s", audio_status.detail);
+        ESP_LOGI(kTag, "Audio service unavailable: %s", audio_status.detail);
     }
 
     const auto power_status = nightglass::services::power_service().start();

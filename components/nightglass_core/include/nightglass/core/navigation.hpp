@@ -19,6 +19,7 @@ enum class Route : std::uint8_t {
     countdown,
     stopwatch,
     diagnostics,
+    audio,
     about,
 };
 
@@ -43,6 +44,7 @@ enum class NavigationAction : std::uint8_t {
     open_countdown,
     open_stopwatch,
     open_diagnostics,
+    open_audio,
     open_about,
     show_system_modal,
     dismiss_overlay,

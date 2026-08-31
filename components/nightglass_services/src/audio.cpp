@@ -1,6 +1,7 @@
 #include "nightglass/services/audio.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -30,6 +31,9 @@ constexpr std::size_t kMaxIoBytes = 4096;
 constexpr char kTag[] = "nightglass_audio";
 constexpr std::uint32_t kSampleRateHz = 16000;
 constexpr std::uint8_t kChannels = 2;
+constexpr std::uint8_t kTestToneVolume = 60;
+constexpr std::size_t kTestToneFrames = kMaxIoBytes / (kChannels * sizeof(std::int16_t));
+std::array<std::int16_t, kTestToneFrames * kChannels> test_tone_samples{};
 #endif
 
 AudioService instance;
@@ -65,9 +69,9 @@ nightglass::core::Status AudioService::start(i2c_master_bus_handle_t bus_handle)
     state = {};
 #if NIGHTGLASS_AUDIO_HAS_HEALTH
     nightglass::core::health_registry().set("audio", nightglass::core::HealthState::absent,
-                                             "disabled by default; no audio hardware touched");
+                                             "disabled by build configuration; no audio hardware touched");
 #endif
-    return {nightglass::core::StatusCode::unavailable, "audio disabled by default"};
+    return {nightglass::core::StatusCode::unavailable, "audio disabled by build configuration"};
 #else
     if (started) return nightglass::core::Status::Ok();
     if (bus_handle == nullptr) {
@@ -96,8 +100,10 @@ nightglass::core::Status AudioService::start(i2c_master_bus_handle_t bus_handle)
     output = bsp_audio_codec_speaker_init();
     input = bsp_audio_codec_microphone_init();
     if (output == nullptr || input == nullptr) {
+        if (output != nullptr) (void)esp_codec_dev_close(output);
+        if (input != nullptr) (void)esp_codec_dev_close(input);
         nightglass::core::health_registry().set("audio", nightglass::core::HealthState::degraded,
-                                                 "codec handle unavailable; output/input not opened");
+                                                 "ES8311/ES7210 codec handle unavailable; output/input not opened");
         return {nightglass::core::StatusCode::io_error, "audio codec initialization failed"};
     }
     esp_codec_dev_sample_info_t sample = {
@@ -105,20 +111,29 @@ nightglass::core::Status AudioService::start(i2c_master_bus_handle_t bus_handle)
         .channel = kChannels,
         .channel_mask = 0x03,
         .sample_rate = kSampleRateHz,
+        .mclk_multiple = 256,
     };
-    if (esp_codec_dev_open(output, &sample) != ESP_CODEC_DEV_OK ||
-        esp_codec_dev_open(input, &sample) != ESP_CODEC_DEV_OK ||
-        esp_codec_dev_set_out_vol(output, 0) != ESP_CODEC_DEV_OK) {
+    const auto output_opened = esp_codec_dev_open(output, &sample) == ESP_CODEC_DEV_OK;
+    const auto output_muted = output_opened &&
+                              esp_codec_dev_set_out_mute(output, true) == ESP_CODEC_DEV_OK;
+    const auto input_opened = esp_codec_dev_open(input, &sample) == ESP_CODEC_DEV_OK;
+    const auto volume_set = output_opened &&
+                            esp_codec_dev_set_out_vol(output, kTestToneVolume) == ESP_CODEC_DEV_OK;
+    if (!output_opened || !output_muted || !input_opened || !volume_set) {
+        if (output != nullptr) (void)esp_codec_dev_close(output);
+        if (input != nullptr) (void)esp_codec_dev_close(input);
         nightglass::core::health_registry().set("audio", nightglass::core::HealthState::failed,
-                                                 "codec open failed; output muted");
+                                                 "codec open failed; ES8311 output shutdown attempted");
         return {nightglass::core::StatusCode::io_error, "audio codec open failed"};
     }
     started = true;
     state.enabled = true;
     state.input_ready = true;
     state.output_ready = true;
+    state.output_muted = true;
+    state.output_volume = kTestToneVolume;
     nightglass::core::health_registry().set("audio", nightglass::core::HealthState::ok,
-                                             "ES8311 output and two-channel I2S input ready; output muted");
+                                             "ES8311 output / ES7210 input ready; output muted");
     ESP_LOGI(kTag, "Audio ready at %u Hz, %u channels", kSampleRateHz, kChannels);
     return nightglass::core::Status::Ok();
 #endif
@@ -127,7 +142,7 @@ nightglass::core::Status AudioService::start(i2c_master_bus_handle_t bus_handle)
 nightglass::core::Status AudioService::capture(std::span<std::uint8_t> destination) {
 #if !NIGHTGLASS_AUDIO_RUNTIME
     (void)destination;
-    return {nightglass::core::StatusCode::unavailable, "audio disabled by default"};
+    return {nightglass::core::StatusCode::unavailable, "audio disabled by build configuration"};
 #else
     const auto bytes = bounded_audio_bytes(destination.size());
     if (!started || input == nullptr || bytes == 0 || (bytes % 4) != 0) {
@@ -139,6 +154,9 @@ nightglass::core::Status AudioService::capture(std::span<std::uint8_t> destinati
     }
     state.frames_captured += static_cast<std::uint32_t>(bytes / (2 * sizeof(std::int16_t)));
     state.last_io_us = esp_timer_get_time();
+    if (destination.size() > bytes) {
+        state.dropped_bytes += static_cast<std::uint32_t>(destination.size() - bytes);
+    }
     return nightglass::core::Status::Ok();
 #endif
 }
@@ -146,7 +164,7 @@ nightglass::core::Status AudioService::capture(std::span<std::uint8_t> destinati
 nightglass::core::Status AudioService::play(std::span<const std::uint8_t> samples) {
 #if !NIGHTGLASS_AUDIO_RUNTIME
     (void)samples;
-    return {nightglass::core::StatusCode::unavailable, "audio disabled by default"};
+    return {nightglass::core::StatusCode::unavailable, "audio disabled by build configuration"};
 #else
     const auto bytes = bounded_audio_bytes(samples.size());
     if (!started || output == nullptr || bytes == 0 || (bytes % 4) != 0) {
@@ -165,6 +183,54 @@ nightglass::core::Status AudioService::play(std::span<const std::uint8_t> sample
 }
 
 AudioSnapshot AudioService::snapshot() const { return state; }
+
+nightglass::core::Status AudioService::play_test_tone() {
+#if !NIGHTGLASS_AUDIO_RUNTIME
+    return {nightglass::core::StatusCode::unavailable, "audio disabled by build configuration"};
+#else
+    if (!started || output == nullptr) {
+        return {nightglass::core::StatusCode::invalid_state, "audio output unavailable"};
+    }
+
+    constexpr long double kPi = 3.1415926535897932384626433832795L;
+    constexpr long double kFrequencyHz = 440.0L;
+    constexpr std::int16_t kAmplitude = 6000;
+    for (std::size_t frame = 0; frame < kTestToneFrames; ++frame) {
+        const auto phase = (2.0L * kPi * kFrequencyHz * static_cast<long double>(frame)) /
+                           static_cast<long double>(kSampleRateHz);
+        const auto value = static_cast<std::int16_t>(
+            std::sin(phase) * static_cast<long double>(kAmplitude));
+        test_tone_samples[frame * kChannels] = value;
+        test_tone_samples[(frame * kChannels) + 1] = value;
+    }
+
+    if (esp_codec_dev_set_out_vol(output, kTestToneVolume) != ESP_CODEC_DEV_OK ||
+        esp_codec_dev_set_out_mute(output, false) != ESP_CODEC_DEV_OK) {
+        ++state.write_errors;
+        state.output_muted = true;
+        (void)esp_codec_dev_set_out_mute(output, true);
+        return {nightglass::core::StatusCode::io_error, "audio output enable failed"};
+    }
+    state.output_muted = false;
+
+    const auto write_result = esp_codec_dev_write(output, test_tone_samples.data(),
+                                                   static_cast<int>(sizeof(test_tone_samples)));
+    const auto mute_result = esp_codec_dev_set_out_mute(output, true);
+    state.output_muted = true;
+    if (write_result != ESP_CODEC_DEV_OK) {
+        ++state.write_errors;
+        return {nightglass::core::StatusCode::io_error, "audio test tone failed"};
+    }
+    if (mute_result != ESP_CODEC_DEV_OK) {
+        ++state.write_errors;
+        return {nightglass::core::StatusCode::io_error, "audio output mute failed"};
+    }
+    state.frames_played += static_cast<std::uint32_t>(kTestToneFrames);
+    state.last_io_us = esp_timer_get_time();
+    return nightglass::core::Status::Ok();
+#endif
+}
+
 AudioService &audio_service() { return instance; }
 
 }  // namespace nightglass::services

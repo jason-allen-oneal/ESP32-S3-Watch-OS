@@ -32,7 +32,8 @@ audio, SD, and nonessential apps disabled.
 - Service worker: scheduled jobs, low-rate sensors, event delivery.
 - Network worker: Wi-Fi, HTTP, SNTP, weather, OTA downloads.
 - Storage/logger: coalesced writes, diagnostics, SD operations.
-- Audio task: created only while capturing or playing.
+- Audio service: codec/I2S interfaces are initialized muted at boot when
+  enabled; no continuous audio task or sample queue is created.
 
 The current network worker is implemented by `NetworkWeatherService`. It owns
 Wi-Fi station lifecycle, credential provisioning, reconnect policy, verified
@@ -121,8 +122,9 @@ strap. Touch IRQ GPIO38 and RTC IRQ GPIO39 are digital-only and can wake light
 sleep, while GPIO10 and QMI8658 INT1 GPIO21 are RTC IO candidates for later
 deep-sleep wake. Motion wake, direct RTC alarm wake, panel DCS 0x28, deep sleep,
 and PMIC rail gating remain disabled until their isolated wake-loop and recovery
-tests pass. Networking, audio, amplifier, SD, display, and sensor features are
-eventually gated by the power service.
+tests pass. Networking, the idle audio codec path, SD, display, and sensor
+features are eventually gated by the power service; explicit audio tests
+remain bounded and return the output path to mute.
 
 ## Update and recovery
 

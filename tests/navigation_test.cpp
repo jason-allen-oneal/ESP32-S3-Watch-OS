@@ -36,4 +36,8 @@ int main() {
 
     state = reduce_navigation({}, NavigationAction::open_clock_settings);
     assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
+
+    state = reduce_navigation({}, NavigationAction::open_audio);
+    assert(state.route == Route::audio);
+    assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
 }

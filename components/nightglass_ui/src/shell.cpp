@@ -1,14 +1,17 @@
 #include "nightglass/ui/shell.hpp"
 
+#include <array>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <span>
 
 #include "esp_timer.h"
 #include "lvgl.h"
 #include "nightglass/services/clock.hpp"
 #include "nightglass/services/activity.hpp"
 #include "nightglass/services/activity_units.hpp"
+#include "nightglass/services/audio.hpp"
 #include "nightglass/services/connectivity.hpp"
 #include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/weather_logic.hpp"
@@ -652,6 +655,43 @@ void Shell::stopwatch_reset_callback(lv_event_t *event) {
     self->refresh_stopwatch();
 }
 
+void Shell::audio_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_audio);
+}
+
+void Shell::audio_play_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    const auto status = nightglass::services::audio_service().play_test_tone();
+    if (status.is_ok()) {
+        set_state(self->audio_state_, "PLAYED", kGreen);
+        lv_label_set_text(self->audio_detail_, "440 Hz stereo tone | output muted");
+    } else {
+        set_state(self->audio_state_, "FAILED", kRed);
+        lv_label_set_text(self->audio_detail_, status.detail);
+    }
+}
+
+void Shell::audio_capture_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    std::array<std::int16_t, 1024> samples{};
+    const auto bytes = std::span<std::uint8_t>(
+        reinterpret_cast<std::uint8_t *>(samples.data()), sizeof(samples));
+    const auto status = nightglass::services::audio_service().capture(bytes);
+    if (!status.is_ok()) {
+        set_state(self->audio_state_, "FAILED", kRed);
+        lv_label_set_text(self->audio_detail_, status.detail);
+        return;
+    }
+    const auto rms = nightglass::services::pcm16_rms(samples.data(), samples.size());
+    char buffer[96]{};
+    std::snprintf(buffer, sizeof(buffer), "MIC RMS %lu | 16 kHz stereo",
+                  static_cast<unsigned long>(rms));
+    set_state(self->audio_state_, "CAPTURED", kGreen);
+    lv_label_set_text(self->audio_detail_, buffer);
+    lv_label_set_text(self->audio_level_, buffer);
+}
+
 void Shell::dismiss_alert_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     nightglass::services::clock_service().dismiss_alerts();
@@ -892,6 +932,9 @@ void Shell::render_route() {
         case nightglass::core::Route::stopwatch:
             render_stopwatch();
             break;
+        case nightglass::core::Route::audio:
+            render_audio();
+            break;
         case nightglass::core::Route::diagnostics:
             render_diagnostics();
             break;
@@ -1065,9 +1108,11 @@ void Shell::render_launcher() {
                 kSurface, kPrimary, connectivity_callback, this);
     make_button(scroller, 0, 7 * gap, kSafeContentWidth - 16, row_height, "NOTIFICATIONS",
                 kSurface, kPrimary, notifications_callback, this);
-    make_button(scroller, 0, 8 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
+    make_button(scroller, 0, 8 * gap, kSafeContentWidth - 16, row_height, "AUDIO",
+                kSurface, kPrimary, audio_callback, this);
+    make_button(scroller, 0, 9 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
                 kSurface, kPrimary, diagnostics_callback, this);
-    make_button(scroller, 0, 9 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
+    make_button(scroller, 0, 10 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
                 kSurface, kPrimary, about_callback, this);
 }
 
@@ -1422,6 +1467,28 @@ void Shell::render_stopwatch() {
     refresh_stopwatch();
 }
 
+void Shell::render_audio() {
+    add_header(content_host_, "AUDIO", back_callback, this);
+    auto *card = make_route_card(content_host_, 112, 154);
+    auto *heading = label(card, "ES8311 OUT / ES7210 IN", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(heading, 0, 0);
+    audio_state_ = label(card, "WAIT", &lv_font_montserrat_20, kAmber);
+    lv_obj_set_pos(audio_state_, 0, 30);
+    audio_detail_ = label(card, "Waiting for codec status", &lv_font_montserrat_14, kPrimary);
+    lv_obj_set_pos(audio_detail_, 0, 66);
+    lv_obj_set_width(audio_detail_, kSafeContentWidth - 44);
+    lv_label_set_long_mode(audio_detail_, LV_LABEL_LONG_MODE_WRAP);
+    audio_level_ = label(content_host_, "Mic level: not sampled", &lv_font_montserrat_16,
+                         kSecondary);
+    lv_obj_set_pos(audio_level_, kSafeInset, 284);
+    make_button(content_host_, kSafeInset, 320, kSafeContentWidth, 60, "PLAY TEST TONE",
+                kCyan, kVoid, audio_play_callback, this);
+    make_button(content_host_, kSafeInset, 394, kSafeContentWidth, 60, "SAMPLE MICROPHONE",
+                kSurface, kPrimary, audio_capture_callback, this);
+    configure_refresh_timer(1000);
+    refresh_audio();
+}
+
 void Shell::render_diagnostics() {
     add_header(content_host_, "DIAGNOSTICS", back_callback, this);
 
@@ -1523,6 +1590,9 @@ void Shell::refresh_active_route() {
             break;
         case nightglass::core::Route::stopwatch:
             refresh_stopwatch();
+            break;
+        case nightglass::core::Route::audio:
+            refresh_audio();
             break;
         case nightglass::core::Route::settings:
         case nightglass::core::Route::power_settings:
@@ -1935,6 +2005,32 @@ void Shell::refresh_stopwatch() {
     set_button_text(stopwatch_toggle_, snapshot.stopwatch_running ? "PAUSE" : "START");
 }
 
+void Shell::refresh_audio() {
+    if (!audio_state_) return;
+    const auto snapshot = nightglass::services::audio_service().snapshot();
+    if (!snapshot.enabled) {
+        set_state(audio_state_, "DISABLED", kAmber);
+        lv_label_set_text(audio_detail_, "Audio is disabled in this build");
+        return;
+    }
+    if (!snapshot.input_ready || !snapshot.output_ready) {
+        set_state(audio_state_, "UNAVAILABLE", kRed);
+        lv_label_set_text(audio_detail_, "Codec input/output not ready");
+        return;
+    }
+    set_state(audio_state_, snapshot.output_muted ? "READY | MUTED" : "READY", kGreen);
+    char buffer[160]{};
+    std::snprintf(buffer, sizeof(buffer),
+                  "%lu Hz stereo | volume %u\nRX %lu | TX %lu frames\nErrors %lu/%lu",
+                  static_cast<unsigned long>(snapshot.sample_rate_hz),
+                  static_cast<unsigned>(snapshot.output_volume),
+                  static_cast<unsigned long>(snapshot.frames_captured),
+                  static_cast<unsigned long>(snapshot.frames_played),
+                  static_cast<unsigned long>(snapshot.read_errors),
+                  static_cast<unsigned long>(snapshot.write_errors));
+    lv_label_set_text(audio_detail_, buffer);
+}
+
 void Shell::refresh_system_overlay() {
     if (!overlay_layer_) return;
     const auto kind = nightglass::services::clock_service().active_alert();
@@ -2106,6 +2202,9 @@ void Shell::clear_route_objects() {
     countdown_toggle_ = nullptr;
     stopwatch_time_ = nullptr;
     stopwatch_toggle_ = nullptr;
+    audio_state_ = nullptr;
+    audio_detail_ = nullptr;
+    audio_level_ = nullptr;
     home_alarm_ = nullptr;
     home_timer_ = nullptr;
     home_connectivity_ = nullptr;
