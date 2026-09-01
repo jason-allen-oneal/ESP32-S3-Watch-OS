@@ -5,6 +5,15 @@
 Nightglass does **not** have a production USB deployment command. This is a
 deliberate fail-closed boundary, not missing shell glue.
 
+Generic ESP-IDF write targets (`flash`, `erase_flash`, component/partition
+flash targets, DFU flash, and the LittleFS flash target) remain visible because
+ESP-IDF generates them, but Nightglass attaches a failing preflight dependency
+to them. The repository does not claim those upstream targets are removed.
+`scripts/preflight-app-flash.sh` performs read-only target, recovery-image,
+partition, resolved-config, and application-image checks; it never writes the
+watch. Bypassing the CMake guard with raw esptool is outside the reviewed
+release path.
+
 ESP-IDF 5.5.5's host `otatool.py` is unsuitable for a rollback-protected
 release:
 
@@ -68,6 +77,13 @@ Production coredumps are disabled. Retaining task stacks and companion-derived
 text in the flash coredump partition is an unnecessary privacy risk. The
 partition remains reserved in revision 1 so disabling coredumps does not alter
 flash geometry or strand deployed devices.
+
+The release gate checks the resolved local `sdkconfig` and generated
+`build/config/sdkconfig.h`, not only `sdkconfig.defaults`. It requires unsigned
+development OTA and the audio boot HIL trigger off, flash/UART coredumps off,
+the native USB automatic-light-sleep guard on, 98,304 bytes of internal reserve,
+and an eight-row display transfer chunk. This prevents a stale ignored
+`sdkconfig` from silently weakening production settings.
 
 ## Required implementation before USB deployment can ship
 

@@ -18,6 +18,10 @@ fi
 source "${idf_dir}/export.sh" >/dev/null
 "${project_dir}/scripts/test-host.sh" >/dev/null
 "${project_dir}/scripts/build.sh" >/dev/null
+python3 "${project_dir}/scripts/verify-release-config.py" \
+  "${project_dir}/sdkconfig" >/dev/null
+python3 "${project_dir}/scripts/verify-release-config.py" \
+  "${project_dir}/build/config/sdkconfig.h" >/dev/null
 
 artifacts=(
   "build/bootloader/bootloader.bin"

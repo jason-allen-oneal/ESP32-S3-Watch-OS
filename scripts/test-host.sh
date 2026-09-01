@@ -18,6 +18,7 @@ trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_b
 
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
 python3 -B "${project_dir}/tests/ota_state_inspector_test.py"
+python3 -B "${project_dir}/tests/release_config_test.py"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \
