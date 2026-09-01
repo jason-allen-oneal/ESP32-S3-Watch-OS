@@ -23,6 +23,7 @@ constexpr std::uint8_t kWeatherSettings = 0x21;
 constexpr std::uint8_t kWifiClear = 0x22;
 constexpr std::uint8_t kWeatherSnapshot = 0x23;
 constexpr std::uint8_t kReplyResult = 0x24;
+constexpr std::uint8_t kPeerForget = 0x25;
 
 std::uint32_t read_u32(const std::uint8_t *data) {
     return static_cast<std::uint32_t>(data[0]) |
@@ -61,6 +62,11 @@ void write_u32(std::uint8_t *destination, std::uint32_t value) {
     destination[2] = static_cast<std::uint8_t>(value >> 16U);
     destination[3] = static_cast<std::uint8_t>(value >> 24U);
 }
+
+void write_u16(std::uint8_t *destination, std::uint16_t value) {
+    destination[0] = static_cast<std::uint8_t>(value);
+    destination[1] = static_cast<std::uint8_t>(value >> 8U);
+}
 }  // namespace
 
 bool parse_companion_message(std::span<const std::uint8_t> frame,
@@ -86,6 +92,8 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
             frame.size() != 5U + title_length + artist_length) return false;
         message.media.playing = (frame[2] & 0x01U) != 0;
         message.media.available = (frame[2] & 0x02U) != 0;
+        if (!message.media.available &&
+            (message.media.playing || title_length != 0 || artist_length != 0)) return false;
         copy_ascii(message.media.title, frame.data() + 5, title_length);
         copy_ascii(message.media.artist, frame.data() + 5 + title_length, artist_length);
         message.kind = CompanionMessageKind::media_state;
@@ -152,21 +160,30 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
         return true;
     }
     if (frame[1] == kCallState) {
-        if (frame.size() < 4 || (frame[2] & ~std::uint8_t{0x1f}) != 0) return false;
+        if (frame.size() < 10 || (frame[2] & ~std::uint8_t{0x1f}) != 0) return false;
         const auto label_length = static_cast<std::size_t>(frame[3]);
-        if (label_length > 48 || frame.size() != 4U + label_length) return false;
+        if (label_length > 48 || frame.size() != 10U + label_length) return false;
         message.call.ringing = (frame[2] & 0x01U) != 0;
         message.call.active = (frame[2] & 0x02U) != 0;
         message.call.muted = (frame[2] & 0x04U) != 0;
         message.call.can_answer = (frame[2] & 0x08U) != 0;
         message.call.can_reject = (frame[2] & 0x10U) != 0;
-        if (message.call.can_answer && !message.call.ringing) return false;
-        copy_ascii(message.call.label, frame.data() + 4, label_length);
+        message.call.session_id = read_u32(frame.data() + 4);
+        message.call.generation = read_u16(frame.data() + 8);
+        const bool idle = !message.call.ringing && !message.call.active;
+        if ((message.call.ringing && message.call.active) ||
+            (message.call.can_answer && !message.call.ringing) ||
+            (message.call.can_reject && idle)) return false;
+        if ((idle && (message.call.session_id != 0 || message.call.generation != 0)) ||
+            (!idle && (message.call.session_id == 0 || message.call.generation == 0))) {
+            return false;
+        }
+        copy_ascii(message.call.label, frame.data() + 10, label_length);
         message.kind = CompanionMessageKind::call_state;
         return true;
     }
     if (frame[1] == kReplyResult) {
-        if (frame.size() != 12 || frame[3] > 5) return false;
+        if (frame.size() != 12 || frame[2] == 0 || frame[3] > 5) return false;
         message.reply_result.status = frame[3];
         message.reply_result.notification_id = read_u32(frame.data() + 4);
         message.reply_result.request_nonce = read_u32(frame.data() + 8);
@@ -178,6 +195,11 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
     if (frame[1] == kWifiClear) {
         if (frame.size() != 2) return false;
         message.kind = CompanionMessageKind::wifi_clear;
+        return true;
+    }
+    if (frame[1] == kPeerForget) {
+        if (frame.size() != 2) return false;
+        message.kind = CompanionMessageKind::peer_forget;
         return true;
     }
     if (frame[1] == kWifiProvision) {
@@ -206,7 +228,12 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
         message.weather.longitude_e6 = read_i32(frame.data() + 10);
         message.kind = CompanionMessageKind::weather_settings;
         return message.weather.refresh_minutes >= 15 &&
-               message.weather.refresh_minutes <= 360;
+               message.weather.refresh_minutes <= 360 &&
+               message.weather.latitude_e6 >= -90'000'000 &&
+               message.weather.latitude_e6 <= 90'000'000 &&
+               message.weather.longitude_e6 >= -180'000'000 &&
+               message.weather.longitude_e6 <= 180'000'000 &&
+               (!message.weather.enabled || message.weather.location_configured);
     }
     if (frame[1] == kWeatherSnapshot) {
         if (frame.size() != 18) return false;
@@ -245,11 +272,10 @@ bool parse_companion_message(std::span<const std::uint8_t> frame,
     if (notification.id == 0) return false;
     const auto raw_category = frame[6];
     const auto category = static_cast<std::uint8_t>(raw_category & 0x3fU);
+    if (category > static_cast<std::uint8_t>(NotificationCategory::social)) return false;
     notification.alert = (raw_category & 0x80U) != 0;
     notification.replyable = (raw_category & 0x40U) != 0;
-    notification.category = category <= static_cast<std::uint8_t>(NotificationCategory::social)
-                                ? static_cast<NotificationCategory>(category)
-                                : NotificationCategory::other;
+    notification.category = static_cast<NotificationCategory>(category);
     auto offset = std::size_t{11};
     copy_ascii(notification.app, frame.data() + offset, app_length);
     offset += app_length;
@@ -288,9 +314,36 @@ std::array<std::uint8_t, 4> encode_media_command(MediaCommand command,
     return {kCompanionProtocolVersion, kMedia, sequence, static_cast<std::uint8_t>(command)};
 }
 
-std::array<std::uint8_t, 4> encode_call_command(CallCommand command,
-                                                std::uint8_t sequence) noexcept {
-    return {kCompanionProtocolVersion, kCall, sequence, static_cast<std::uint8_t>(command)};
+std::array<std::uint8_t, 11> encode_call_command(CallCommand command,
+                                                 std::uint16_t sequence,
+                                                 std::uint32_t session_id,
+                                                 std::uint16_t generation) noexcept {
+    std::array<std::uint8_t, 11> frame{
+        kCompanionProtocolVersion, kCall, 0, 0, static_cast<std::uint8_t>(command),
+        0, 0, 0, 0, 0, 0};
+    if (sequence == 0 || session_id == 0 || generation == 0 ||
+        static_cast<std::uint8_t>(command) < static_cast<std::uint8_t>(CallCommand::answer) ||
+        static_cast<std::uint8_t>(command) > static_cast<std::uint8_t>(CallCommand::unmute)) {
+        return {};
+    }
+    write_u16(frame.data() + 2, sequence);
+    frame[4] = static_cast<std::uint8_t>(command);
+    write_u32(frame.data() + 5, session_id);
+    write_u16(frame.data() + 9, generation);
+    return frame;
+}
+
+bool valid_peer_identity(const CompanionPeerIdentity &identity) noexcept {
+    if (identity.address_type > 3) return false;
+    return std::any_of(identity.address.begin(), identity.address.end(),
+                       [](std::uint8_t value) { return value != 0; });
+}
+
+bool peer_identity_matches(const CompanionPeerIdentity &expected,
+                           const CompanionPeerIdentity &candidate) noexcept {
+    return valid_peer_identity(expected) && valid_peer_identity(candidate) &&
+           expected.address_type == candidate.address_type &&
+           expected.address == candidate.address;
 }
 
 std::array<std::uint8_t, 4> encode_phone_command(PhoneCommand command,

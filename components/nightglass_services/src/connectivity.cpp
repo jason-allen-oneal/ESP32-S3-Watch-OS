@@ -32,6 +32,7 @@ constexpr char kTag[] = "nightglass_ble";
 constexpr char kNamespace[] = "ng_ble";
 constexpr char kEnabledKey[] = "enabled";
 constexpr char kNameKey[] = "name";
+constexpr char kPeerIdentityKey[] = "peer_id";
 constexpr std::uint16_t kNoConnection = BLE_HS_CONN_HANDLE_NONE;
 constexpr std::size_t kMaxInboundFrame = 384;
 
@@ -51,6 +52,7 @@ static const ble_uuid128_t kOutboundUuid = BLE_UUID128_INIT(
 
 ConnectivityService instance;
 portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE peer_lock = portMUX_INITIALIZER_UNLOCKED;
 ConnectivitySnapshot current{};
 std::atomic<std::uint16_t> connection_handle{kNoConnection};
 std::uint16_t status_handle{};
@@ -58,8 +60,11 @@ std::uint16_t outbound_handle{};
 std::atomic_bool outbound_subscribed{false};
 std::uint8_t own_address_type{};
 std::atomic<std::uint8_t> outbound_sequence{0};
+std::atomic<std::uint16_t> outbound_call_sequence{0};
 bool host_started{};
 std::int64_t reply_started_us{};
+CompanionPeerIdentity pinned_peer{};
+bool pairing_confirmation_seen{};
 
 void secure_wipe(void *memory, std::size_t length) {
     auto *bytes = static_cast<volatile std::uint8_t *>(memory);
@@ -107,6 +112,85 @@ esp_err_t save_settings(const ConnectivitySettings &settings) {
     if (result == ESP_OK) result = nvs_commit(handle);
     nvs_close(handle);
     return result;
+}
+
+CompanionPeerIdentity load_pinned_peer() {
+    CompanionPeerIdentity identity{};
+    std::array<std::uint8_t, 7> encoded{};
+    nvs_handle_t handle{};
+    if (nvs_open(kNamespace, NVS_READONLY, &handle) != ESP_OK) return identity;
+    std::size_t length = encoded.size();
+    const auto result = nvs_get_blob(handle, kPeerIdentityKey, encoded.data(), &length);
+    nvs_close(handle);
+    if (result != ESP_OK || length != encoded.size()) return identity;
+    identity.address_type = encoded[0];
+    std::copy_n(encoded.begin() + 1, identity.address.size(), identity.address.begin());
+    return valid_peer_identity(identity) ? identity : CompanionPeerIdentity{};
+}
+
+esp_err_t save_pinned_peer(const CompanionPeerIdentity &identity) {
+    if (!valid_peer_identity(identity)) return ESP_ERR_INVALID_ARG;
+    std::array<std::uint8_t, 7> encoded{};
+    encoded[0] = identity.address_type;
+    std::copy(identity.address.begin(), identity.address.end(), encoded.begin() + 1);
+    nvs_handle_t handle{};
+    auto result = nvs_open(kNamespace, NVS_READWRITE, &handle);
+    if (result == ESP_OK) {
+        result = nvs_set_blob(handle, kPeerIdentityKey, encoded.data(), encoded.size());
+    }
+    if (result == ESP_OK) result = nvs_commit(handle);
+    if (handle != 0) nvs_close(handle);
+    secure_wipe(encoded.data(), encoded.size());
+    return result;
+}
+
+CompanionPeerIdentity peer_identity(const ble_addr_t &address) {
+    CompanionPeerIdentity identity{};
+    identity.address_type = address.type;
+    std::copy_n(address.val, identity.address.size(), identity.address.begin());
+    return identity;
+}
+
+CompanionPeerIdentity pinned_peer_snapshot() {
+    portENTER_CRITICAL(&peer_lock);
+    const auto identity = pinned_peer;
+    portEXIT_CRITICAL(&peer_lock);
+    return identity;
+}
+
+void set_pinned_peer(const CompanionPeerIdentity &identity) {
+    portENTER_CRITICAL(&peer_lock);
+    pinned_peer = identity;
+    portEXIT_CRITICAL(&peer_lock);
+}
+
+bool notification_details_redacted_locked() {
+    return current.notification_privacy == NotificationPrivacyPolicy::always_redact ||
+           (current.notification_privacy == NotificationPrivacyPolicy::redact_when_locked &&
+            !current.notification_details_unlocked);
+}
+
+void redact_notification(CompanionNotification &notification) {
+    notification.app = {"Notification"};
+    notification.title = {"Content hidden"};
+    notification.body = {};
+    notification.replyable = false;
+}
+
+std::uint8_t next_sequence8() {
+    std::uint8_t value{};
+    do {
+        value = outbound_sequence.fetch_add(1) + 1;
+    } while (value == 0);
+    return value;
+}
+
+std::uint16_t next_sequence16() {
+    std::uint16_t value{};
+    do {
+        value = outbound_call_sequence.fetch_add(1) + 1;
+    } while (value == 0);
+    return value;
 }
 
 void remove_notification_locked(std::uint32_t id) {
@@ -184,6 +268,9 @@ bool apply_message(const CompanionMessage &message) {
     if (message.kind == CompanionMessageKind::wifi_clear) {
         return network_weather_service().clear_credentials().is_ok();
     }
+    if (message.kind == CompanionMessageKind::peer_forget) {
+        return instance.clear_pinned_peer().is_ok();
+    }
     if (message.kind == CompanionMessageKind::weather_settings) {
         NetworkWeatherSettings settings{};
         settings.enabled = message.weather.enabled;
@@ -228,6 +315,7 @@ bool apply_message(const CompanionMessage &message) {
             current.notifications[index] = current.notifications[index - 1];
         }
         current.notifications[0] = message.notification;
+        if (notification_details_redacted_locked()) redact_notification(current.notifications[0]);
         current.notification_count = static_cast<std::uint8_t>(std::count_if(
             current.notifications.begin(), current.notifications.end(),
             [](const auto &notification) { return notification.valid; }));
@@ -258,6 +346,10 @@ int gatt_access(std::uint16_t, std::uint16_t attr_handle, ble_gatt_access_ctxt *
                    : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     if (context->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
+    const auto link = instance.snapshot();
+    if (!link.encrypted || !link.bonded || !link.peer_identity_pinned) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+    }
     const auto length = static_cast<std::size_t>(OS_MBUF_PKTLEN(context->om));
     if (length == 0 || length > kMaxInboundFrame) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     std::array<std::uint8_t, kMaxInboundFrame> frame{};
@@ -353,6 +445,7 @@ int gap_event(ble_gap_event *event, void *) {
             reply_started_us = 0;
             current.pairing_passkey = 0;
             current.pairing_passkey_active = false;
+            pairing_confirmation_seen = false;
             set_detail_locked(should_advertise ? "Advertising" : "Bluetooth disabled");
             ++current.sequence;
             ++current.notification_sequence;
@@ -363,22 +456,44 @@ int gap_event(ble_gap_event *event, void *) {
         case BLE_GAP_EVENT_ENC_CHANGE: {
             ble_gap_conn_desc descriptor{};
             if (ble_gap_conn_find(event->enc_change.conn_handle, &descriptor) == 0) {
-                portENTER_CRITICAL(&state_lock);
                 const bool authenticated = descriptor.sec_state.encrypted &&
-                                           descriptor.sec_state.authenticated;
-                current.encrypted = authenticated;
-                current.bonded = descriptor.sec_state.bonded;
+                                           descriptor.sec_state.authenticated &&
+                                           descriptor.sec_state.bonded;
+                const auto candidate = peer_identity(descriptor.peer_id_addr);
+                const auto expected = pinned_peer_snapshot();
+                bool authorized = false;
+                if (authenticated && valid_peer_identity(candidate)) {
+                    if (valid_peer_identity(expected)) {
+                        authorized = peer_identity_matches(expected, candidate);
+                    } else if (pairing_confirmation_seen &&
+                               save_pinned_peer(candidate) == ESP_OK) {
+                        set_pinned_peer(candidate);
+                        authorized = true;
+                    }
+                }
+                portENTER_CRITICAL(&state_lock);
+                current.encrypted = authorized;
+                current.bonded = authorized;
+                current.peer_identity_pinned = authorized || valid_peer_identity(expected);
                 current.state = current.encrypted ? CompanionLinkState::connected_encrypted
                                                   : CompanionLinkState::connected_unsecured;
-                set_detail_locked(current.encrypted ? "Companion authenticated"
-                                                    : "Passkey authentication required");
+                set_detail_locked(current.encrypted ? "Pinned companion authenticated"
+                                  : authenticated && valid_peer_identity(expected)
+                                      ? "Unrecognized bonded phone rejected"
+                                      : authenticated
+                                          ? "Re-pair to authorize companion"
+                                          : "Passkey authentication required");
                 current.pairing_passkey = 0;
                 current.pairing_passkey_active = false;
                 ++current.sequence;
                 ++current.notification_sequence;
                 portEXIT_CRITICAL(&state_lock);
+                pairing_confirmation_seen = false;
                 if (descriptor.sec_state.encrypted && !descriptor.sec_state.authenticated) {
                     (void)ble_store_util_delete_peer(&descriptor.peer_id_addr);
+                    (void)ble_gap_terminate(event->enc_change.conn_handle,
+                                            BLE_ERR_REM_USER_CONN_TERM);
+                } else if (!authorized) {
                     (void)ble_gap_terminate(event->enc_change.conn_handle,
                                             BLE_ERR_REM_USER_CONN_TERM);
                 }
@@ -397,6 +512,7 @@ int gap_event(ble_gap_event *event, void *) {
             set_detail_locked(detail);
             current.pairing_passkey = passkey.passkey;
             current.pairing_passkey_active = true;
+            pairing_confirmation_seen = true;
             ++current.sequence;
             portEXIT_CRITICAL(&state_lock);
             power_service().note_activity(nightglass::core::WakeReason::notification);
@@ -422,6 +538,13 @@ int gap_event(ble_gap_event *event, void *) {
                 ble_gap_conn_find(event->repeat_pairing.conn_handle, &descriptor);
             if (find_result != 0) {
                 ESP_LOGE(kTag, "Unable to resolve repeat-pairing peer: %d", find_result);
+                return BLE_GAP_REPEAT_PAIRING_IGNORE;
+            }
+            const auto candidate = peer_identity(descriptor.peer_id_addr);
+            const auto expected = pinned_peer_snapshot();
+            if (valid_peer_identity(expected) &&
+                !peer_identity_matches(expected, candidate)) {
+                ESP_LOGW(kTag, "Rejected repeat pairing from unpinned peer identity");
                 return BLE_GAP_REPEAT_PAIRING_IGNORE;
             }
             const auto delete_result = ble_store_util_delete_peer(&descriptor.peer_id_addr);
@@ -515,6 +638,8 @@ bool notify_outbound(const std::uint8_t *data, std::size_t length) {
 nightglass::core::Status ConnectivityService::start() {
     current = {};
     current.settings = load_settings();
+    set_pinned_peer(load_pinned_peer());
+    current.peer_identity_pinned = valid_peer_identity(pinned_peer_snapshot());
     if (!current.settings.enabled) {
         current.state = CompanionLinkState::disabled;
         set_detail_locked("Bluetooth disabled");
@@ -598,24 +723,31 @@ nightglass::core::Status ConnectivityService::update_settings(
 }
 
 bool ConnectivityService::send_media(MediaCommand command) {
-    const auto frame = encode_media_command(command, outbound_sequence.fetch_add(1) + 1);
+    const auto frame = encode_media_command(command, next_sequence8());
     return notify_outbound(frame.data(), frame.size());
 }
 
 bool ConnectivityService::send_call(CallCommand command) {
-    const auto frame = encode_call_command(command, outbound_sequence.fetch_add(1) + 1);
+    const auto state = snapshot();
+    if (state.call.session_id == 0 || state.call.generation == 0 ||
+        (!state.call.ringing && !state.call.active)) return false;
+    if (command == CallCommand::mute && state.call.muted) return true;
+    if (command == CallCommand::unmute && !state.call.muted) return true;
+    const auto frame = encode_call_command(command, next_sequence16(),
+                                           state.call.session_id,
+                                           state.call.generation);
     return notify_outbound(frame.data(), frame.size());
 }
 
 bool ConnectivityService::send_phone(PhoneCommand command) {
-    const auto frame = encode_phone_command(command, outbound_sequence.fetch_add(1) + 1);
+    const auto frame = encode_phone_command(command, next_sequence8());
     return notify_outbound(frame.data(), frame.size());
 }
 
 bool ConnectivityService::mark_notification(std::uint32_t id, bool dismiss) {
     if (id == 0) return false;
     const auto frame = encode_notification_action(dismiss, id,
-                                                   outbound_sequence.fetch_add(1) + 1);
+                                                   next_sequence8());
     if (!notify_outbound(frame.data(), frame.size())) return false;
     if (dismiss) {
         portENTER_CRITICAL(&state_lock);
@@ -650,7 +782,7 @@ bool ConnectivityService::reply_notification(std::uint32_t id, const char *reply
     std::uint32_t nonce{};
     while (nonce == 0) nonce = esp_random();
     const auto frame = encode_notification_reply(
-        id, outbound_sequence.fetch_add(1) + 1, nonce, reply);
+        id, next_sequence8(), nonce, reply);
     if (frame.size == 0 || !notify_outbound(frame.bytes.data(), frame.size)) return false;
     portENTER_CRITICAL(&state_lock);
     current.reply_notification_id = id;
@@ -661,6 +793,49 @@ bool ConnectivityService::reply_notification(std::uint32_t id, const char *reply
     ++current.sequence;
     portEXIT_CRITICAL(&state_lock);
     return true;
+}
+
+void ConnectivityService::set_notification_privacy(NotificationPrivacyPolicy policy,
+                                                    bool unlocked) {
+    portENTER_CRITICAL(&state_lock);
+    current.notification_privacy = policy;
+    current.notification_details_unlocked = unlocked;
+    if (notification_details_redacted_locked()) {
+        for (auto &notification : current.notifications) {
+            if (notification.valid) redact_notification(notification);
+        }
+        ++current.notification_sequence;
+    }
+    ++current.sequence;
+    portEXIT_CRITICAL(&state_lock);
+}
+
+nightglass::core::Status ConnectivityService::clear_pinned_peer() {
+    nvs_handle_t nvs_handle{};
+    auto result = nvs_open(kNamespace, NVS_READWRITE, &nvs_handle);
+    if (result == ESP_OK) {
+        result = nvs_erase_key(nvs_handle, kPeerIdentityKey);
+        if (result == ESP_ERR_NVS_NOT_FOUND) result = ESP_OK;
+        if (result == ESP_OK) result = nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+    } else if (result == ESP_ERR_NVS_NOT_FOUND) {
+        result = ESP_OK;
+    }
+    if (result != ESP_OK) {
+        return {nightglass::core::StatusCode::io_error, "Pinned companion was not cleared"};
+    }
+    set_pinned_peer({});
+    portENTER_CRITICAL(&state_lock);
+    current.peer_identity_pinned = false;
+    current.encrypted = false;
+    current.bonded = false;
+    if (connection_handle.load() != kNoConnection) {
+        current.state = CompanionLinkState::connected_unsecured;
+        set_detail_locked("Companion authorization cleared");
+    }
+    ++current.sequence;
+    portEXIT_CRITICAL(&state_lock);
+    return nightglass::core::Status::Ok();
 }
 
 ConnectivityService &connectivity_service() { return instance; }

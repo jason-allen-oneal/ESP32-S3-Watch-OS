@@ -22,6 +22,7 @@ import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
 import dev.nightglass.companion.ble.NightglassConnectionService
 import dev.nightglass.companion.protocol.NightglassProtocol
+import java.security.SecureRandom
 import java.util.concurrent.Executor
 
 /** Bounded adapter for privileged phone state. No contact number or calendar description is relayed. */
@@ -33,6 +34,13 @@ class PhoneIntegrationManager(
     private var finder: Ringtone? = null
     private val stopFinder = Runnable { stopPhoneRing() }
     private var callState = TelephonyManager.CALL_STATE_IDLE
+    private val random = SecureRandom()
+    private var callSessionId = 0u
+    private var callGeneration = 0
+    private val callCommandWindow = NightglassProtocol.CallCommandWindow()
+    private data class CallSignature(val ringing: Boolean, val active: Boolean,
+                                     val muted: Boolean)
+    private var lastCallSignature: CallSignature? = null
     private val phoneListener = object : PhoneStateListener() {
         @Deprecated("PhoneStateListener compatibility")
         override fun onCallStateChanged(state: Int, phoneNumber: String?) {
@@ -105,21 +113,33 @@ class PhoneIntegrationManager(
         }
     }
 
-    fun handleCall(command: Int) {
-        if (!has(Manifest.permission.ANSWER_PHONE_CALLS)) return
+    fun handleCall(command: Int, sessionId: UInt, generation: Int,
+                   sequence: Int): Boolean {
+        val action = NightglassProtocol.WatchAction.Call(
+            sequence, command, sessionId, generation)
+        if (!has(Manifest.permission.ANSWER_PHONE_CALLS) ||
+            !callCommandWindow.accept(action)) {
+            return false
+        }
+        // Consume before performing the side effect. A failed platform call is
+        // still not safe to repeat from a duplicated GATT notification.
         val telecom = context.getSystemService(TelecomManager::class.java)
-        when (command) {
+        return when (command) {
             1 -> if (callState == TelephonyManager.CALL_STATE_RINGING) runCatching {
                 @Suppress("DEPRECATION") telecom.acceptRingingCall()
-            }
+                true
+            }.getOrDefault(false) else false
             2 -> if (callState != TelephonyManager.CALL_STATE_IDLE) runCatching {
                 @Suppress("DEPRECATION") telecom.endCall()
-            }
-            3 -> if (callState != TelephonyManager.CALL_STATE_IDLE) {
+                true
+            }.getOrDefault(false) else false
+            3, 4 -> if (callState != TelephonyManager.CALL_STATE_IDLE) {
                 val audio = context.getSystemService(AudioManager::class.java)
-                audio.isMicrophoneMute = !audio.isMicrophoneMute
+                audio.isMicrophoneMute = command == 3
                 relayCallState()
-            }
+                true
+            } else false
+            else -> false
         }
     }
 
@@ -148,9 +168,23 @@ class PhoneIntegrationManager(
         val audio = context.getSystemService(AudioManager::class.java)
         val ringing = callState == TelephonyManager.CALL_STATE_RINGING
         val active = callState == TelephonyManager.CALL_STATE_OFFHOOK
+        val signature = CallSignature(ringing, active, audio.isMicrophoneMute)
+        if (!ringing && !active) {
+            callSessionId = 0u
+            callGeneration = 0
+        } else if (callSessionId == 0u) {
+            do callSessionId = random.nextInt().toUInt() while (callSessionId == 0u)
+            callGeneration = 1
+        } else if (lastCallSignature != signature) {
+            callGeneration = (callGeneration + 1) and 0xffff
+            if (callGeneration == 0) callGeneration = 1
+        }
+        callCommandWindow.updateSession(callSessionId, callGeneration)
+        lastCallSignature = signature
         NightglassConnectionService.send(context, NightglassProtocol.callState(
             ringing, active, audio.isMicrophoneMute, ringing,
             callState != TelephonyManager.CALL_STATE_IDLE,
+            callSessionId, callGeneration,
             when { ringing -> "Incoming call"; active -> "Call in progress"; else -> "" }))
     }
 

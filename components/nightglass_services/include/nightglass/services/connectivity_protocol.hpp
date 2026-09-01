@@ -21,7 +21,12 @@ enum class MediaCommand : std::uint8_t {
     seek_backward = 6, seek_forward = 7,
 };
 
-enum class CallCommand : std::uint8_t { answer = 1, reject = 2, mute_toggle = 3 };
+enum class CallCommand : std::uint8_t {
+    answer = 1,
+    reject = 2,
+    mute = 3,
+    unmute = 4,
+};
 enum class PhoneCommand : std::uint8_t { ring_start = 1, ring_stop = 2, camera = 3 };
 
 struct CompanionNotification {
@@ -76,6 +81,15 @@ struct CompanionCallState {
     bool muted{false};
     bool can_answer{false};
     bool can_reject{false};
+    // Random for each transition from idle into a call. Commands must echo
+    // both values so delayed/replayed commands cannot affect a later call.
+    std::uint32_t session_id{0};
+    std::uint16_t generation{0};
+};
+
+struct CompanionPeerIdentity {
+    std::uint8_t address_type{0xff};
+    std::array<std::uint8_t, 6> address{};
 };
 
 struct CompanionReplyResult {
@@ -87,7 +101,7 @@ struct CompanionReplyResult {
 enum class CompanionMessageKind : std::uint8_t {
     invalid = 0, notification_upsert, notification_remove, notification_clear,
     media_state, agenda, phone_battery, call_state, reply_result,
-    wifi_provision, wifi_clear, weather_settings, weather_snapshot,
+    wifi_provision, wifi_clear, weather_settings, weather_snapshot, peer_forget,
 };
 
 struct CompanionWifiProvisioning {
@@ -140,8 +154,9 @@ struct EncodedReply {
                                            CompanionMessage &message) noexcept;
 [[nodiscard]] std::array<std::uint8_t, 4> encode_media_command(MediaCommand command,
                                                                std::uint8_t sequence) noexcept;
-[[nodiscard]] std::array<std::uint8_t, 4> encode_call_command(CallCommand command,
-                                                              std::uint8_t sequence) noexcept;
+[[nodiscard]] std::array<std::uint8_t, 11> encode_call_command(
+    CallCommand command, std::uint16_t sequence, std::uint32_t session_id,
+    std::uint16_t generation) noexcept;
 [[nodiscard]] std::array<std::uint8_t, 4> encode_phone_command(PhoneCommand command,
                                                                std::uint8_t sequence) noexcept;
 [[nodiscard]] std::array<std::uint8_t, 7> encode_notification_action(
@@ -149,5 +164,8 @@ struct EncodedReply {
 [[nodiscard]] EncodedReply encode_notification_reply(
     std::uint32_t notification_id, std::uint8_t sequence,
     std::uint32_t request_nonce, std::string_view reply) noexcept;
+[[nodiscard]] bool valid_peer_identity(const CompanionPeerIdentity &identity) noexcept;
+[[nodiscard]] bool peer_identity_matches(const CompanionPeerIdentity &expected,
+                                         const CompanionPeerIdentity &candidate) noexcept;
 
 }  // namespace nightglass::services

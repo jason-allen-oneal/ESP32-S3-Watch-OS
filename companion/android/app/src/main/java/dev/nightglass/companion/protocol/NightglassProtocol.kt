@@ -12,6 +12,46 @@ object NightglassProtocol {
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     const val VERSION: Byte = 1
 
+    /** Wrap-safe 16-bit replay window; accepts only the next forward half-space. */
+    fun acceptsForwardSequence(last: Int, candidate: Int): Boolean {
+        if (last !in 0..0xffff || candidate !in 1..0xffff) return false
+        if (last == 0) return true
+        val delta = (candidate - last) and 0xffff
+        return delta in 1..0x7fff
+    }
+
+    fun acceptsForwardSequence8(last: Int, candidate: Int): Boolean {
+        if (last !in 0..0xff || candidate !in 1..0xff) return false
+        if (last == 0) return true
+        val delta = (candidate - last) and 0xff
+        return delta in 1..0x7f
+    }
+
+    class CallCommandWindow {
+        private var sessionId = 0u
+        private var generation = 0
+        private var lastSequence = 0
+
+        @Synchronized fun updateSession(sessionId: UInt, generation: Int) {
+            require((sessionId == 0u && generation == 0) ||
+                (sessionId != 0u && generation in 1..0xffff))
+            if (this.sessionId != sessionId || this.generation != generation) {
+                this.sessionId = sessionId
+                this.generation = generation
+                lastSequence = 0
+            }
+        }
+
+        @Synchronized fun accept(action: WatchAction.Call): Boolean {
+            if (sessionId == 0u || action.command !in 1..4 ||
+                action.sessionId != sessionId ||
+                action.generation != generation ||
+                !acceptsForwardSequence(lastSequence, action.sequence)) return false
+            lastSequence = action.sequence
+            return true
+        }
+    }
+
     data class RelayNotification(val id: UInt, val category: Int, val app: String,
                                  val title: String, val body: String,
                                  val replyable: Boolean = false)
@@ -22,7 +62,8 @@ object NightglassProtocol {
         data class Notification(val sequence: Int, val id: UInt, val dismiss: Boolean): WatchAction
         data class Reply(val sequence: Int, val id: UInt, val nonce: UInt,
                          val text: String): WatchAction
-        data class Call(val sequence: Int, val command: Int): WatchAction
+        data class Call(val sequence: Int, val command: Int, val sessionId: UInt,
+                        val generation: Int): WatchAction
         data class Phone(val sequence: Int, val command: Int): WatchAction
     }
 
@@ -75,20 +116,32 @@ object NightglassProtocol {
         return byteArrayOf(VERSION, 6, percent.toByte(), flags.toByte(), 0)
     }
     fun callState(ringing: Boolean, active: Boolean, muted: Boolean,
-                  canAnswer: Boolean, canReject: Boolean, labelValue: String): ByteArray {
+                  canAnswer: Boolean, canReject: Boolean, sessionId: UInt,
+                  generation: Int, labelValue: String): ByteArray {
         require(!canAnswer || ringing)
+        val idle = !ringing && !active
+        require((idle && sessionId == 0u && generation == 0) ||
+            (!idle && sessionId != 0u && generation in 1..0xffff))
         val label = ascii(labelValue, 48)
         val flags = (if (ringing) 1 else 0) or (if (active) 2 else 0) or
             (if (muted) 4 else 0) or (if (canAnswer) 8 else 0) or
             (if (canReject) 16 else 0)
-        return ByteBuffer.allocate(4 + label.size).put(VERSION).put(8).put(flags.toByte())
-            .put(label.size.toByte()).put(label).array()
+        return ByteBuffer.allocate(10 + label.size).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(8).put(flags.toByte()).put(label.size.toByte())
+            .putInt(sessionId.toInt()).putShort(generation.toShort()).put(label).array()
     }
     fun parseAction(frame: ByteArray): WatchAction? {
         if (frame.size < 2 || frame[0] != VERSION) return null
         return when (frame[1].toInt() and 0xff) {
-            0x10 -> if (frame.size == 4) WatchAction.Media(frame[2].toInt() and 0xff, frame[3].toInt() and 0xff) else null
-            0x11, 0x12 -> if (frame.size == 7) WatchAction.Notification(frame[2].toInt() and 0xff, ByteBuffer.wrap(frame, 3, 4).order(ByteOrder.LITTLE_ENDIAN).int.toUInt(), frame[1].toInt() == 0x11) else null
+            0x10 -> if (frame.size == 4 && (frame[2].toInt() and 0xff) != 0 &&
+                (frame[3].toInt() and 0xff) in 1..7)
+                WatchAction.Media(frame[2].toInt() and 0xff, frame[3].toInt() and 0xff)
+                else null
+            0x11, 0x12 -> if (frame.size == 7 && (frame[2].toInt() and 0xff) != 0) {
+                val id = ByteBuffer.wrap(frame, 3, 4).order(ByteOrder.LITTLE_ENDIAN).int.toUInt()
+                if (id != 0u) WatchAction.Notification(frame[2].toInt() and 0xff, id,
+                    frame[1].toInt() == 0x11) else null
+            } else null
             0x13 -> {
                 if (frame.size < 13) null else {
                     val length = frame[11].toInt() and 0xff
@@ -97,7 +150,7 @@ object NightglassProtocol {
                     val id = ByteBuffer.wrap(frame, 3, 4)
                         .order(ByteOrder.LITTLE_ENDIAN).int.toUInt()
                     val textBytes = frame.copyOfRange(12, frame.size)
-                    if (id == 0u || nonce == 0u || length !in 1..96 ||
+                    if ((frame[2].toInt() and 0xff) == 0 || id == 0u || nonce == 0u || length !in 1..96 ||
                         frame.size != 12 + length ||
                         textBytes.any { (it.toInt() and 0xff) !in 0x20..0x7e }) null
                     else WatchAction.Reply(
@@ -107,15 +160,25 @@ object NightglassProtocol {
                         textBytes.toString(Charsets.US_ASCII))
                 }
             }
-            0x14 -> if (frame.size == 4 && (frame[3].toInt() and 0xff) in 1..3)
-                WatchAction.Call(frame[2].toInt() and 0xff, frame[3].toInt() and 0xff) else null
-            0x15 -> if (frame.size == 4 && (frame[3].toInt() and 0xff) in 1..3)
+            0x14 -> if (frame.size == 11) {
+                val sequence = ByteBuffer.wrap(frame, 2, 2).order(ByteOrder.LITTLE_ENDIAN)
+                    .short.toInt() and 0xffff
+                val command = frame[4].toInt() and 0xff
+                val sessionId = ByteBuffer.wrap(frame, 5, 4).order(ByteOrder.LITTLE_ENDIAN)
+                    .int.toUInt()
+                val generation = ByteBuffer.wrap(frame, 9, 2).order(ByteOrder.LITTLE_ENDIAN)
+                    .short.toInt() and 0xffff
+                if (sequence != 0 && command in 1..4 && sessionId != 0u && generation != 0)
+                    WatchAction.Call(sequence, command, sessionId, generation) else null
+            } else null
+            0x15 -> if (frame.size == 4 && (frame[2].toInt() and 0xff) != 0 &&
+                (frame[3].toInt() and 0xff) in 1..3)
                 WatchAction.Phone(frame[2].toInt() and 0xff, frame[3].toInt() and 0xff) else null
             else -> null
         }
     }
     fun replyResult(sequence: Int, status: Int, id: UInt, nonce: UInt): ByteArray {
-        require(status in 0..5 && id != 0u && nonce != 0u)
+        require(sequence in 1..0xff && status in 0..5 && id != 0u && nonce != 0u)
         return ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
             .put(VERSION).put(0x24).put(sequence.toByte()).put(status.toByte())
             .putInt(id.toInt()).putInt(nonce.toInt()).array()
@@ -132,6 +195,7 @@ object NightglassProtocol {
         return ByteBuffer.allocate(14).order(ByteOrder.LITTLE_ENDIAN).put(VERSION).put(0x21).put(flags.toByte()).put(if (metric) 1 else 0).putShort(refreshMinutes.toShort()).putInt(latitudeE6).putInt(longitudeE6).array()
     }
     fun clearWifi() = byteArrayOf(VERSION, 0x22)
+    fun forgetPeerAuthorization() = byteArrayOf(VERSION, 0x25)
 
     fun phoneWeather(observedEpochSeconds: Long, metric: Boolean, isDay: Boolean,
                      temperature: Double, apparentTemperature: Double,

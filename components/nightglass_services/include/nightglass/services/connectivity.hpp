@@ -22,6 +22,12 @@ struct ConnectivitySettings {
     std::array<char, 25> device_name{"Nightglass"};
 };
 
+enum class NotificationPrivacyPolicy : std::uint8_t {
+    show_details,
+    redact_when_locked,
+    always_redact,
+};
+
 struct ConnectivitySnapshot {
     std::uint32_t sequence{0};
     std::uint32_t notification_sequence{0};
@@ -41,6 +47,9 @@ struct ConnectivitySnapshot {
     bool reply_pending{false};
     std::uint32_t pairing_passkey{0};
     bool pairing_passkey_active{false};
+    bool peer_identity_pinned{false};
+    NotificationPrivacyPolicy notification_privacy{NotificationPrivacyPolicy::show_details};
+    bool notification_details_unlocked{true};
     std::array<char, 64> detail{"Not started"};
 };
 
@@ -56,6 +65,13 @@ public:
     bool send_phone(PhoneCommand command);
     bool mark_notification(std::uint32_t id, bool dismiss);
     bool reply_notification(std::uint32_t id, const char *reply);
+    // Runtime-only hook for a future PIN/privacy UI. Tightening the policy
+    // immediately scrubs cached notification text; relaxing it does not
+    // resurrect prior content and requires a fresh companion sync.
+    void set_notification_privacy(NotificationPrivacyPolicy policy, bool unlocked);
+    // Recovery hook only. Callers must provide their own explicit user
+    // confirmation before clearing the allowlisted phone identity.
+    nightglass::core::Status clear_pinned_peer();
 };
 
 ConnectivityService &connectivity_service();

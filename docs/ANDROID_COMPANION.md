@@ -9,8 +9,10 @@ and uses the platform BLE, notification-listener, and media APIs.
    notification-posting permissions.
 2. Tap **Connect / pair Nightglass** and accept Android's bond prompt. The
    foreground service scans only for the Nightglass service UUID and maintains
-   the connection. The current watch uses LE Secure Connections “Just Works”;
-   encryption is provided, but the pairing is not MITM-authenticated.
+   the connection. Enter the random six-digit passkey displayed by the watch.
+   The current watch requires authenticated LE Secure Connections and pins the
+   resolved phone identity after that visible pairing; Android pins the watch
+   address after the authenticated GATT subscription succeeds.
 3. Tap **Grant notification access** and enable Nightglass in Android settings.
    Eligible notifications are relayed with the protocol's 24/48/96-byte bounds.
    Ongoing notifications, group summaries, and the companion's own notification
@@ -18,6 +20,41 @@ and uses the platform BLE, notification-listener, and media APIs.
 4. Media actions from the watch are dispatched through Android's media-key
    routing. Dismiss removes the matching notification; mark-read invokes its
    content intent when available.
+
+After installing the peer-pinning firmware over an older bonded build, remove
+the old Android Bluetooth bond and pair once more. The watch deliberately will
+not convert a pre-existing bond into an identity pin without a newly displayed
+passkey. Clearing only the Android app's pinned address is not sufficient; the
+system bond must also be removed before pairing again.
+
+**Reset pinned watch** must be used while the authorized watch is connected.
+It sends the watch-side clear command first and clears Android's local pin only
+after the GATT write succeeds. It deliberately refuses an offline local-only
+reset, which would leave the two sides with contradictory allowlists. If the
+authorized phone is permanently unavailable, recovery requires the explicit
+USB/service path that calls `ConnectivityService::clear_pinned_peer()`; there is
+no unauthenticated radio reset.
+
+Call control frames bind each command to a random call session, a state
+generation, and a wrap-safe command sequence. Microphone control is explicit
+mute/unmute rather than a toggle, so a delayed or duplicated command cannot
+invert the state of another call.
+
+## Residual security and privacy boundaries
+
+There is no application-layer message MAC or Android-Keystore-to-watch secret
+bootstrap in this release. Adding one safely requires a visible confirmation
+and recovery/reset flow on both devices; deriving or silently exchanging a key
+over an existing link would merely decorate the same trust boundary. The
+current boundary is authenticated BLE Secure Connections, phone/watch identity
+pinning, Android app sandboxing, exact frame validation, and replay windows.
+
+Notification bodies remain RAM-only and are never logged or persisted by
+Nightglass. A service-level redaction/lock policy can scrub the live cache, but
+it is not enabled by default until the watch has an actual PIN/privacy control.
+The companion process necessarily has notification-listener access, so a
+compromised companion UID, rooted phone, physical watch debug access, or
+unencrypted flash/NVS extraction is outside the protection provided here.
 
 ## Provisioning
 

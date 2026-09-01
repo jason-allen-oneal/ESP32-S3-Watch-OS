@@ -22,6 +22,9 @@ class NightglassProtocolTest {
         val invalidText = reply.copyOf().also { it[12] = 0x0a }
         assertNull(NightglassProtocol.parseAction(invalidText))
         assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x10)))
+        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x10, 0, 2)))
+        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x10, 9, 8)))
+        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x11, 3, 0, 0, 0, 0)))
     }
     @Test fun mediaAndReplyResultsAreBounded() {
         val media = NightglassProtocol.mediaState("Song", "Artist", true, true)
@@ -39,8 +42,19 @@ class NightglassProtocolTest {
         assertTrue(agenda.size <= 179)
         assertArrayEquals(byteArrayOf(1, 6, 73, 3, 0),
             NightglassProtocol.phoneBattery(73, true, true))
-        assertEquals(8, NightglassProtocol.callState(true, false, false,
-            true, true, "Incoming")[1].toInt())
+        val callState = NightglassProtocol.callState(true, false, false,
+            true, true, 0x78563412u, 2, "Incoming")
+        assertEquals(8, callState[1].toInt())
+        assertArrayEquals(byteArrayOf(0x12, 0x34, 0x56, 0x78, 2, 0),
+            callState.copyOfRange(4, 10))
+        assertThrows(IllegalArgumentException::class.java) {
+            NightglassProtocol.callState(true, false, false,
+                true, true, 0u, 0, "Incoming")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            NightglassProtocol.callState(false, false, false,
+                false, false, 1u, 1, "")
+        }
         val progress = NightglassProtocol.mediaState("Song", "Artist", true, true,
             true, 15_000, 120_000)
         assertEquals(7, progress[1].toInt())
@@ -53,12 +67,43 @@ class NightglassProtocolTest {
         }
     }
     @Test fun parsesBoundedPhoneActions() {
-        assertEquals(NightglassProtocol.WatchAction.Call(4, 1),
-            NightglassProtocol.parseAction(byteArrayOf(1, 0x14, 4, 1)))
+        val call = byteArrayOf(1, 0x14, 0xfe.toByte(), 0xff.toByte(), 1,
+            0x12, 0x34, 0x56, 0x78, 2, 0)
+        assertEquals(NightglassProtocol.WatchAction.Call(
+            0xfffe, 1, 0x78563412u, 2), NightglassProtocol.parseAction(call))
         assertEquals(NightglassProtocol.WatchAction.Phone(9, 3),
             NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 9, 3)))
-        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x14, 4, 4)))
+        assertNull(NightglassProtocol.parseAction(call.copyOf().also { it[4] = 5 }))
+        assertNull(NightglassProtocol.parseAction(call.copyOf().also { it[2] = 0; it[3] = 0 }))
         assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 9, 0)))
+        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 0, 3)))
+    }
+    @Test fun callCommandSequenceWindowRejectsReplayStaleAndAcceptsWrap() {
+        assertTrue(NightglassProtocol.acceptsForwardSequence(0, 1))
+        assertTrue(NightglassProtocol.acceptsForwardSequence(100, 101))
+        assertFalse(NightglassProtocol.acceptsForwardSequence(100, 100))
+        assertFalse(NightglassProtocol.acceptsForwardSequence(100, 99))
+        assertTrue(NightglassProtocol.acceptsForwardSequence(0xffff, 1))
+        assertFalse(NightglassProtocol.acceptsForwardSequence(1, 0xffff))
+        assertTrue(NightglassProtocol.acceptsForwardSequence8(0xff, 1))
+        assertFalse(NightglassProtocol.acceptsForwardSequence8(9, 9))
+        assertFalse(NightglassProtocol.acceptsForwardSequence8(9, 8))
+
+        val window = NightglassProtocol.CallCommandWindow()
+        window.updateSession(0x11111111u, 7)
+        assertTrue(window.accept(NightglassProtocol.WatchAction.Call(
+            0xffff, 3, 0x11111111u, 7)))
+        assertFalse(window.accept(NightglassProtocol.WatchAction.Call(
+            0xffff, 3, 0x11111111u, 7))) // replay
+        assertTrue(window.accept(NightglassProtocol.WatchAction.Call(
+            1, 4, 0x11111111u, 7))) // wrap
+        assertFalse(window.accept(NightglassProtocol.WatchAction.Call(
+            2, 4, 0x22222222u, 7))) // stale/wrong call session
+        assertFalse(window.accept(NightglassProtocol.WatchAction.Call(
+            2, 4, 0x11111111u, 6))) // stale generation
+        window.updateSession(0x22222222u, 1)
+        assertTrue(window.accept(NightglassProtocol.WatchAction.Call(
+            2, 3, 0x22222222u, 1)))
     }
     @Test fun provisioningContainsNoPersistentState() {
         val frame = NightglassProtocol.provisionWifi("wifi", "secret".toCharArray())
@@ -66,6 +111,7 @@ class NightglassProtocolTest {
         assertEquals(4, frame[2].toInt()); assertEquals(6, frame[3].toInt())
         assertEquals(14, NightglassProtocol.configureWeather(true, true, false, 30, 12_345_678, -87_654_321).size)
         assertArrayEquals(byteArrayOf(1, 0x22), NightglassProtocol.clearWifi())
+        assertArrayEquals(byteArrayOf(1, 0x25), NightglassProtocol.forgetPeerAuthorization())
     }
     @Test fun phoneWeatherUsesBoundedLittleEndianLayout() {
         val frame = NightglassProtocol.phoneWeather(1_700_000_000L, false, true,

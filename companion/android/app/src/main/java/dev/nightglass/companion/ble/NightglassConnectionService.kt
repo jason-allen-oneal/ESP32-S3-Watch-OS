@@ -51,6 +51,8 @@ class NightglassConnectionService : Service() {
     private var writePending = false
     private var pendingOpcode = -1
     private var linkReady = false
+    private var lastActionSequence = 0
+    private var forgetPending = false
     private val reconnectHandler = Handler(Looper.getMainLooper())
     private var reconnectAttempt = 0
     private var explicitDisconnect = false
@@ -106,13 +108,7 @@ class NightglassConnectionService : Service() {
         when (intent?.action) {
             ACTION_DISCONNECT -> { explicitDisconnect = true; reconnectHandler.removeCallbacks(reconnect); stopScan(); closeGatt(); stopSelf() }
             ACTION_FORGET_PIN -> {
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(PINNED_ADDRESS).apply()
-                explicitDisconnect = true
-                reconnectHandler.removeCallbacks(reconnect)
-                stopScan()
-                closeGatt()
-                update("Pinned Nightglass cleared; remove the system bond before pairing again")
-                stopSelf()
+                requestForgetPeer()
             }
             ACTION_WRITE -> {
                 explicitDisconnect = false
@@ -269,13 +265,16 @@ class NightglassConnectionService : Service() {
         }
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (gatt !== client) return
-            Log.i(TAG, "Nightglass frame completion: opcode=$pendingOpcode status=$status")
+            val completedOpcode = pendingOpcode
+            Log.i(TAG, "Nightglass frame completion: opcode=$completedOpcode status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                if (completedOpcode == 0x25) forgetPending = false
                 update("Nightglass link failed; reconnecting")
                 recoverDeadLink(client)
                 return
             }
             synchronized(writes) { writePending = false; pendingOpcode = -1; writeNextLocked() }
+            if (completedOpcode == 0x25 && forgetPending) completeForgetPeer()
         }
         @Deprecated("API compatibility")
         override fun onCharacteristicChanged(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic) { receive(characteristic.value) }
@@ -289,7 +288,25 @@ class NightglassConnectionService : Service() {
             client.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
         else { @Suppress("DEPRECATION") descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; @Suppress("DEPRECATION") client.writeDescriptor(descriptor) }
     }
-    private fun receive(frame: ByteArray) { when (val action = NightglassProtocol.parseAction(frame)) {
+    private fun receive(frame: ByteArray) {
+        val action = NightglassProtocol.parseAction(frame) ?: return
+        if (action !is NightglassProtocol.WatchAction.Call) {
+            val sequence = when (action) {
+                is NightglassProtocol.WatchAction.Media -> action.sequence
+                is NightglassProtocol.WatchAction.Notification -> action.sequence
+                is NightglassProtocol.WatchAction.Reply -> action.sequence
+                is NightglassProtocol.WatchAction.Phone -> action.sequence
+                is NightglassProtocol.WatchAction.Call -> 0
+            }
+            synchronized(this) {
+                if (!NightglassProtocol.acceptsForwardSequence8(lastActionSequence, sequence)) {
+                    Log.w(TAG, "Rejected duplicate or stale watch action")
+                    return
+                }
+                lastActionSequence = sequence
+            }
+        }
+        when (action) {
         is NightglassProtocol.WatchAction.Media -> handleMedia(action.command)
         is NightglassProtocol.WatchAction.Notification -> NightglassNotificationListener.perform(action.id, action.dismiss)
         is NightglassProtocol.WatchAction.Reply -> {
@@ -298,10 +315,11 @@ class NightglassConnectionService : Service() {
             write(NightglassProtocol.replyResult(
                 action.sequence, status, action.id, action.nonce))
         }
-        is NightglassProtocol.WatchAction.Call -> phoneIntegrations.handleCall(action.command)
+        is NightglassProtocol.WatchAction.Call -> phoneIntegrations.handleCall(
+            action.command, action.sessionId, action.generation, action.sequence)
         is NightglassProtocol.WatchAction.Phone -> phoneIntegrations.handlePhone(action.command)
-        null -> Unit
-    } }
+        }
+    }
     private fun handleMedia(command: Int) {
         if (command == 6 || command == 7) {
             NightglassNotificationListener.seekMedia(if (command == 6) -15_000L else 15_000L)
@@ -319,6 +337,29 @@ class NightglassConnectionService : Service() {
             writes.add(queued)
             writeNextLocked()
         }
+    }
+    private fun requestForgetPeer() {
+        if (!linkReady || gatt == null) {
+            update("Connect to the pinned Nightglass before resetting it")
+            return
+        }
+        synchronized(writes) {
+            writes.clear()
+            forgetPending = true
+            writes.add(NightglassProtocol.forgetPeerAuthorization())
+            writeNextLocked()
+        }
+        update("Clearing pinned Nightglass authorization")
+    }
+    private fun completeForgetPeer() {
+        forgetPending = false
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(PINNED_ADDRESS).apply()
+        explicitDisconnect = true
+        reconnectHandler.removeCallbacks(reconnect)
+        stopScan()
+        closeGatt()
+        update("Pinned Nightglass cleared; remove the system bond before pairing again")
+        stopSelf()
     }
     private fun silenceNotificationAlert(frame: ByteArray) {
         if (frame.size >= 7 && frame[0] == NightglassProtocol.VERSION &&
@@ -355,6 +396,7 @@ class NightglassConnectionService : Service() {
         reconnectHandler.postDelayed(reconnect, delay)
     }
     private fun resetLinkState() {
+        forgetPending = false
         synchronized(writes) {
             writePending = false
             linkReady = false
@@ -362,6 +404,7 @@ class NightglassConnectionService : Service() {
             writes.forEach(::silenceNotificationAlert)
         }
         negotiatedPayload = 20
+        lastActionSequence = 0
     }
     private fun recoverDeadLink(client: BluetoothGatt) {
         resetLinkState()

@@ -16,8 +16,9 @@ status, and subscribes to watch-to-phone commands.
   command envelopes without logging bytes or notification content.
 
 Bonding and link encryption are enforced by the firmware's characteristic
-permissions. iOS owns the pairing UI and key storage. The app must not claim
-MITM authentication while the watch uses LE Secure Connections Just Works.
+permissions. iOS owns the pairing UI and key storage. Current watch firmware
+uses authenticated LE Secure Connections with a six-digit passkey displayed on
+the watch; an iOS port must support that flow and the watch-side identity pin.
 
 ## Settings and Wi-Fi provisioning boundary
 

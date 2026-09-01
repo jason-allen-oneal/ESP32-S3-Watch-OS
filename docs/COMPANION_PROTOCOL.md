@@ -9,10 +9,28 @@ companion adapter.
 - Pairing uses bonded LE Secure Connections with a random six-digit passkey
   displayed on the watch. GATT reads, writes, and notifications require an
   authenticated encrypted link. The Android companion pins the successfully
-  authenticated device address for subsequent reconnects.
+  authenticated device address for subsequent reconnects. The watch also pins
+  the peer's resolved NimBLE identity address in NVS, but only after a new
+  passkey-display pairing completes as authenticated and bonded. A different
+  bonded identity is disconnected before any application frame is accepted.
+- Upgrading an already bonded protocol-v1 watch does not silently grandfather
+  that bond into the new watch-side allowlist. Remove the phone's old bond and
+  pair again so the displayed-passkey bootstrap can create the identity pin.
+- This protocol does not claim an application-layer MAC. BLE Secure Connections
+  plus the bidirectional identity pins protect the radio link, but compromise
+  of the Android companion process/UID, phone root, watch firmware, or BLE key
+  storage remains in scope for a future authenticated application session.
+- Peer reset opcode `0x25` is accepted only over the currently authorized link.
+  It clears the watch identity pin before Android clears its local address pin;
+  offline/local-only reset is refused. The user must then remove the Android
+  system bond before a replacement or reinstalled companion can pair.
 - Notification and command characteristics require link encryption.
 - Notification content is never written to logs or NVS. The six-item inbox is
   RAM-only and disappears on reboot.
+- The service exposes a runtime notification privacy policy that can scrub the
+  cached app/title/body and disable replies immediately. It defaults to showing
+  details until a real PIN/privacy UI exists; therefore unlocked-watch shoulder
+  surfing and physical RAM/debug access remain residual privacy risks.
 - Text fields are bounded and converted to printable ASCII for the current
   embedded font set.
 
@@ -83,12 +101,21 @@ minutes in the future, unit mismatches, and data older than its current source.
 - `0x06` carries phone battery percentage and charging/power-save flags.
 - `0x07` adds media seekability and bounded position/duration. Media commands
   6/7 seek by 15 seconds when Android advertises seek support.
-- `0x08` carries generic call state without number/contact identity. Outbound
-  `0x14` controls answer, reject, or handset-microphone mute; no call audio is
-  carried over BLE.
+- `0x08` carries generic call state without number/contact identity. The exact
+  frame adds a random nonzero call-session ID and a nonzero state generation;
+  idle state carries zero for both. Outbound `0x14` is exactly 11 bytes and
+  echoes session ID and generation with a nonzero 16-bit command sequence.
+  Android accepts only the forward half of the wrap-safe sequence space for the
+  current session/generation, consuming a sequence before invoking Telecom.
+  Commands are answer, reject, explicit mute, and explicit unmute; there is no
+  replay-sensitive mute toggle and no call audio over BLE. Legacy four-byte
+  call commands are rejected.
 - Outbound `0x15` starts/stops a bounded 30-second phone ring or launches the
   system camera intent.
 
 These frames retain the bonded, pinned, encrypted GATT boundary and MTU bounds.
 Logs contain opcode, length, and status, not private payload content. Missing
 Android calendar/telephony permission produces empty or unavailable state.
+All other watch action frames require exact lengths, known command values,
+nonzero handles/sequences, and a wrap-safe forward 8-bit sequence window on
+Android, so duplicate GATT deliveries cannot repeat their side effects.
