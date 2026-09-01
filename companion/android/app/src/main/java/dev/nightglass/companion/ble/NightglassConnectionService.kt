@@ -7,6 +7,7 @@ import android.bluetooth.le.*
 import android.content.*
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.net.Uri
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.*
@@ -19,6 +20,7 @@ import dev.nightglass.companion.protocol.NightglassProtocol
 import dev.nightglass.companion.notifications.NightglassNotificationListener
 import dev.nightglass.companion.phone.PhoneIntegrationManager
 import dev.nightglass.companion.weather.PhoneWeatherProxy
+import dev.nightglass.companion.update.OtaTransferManager
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 
@@ -31,9 +33,17 @@ class NightglassConnectionService : Service() {
         const val ACTION_REFRESH_WEATHER = "dev.nightglass.REFRESH_WEATHER"
         const val ACTION_FORGET_PIN = "dev.nightglass.FORGET_PIN"
         const val ACTION_FORGET_RESULT = "dev.nightglass.FORGET_RESULT"
+        const val ACTION_START_OTA = "dev.nightglass.START_OTA"
+        const val ACTION_CANCEL_OTA = "dev.nightglass.CANCEL_OTA"
+        const val ACTION_OTA_PROGRESS = "dev.nightglass.OTA_PROGRESS"
         const val EXTRA_FRAME = "frame"
         const val EXTRA_FORGET_SUCCESS = "forget_success"
         const val EXTRA_FORGET_DETAIL = "forget_detail"
+        const val EXTRA_OTA_URIS = "ota_uris"
+        const val EXTRA_OTA_ACTIVE = "ota_active"
+        const val EXTRA_OTA_COMPLETE = "ota_complete"
+        const val EXTRA_OTA_PERCENT = "ota_percent"
+        const val EXTRA_OTA_DETAIL = "ota_detail"
         const val CHANNEL = "nightglass_connection"
         private const val PREFS = "nightglass_link"
         private const val PINNED_ADDRESS = "pinned_address"
@@ -51,7 +61,9 @@ class NightglassConnectionService : Service() {
     private var scanGeneration = 0
     private var negotiatedPayload = 20
     private val writes = ArrayDeque<ByteArray>()
+    private val otaWrites = ArrayDeque<ByteArray>()
     private var writePending = false
+    private var pendingOtaWrite = false
     private var pendingOpcode = -1
     private var linkReady = false
     private var authorizationProofPending = false
@@ -63,6 +75,11 @@ class NightglassConnectionService : Service() {
     private var connectionStatus = "Searching for Nightglass"
     private val reconnect = Runnable { if (!explicitDisconnect && gatt == null) reconnectBondedOrScan() }
     private val weatherExecutor = Executors.newSingleThreadExecutor()
+    private val otaExecutor = Executors.newSingleThreadScheduledExecutor()
+    private val otaTransfers by lazy {
+        OtaTransferManager(contentResolver, otaExecutor, { negotiatedPayload },
+            ::writeOta, ::reportOtaProgress)
+    }
     private val phoneIntegrations by lazy { PhoneIntegrationManager(this, weatherExecutor) }
     @Volatile private var destroyed = false
     private var weatherFetchInFlight = false
@@ -103,6 +120,7 @@ class NightglassConnectionService : Service() {
         reconnectHandler.removeCallbacks(weatherRefresh)
         phoneIntegrations.stop()
         weatherExecutor.shutdownNow()
+        otaExecutor.shutdownNow()
         closeGatt()
         super.onDestroy()
     }
@@ -124,6 +142,14 @@ class NightglassConnectionService : Service() {
                 scheduleWeatherRefresh(0)
                 if (gatt == null) reconnectBondedOrScan()
             }
+            ACTION_START_OTA -> {
+                explicitDisconnect = false
+                val uris = intent.getStringArrayListExtra(EXTRA_OTA_URIS)
+                    ?.map(Uri::parse).orEmpty()
+                otaTransfers.start(uris)
+                if (gatt == null) reconnectBondedOrScan()
+            }
+            ACTION_CANCEL_OTA -> otaTransfers.cancel()
             else -> { explicitDisconnect = false; reconnectBondedOrScan() }
         }
         return START_STICKY
@@ -259,7 +285,8 @@ class NightglassConnectionService : Service() {
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (gatt !== client) return
             val completedOpcode = pendingOpcode
-            Log.i(TAG, "Nightglass frame completion: opcode=$completedOpcode status=$status")
+            if (completedOpcode != 0x31)
+                Log.i(TAG, "Nightglass frame completion: opcode=$completedOpcode status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 if (completedOpcode == 0x25 && forgetPending) {
                     forgetPending = false
@@ -286,6 +313,10 @@ class NightglassConnectionService : Service() {
     }
     private fun receive(frame: ByteArray) {
         if (!linkReady) return
+        NightglassProtocol.parseOtaStatus(frame)?.let {
+            otaTransfers.onStatus(it)
+            return
+        }
         val action = NightglassProtocol.parseAction(frame) ?: return
         if (action !is NightglassProtocol.WatchAction.Call) {
             val sequence = when (action) {
@@ -335,6 +366,14 @@ class NightglassConnectionService : Service() {
             writeNextLocked()
         }
     }
+    private fun writeOta(frame: ByteArray): Boolean {
+        synchronized(writes) {
+            if (!linkReady || frame.size > negotiatedPayload || otaWrites.size >= 2) return false
+            otaWrites.add(frame.copyOf())
+            writeNextLocked()
+            return true
+        }
+    }
     private fun requestForgetPeer() {
         if (!linkReady || gatt == null) {
             update("Connect to the pinned Nightglass before resetting it")
@@ -376,7 +415,8 @@ class NightglassConnectionService : Service() {
         if (writePending || !linkReady) return
         val client = gatt ?: return
         val c = client.getService(NightglassProtocol.SERVICE)?.getCharacteristic(NightglassProtocol.PHONE_TO_WATCH) ?: return
-        val frame = writes.peek() ?: return
+        val otaFrame = otaWrites.peek()
+        val frame = otaFrame ?: writes.peek() ?: return
         if (frame.size > negotiatedPayload) {
             writes.poll()
             update("Nightglass frame exceeds negotiated MTU")
@@ -387,9 +427,11 @@ class NightglassConnectionService : Service() {
         else { @Suppress("DEPRECATION") c.value = frame; @Suppress("DEPRECATION") client.writeCharacteristic(c) }
         writePending = started
         if (started) {
+            pendingOtaWrite = otaFrame != null
             pendingOpcode = frame.getOrNull(1)?.toInt()?.and(0xff) ?: -1
-            Log.i(TAG, "Nightglass frame started: opcode=$pendingOpcode bytes=${frame.size}")
-            writes.poll()
+            if (pendingOpcode != 0x31)
+                Log.i(TAG, "Nightglass frame started: opcode=$pendingOpcode bytes=${frame.size}")
+            if (pendingOtaWrite) otaWrites.poll() else writes.poll()
         } else if ((frame.getOrNull(1)?.toInt()?.and(0xff) ?: -1) == 0x25 &&
             forgetPending) {
             writes.poll()
@@ -453,6 +495,7 @@ class NightglassConnectionService : Service() {
         NightglassNotificationListener.syncCurrent()
         NightglassNotificationListener.syncMedia()
         phoneIntegrations.refreshAll()
+        otaTransfers.resumeLink()
         scheduleWeatherRefresh(0)
     }
     private fun stopScan() { if (scanning && hasConnectPermissions()) adapter.bluetoothLeScanner?.stopScan(scanCallback); scanning = false }
@@ -464,6 +507,7 @@ class NightglassConnectionService : Service() {
         reconnectHandler.postDelayed(reconnect, delay)
     }
     private fun resetLinkState() {
+        otaTransfers.linkLost()
         if (forgetPending) {
             forgetPending = false
             reportForgetResult(false, "Authorization reset was not acknowledged")
@@ -471,7 +515,9 @@ class NightglassConnectionService : Service() {
         authorizationProofPending = false
         synchronized(writes) {
             writePending = false
+            pendingOtaWrite = false
             linkReady = false
+            otaWrites.clear()
             writes.removeIf { frame -> frame.getOrNull(1)?.toInt()?.and(0xff) == 0x24 }
             writes.forEach(::silenceNotificationAlert)
         }
@@ -485,7 +531,7 @@ class NightglassConnectionService : Service() {
         if (gatt === client) gatt = null
         scheduleReconnect()
     }
-    private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false; linkReady = false; authorizationProofPending = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
+    private fun closeGatt() { synchronized(writes) { writes.clear(); otaWrites.clear(); writePending = false; pendingOtaWrite = false; linkReady = false; authorizationProofPending = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
 
     private fun scheduleWeatherRefresh(delayMs: Long? = null) {
         if (destroyed) return
@@ -527,6 +573,14 @@ class NightglassConnectionService : Service() {
     private fun update(text: String) {
         connectionStatus = text
         getSystemService(NotificationManager::class.java).notify(7, connectionNotification(text))
+    }
+    private fun reportOtaProgress(progress: OtaTransferManager.Progress) {
+        sendBroadcast(Intent(ACTION_OTA_PROGRESS).setPackage(packageName)
+            .putExtra(EXTRA_OTA_ACTIVE, progress.active)
+            .putExtra(EXTRA_OTA_COMPLETE, progress.complete)
+            .putExtra(EXTRA_OTA_PERCENT, progress.percent)
+            .putExtra(EXTRA_OTA_DETAIL, progress.detail))
+        update(progress.detail)
     }
     private fun connectionNotification(text: String) = NotificationCompat.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_data_bluetooth).setContentTitle("Nightglass").setContentText(text).setOngoing(true).setContentIntent(PendingIntent.getActivity(this, 0, Intent(this, dev.nightglass.companion.MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)).build()
 }

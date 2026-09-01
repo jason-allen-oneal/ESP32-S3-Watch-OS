@@ -138,4 +138,29 @@ class NightglassProtocolTest {
         assertArrayEquals(byteArrayOf(0xD4.toByte(), 0x02), frame.copyOfRange(10, 12))
         assertArrayEquals(byteArrayOf(0x57, 0), frame.copyOfRange(16, 18))
     }
+    @Test fun otaFramesAreMtuBoundAndStatusIsStrict() {
+        val manifest = NightglassProtocol.OtaManifest(
+            1, "nightglass-waveshare-esp32s3r8-2.06-v1.0", "nightglass-32m-r1",
+            1, "2.0.0", 0, 4096, ByteArray(32) { 0xaa.toByte() },
+            byteArrayOf(0x30, 6, 2, 1, 1, 2, 1, 1))
+        val begin = NightglassProtocol.otaBegin(0x1122334478563412uL, manifest)
+        assertTrue(begin.size <= 244)
+        assertArrayEquals(byteArrayOf(1, 0x30, 0x12, 0x34, 0x56, 0x78, 0x44, 0x33,
+            0x22, 0x11), begin.copyOfRange(0, 10))
+        val data = NightglassProtocol.otaData(7uL, 230, ByteArray(230) { 0x5a })
+        assertEquals(244, data.size)
+        assertEquals(0x31, data[1].toInt())
+        assertThrows(IllegalArgumentException::class.java) {
+            NightglassProtocol.otaData(7uL, 0, ByteArray(231))
+        }
+        val status = byteArrayOf(1, 0x35, 7, 0, 0, 0, 0xf0.toByte(), 0xde.toByte(),
+            0xbc.toByte(), 0x9a.toByte(), 2, 1, 0, 0,
+            0, 0x10, 0, 0, 0xe6.toByte(), 0, 0, 0)
+        assertEquals(NightglassProtocol.OtaStatus(0x9abcdef000000007uL, 2, 1, 0, 4096, 230),
+            NightglassProtocol.parseOtaStatus(status))
+        assertNull(NightglassProtocol.parseOtaStatus(status.copyOf().also { it[13] = 1 }))
+        assertNull(NightglassProtocol.parseOtaStatus(status.copyOf().also { it[18] = 1; it[19] = 0x10 }))
+        assertArrayEquals(byteArrayOf(1, 0x34, 7, 0, 0, 0, 0, 0, 0, 0),
+            NightglassProtocol.otaStatusQuery(7uL))
+    }
 }

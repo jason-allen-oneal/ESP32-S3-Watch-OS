@@ -19,6 +19,7 @@
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/watchface.hpp"
+#include "nightglass/services/update_transport.hpp"
 #include "nightglass/ui/assets/revenant_grid_v2.hpp"
 
 namespace nightglass::ui {
@@ -906,6 +907,25 @@ void Shell::audio_dnd_callback(lv_event_t *event) {
 void Shell::dismiss_alert_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     if (nightglass::services::clock_service().dismiss_alerts()) {
+        self->refresh_system_overlay();
+    }
+}
+
+void Shell::update_confirm_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    (void)nightglass::services::update_transport().confirm();
+    self->refresh_system_overlay();
+}
+
+void Shell::update_abort_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    (void)nightglass::services::update_transport().abort();
+    self->refresh_system_overlay();
+}
+
+void Shell::update_restart_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (!nightglass::services::update_transport().restart()) {
         self->refresh_system_overlay();
     }
 }
@@ -2781,11 +2801,47 @@ void Shell::refresh_quick_settings() {
 
 void Shell::refresh_system_overlay() {
     if (!overlay_layer_) return;
+    constexpr std::uint8_t kUpdateOverlay = 0xfd;
     constexpr std::uint8_t kPairingOverlay = 0xfe;
     const auto kind = nightglass::services::clock_service().active_alert();
     const auto connectivity = nightglass::services::connectivity_service().snapshot();
+    const auto update = nightglass::services::update_transport().snapshot();
     // Alarm and countdown controls are safety-critical. Pairing can wait and
     // reappear after the active alert is dismissed.
+    if ((update.awaiting_confirmation || update.ready_to_reboot) &&
+        kind == nightglass::services::AlertKind::none) {
+        if (alert_card_ && displayed_alert_kind_ == kUpdateOverlay) return;
+        lv_obj_clean(overlay_layer_);
+        lv_obj_set_style_bg_color(overlay_layer_, lv_color_hex(kVoid), 0);
+        lv_obj_set_style_bg_opa(overlay_layer_, LV_OPA_90, 0);
+        lv_obj_remove_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(overlay_layer_);
+        alert_card_ = make_route_card(overlay_layer_, 82, 280);
+        auto *heading = label(alert_card_, update.ready_to_reboot ? "UPDATE READY" :
+                              "INSTALL UPDATE?", &lv_font_montserrat_24,
+                              kPrimary);
+        lv_obj_align(heading, LV_ALIGN_TOP_MID, 0, 12);
+        auto *version = label(alert_card_, update.target_version.data(),
+                              &lv_font_montserrat_20, kCyan);
+        lv_obj_align(version, LV_ALIGN_CENTER, 0, -10);
+        if (update.ready_to_reboot) {
+            make_button(overlay_layer_, 112, 380, 240, 66, "RESTART NOW",
+                        kCyan, kVoid, update_restart_callback, this);
+        } else {
+            make_button(overlay_layer_, kSafeInset, 380, 170, 66, "CANCEL",
+                        kSurface, kPrimary, update_abort_callback, this);
+            make_button(overlay_layer_, 212, 380, 170, 66, "INSTALL",
+                        kCyan, kVoid, update_confirm_callback, this);
+        }
+        displayed_alert_kind_ = kUpdateOverlay;
+        return;
+    }
+    if (alert_card_ && displayed_alert_kind_ == kUpdateOverlay) {
+        lv_obj_clean(overlay_layer_);
+        lv_obj_add_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
+        alert_card_ = nullptr;
+        displayed_alert_kind_ = 0;
+    }
     if (connectivity.pairing_passkey_active &&
         kind == nightglass::services::AlertKind::none) {
         if (alert_card_ && displayed_alert_kind_ == kPairingOverlay) return;

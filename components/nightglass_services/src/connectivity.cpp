@@ -19,9 +19,11 @@
 #include "os/os_mbuf.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "nightglass/core/health.hpp"
 #include "nightglass/services/audio.hpp"
 #include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/power.hpp"
+#include "nightglass/services/update_transport.hpp"
 
 extern "C" void ble_store_config_init(void);
 
@@ -34,7 +36,7 @@ constexpr char kEnabledKey[] = "enabled";
 constexpr char kNameKey[] = "name";
 constexpr char kPeerIdentityKey[] = "peer_id";
 constexpr std::uint16_t kNoConnection = BLE_HS_CONN_HANDLE_NONE;
-constexpr std::size_t kMaxInboundFrame = 384;
+constexpr std::size_t kMaxInboundFrame = kUpdateTransportFrameMaximum;
 
 // UUIDs are stored least-significant byte first by NimBLE.
 static const ble_uuid128_t kServiceUuid = BLE_UUID128_INIT(
@@ -490,6 +492,16 @@ int gatt_access(std::uint16_t conn_handle, std::uint16_t attr_handle,
         copied != length) {
         return BLE_ATT_ERR_UNLIKELY;
     }
+    if (is_update_transport_frame(std::span(frame.data(), length))) {
+        UpdateTransportCommand command{};
+        const bool parsed = parse_update_transport_frame(std::span(frame.data(), length),
+                                                          command);
+        const bool queued = parsed && authorization_still_valid(authorization) &&
+                            update_transport().enqueue(command);
+        secure_wipe(&command, sizeof(command));
+        secure_wipe(frame.data(), frame.size());
+        return queued ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
     CompanionMessage message{};
     if (!parse_companion_message(std::span(frame.data(), length), message)) {
         secure_wipe(frame.data(), frame.size());
@@ -569,6 +581,7 @@ int gap_event(ble_gap_event *event, void *) {
             return 0;
         case BLE_GAP_EVENT_DISCONNECT: {
             invalidate_authorization();
+            update_transport().link_lost();
             connection_handle = kNoConnection;
             outbound_subscribed = false;
             portENTER_CRITICAL(&state_lock);
@@ -610,8 +623,10 @@ int gap_event(ble_gap_event *event, void *) {
                 }
                 if (authorized) {
                     establish_authorization(event->enc_change.conn_handle, candidate);
+                    update_transport().link_ready();
                 } else {
                     invalidate_authorization();
+                    update_transport().link_lost();
                 }
                 const auto pinned_after = pinned_peer_snapshot();
                 portENTER_CRITICAL(&state_lock);
@@ -786,12 +801,24 @@ nightglass::core::Status ConnectivityService::start() {
     if (!current.settings.enabled) {
         current.state = CompanionLinkState::disabled;
         set_detail_locked("Bluetooth disabled");
+        nightglass::core::health_registry().set(
+            "connectivity", nightglass::core::HealthState::degraded,
+            "Bluetooth disabled; OTA transport unavailable");
+        nightglass::core::health_registry().set(
+            "update_transport", nightglass::core::HealthState::failed,
+            "OTA transport requires Bluetooth");
         return nightglass::core::Status::Ok();
     }
     const auto initialized = nimble_port_init();
     if (initialized != ESP_OK) {
         current.state = CompanionLinkState::failed;
         set_detail_locked("Bluetooth initialization failed");
+        nightglass::core::health_registry().set(
+            "connectivity", nightglass::core::HealthState::failed,
+            "Bluetooth initialization failed");
+        nightglass::core::health_registry().set(
+            "update_transport", nightglass::core::HealthState::failed,
+            "OTA transport unavailable because Bluetooth failed");
         return {nightglass::core::StatusCode::degraded, "Bluetooth initialization failed"};
     }
     host_started = true;
@@ -810,10 +837,34 @@ nightglass::core::Status ConnectivityService::start() {
         ble_svc_gap_device_name_set(current.settings.device_name.data()) != 0) {
         current.state = CompanionLinkState::failed;
         set_detail_locked("Bluetooth service registration failed");
+        nightglass::core::health_registry().set(
+            "connectivity", nightglass::core::HealthState::failed,
+            "Bluetooth service registration failed");
+        nightglass::core::health_registry().set(
+            "update_transport", nightglass::core::HealthState::failed,
+            "OTA GATT service registration failed");
         return {nightglass::core::StatusCode::degraded, "Bluetooth service registration failed"};
     }
     ble_store_config_init();
+    const auto update_transport_status = update_transport().start(notify_outbound);
+    if (!update_transport_status.is_ok()) {
+        current.state = CompanionLinkState::failed;
+        set_detail_locked("Update transport unavailable");
+        nightglass::core::health_registry().set(
+            "connectivity", nightglass::core::HealthState::failed,
+            "Bluetooth started without OTA transport");
+        nightglass::core::health_registry().set(
+            "update_transport", nightglass::core::HealthState::failed,
+            update_transport_status.detail);
+        return update_transport_status;
+    }
     nimble_port_freertos_init(host_task);
+    nightglass::core::health_registry().set(
+        "connectivity", nightglass::core::HealthState::ok,
+        "Authenticated companion BLE service started");
+    nightglass::core::health_registry().set(
+        "update_transport", nightglass::core::HealthState::ok,
+        "Signed OTA transport worker started");
     ESP_LOGI(kTag, "Companion BLE service started; notification content logging disabled");
     return nightglass::core::Status::Ok();
 }

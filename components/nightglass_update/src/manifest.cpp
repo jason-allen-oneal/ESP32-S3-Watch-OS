@@ -59,7 +59,7 @@ ManifestStatus validate_manifest(const UpdateManifest &manifest,
         std::strcmp(manifest.app_version.data(), context.running_version) == 0) {
         return ManifestStatus::same_version;
     }
-    if (manifest.secure_version < context.running_secure_version) {
+    if (manifest.secure_version <= context.running_secure_version) {
         return ManifestStatus::secure_version_downgrade;
     }
     return ManifestStatus::ok;

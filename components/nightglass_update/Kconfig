@@ -29,4 +29,13 @@ config NIGHTGLASS_OTA_P256_PUBLIC_KEY_HEX
         malformed configured values install a rejecting sentinel. Both states
         fail closed before slot erase.
 
+config NIGHTGLASS_OTA_HIL_FORCE_HEALTH_FAILURE
+    bool "HIL ONLY: force the OTA essential-health gate to fail"
+    depends on NIGHTGLASS_OTA_ENABLED
+    default n
+    help
+        Build a uniquely versioned signed rollback-test image whose sixty-second
+        essential-health gate must reject the pending slot. Production release
+        verification refuses any resolved configuration with this enabled.
+
 endmenu

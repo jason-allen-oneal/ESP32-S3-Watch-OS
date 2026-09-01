@@ -92,6 +92,9 @@ private:
     static void audio_mute_callback(lv_event_t *event);
     static void audio_dnd_callback(lv_event_t *event);
     static void dismiss_alert_callback(lv_event_t *event);
+    static void update_confirm_callback(lv_event_t *event);
+    static void update_abort_callback(lv_event_t *event);
+    static void update_restart_callback(lv_event_t *event);
     static void diagnostics_callback(lv_event_t *event);
     static void about_callback(lv_event_t *event);
     static void face_action_callback(lv_event_t *event);

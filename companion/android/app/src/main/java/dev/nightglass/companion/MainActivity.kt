@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.*
 import android.os.Build
 import android.os.Bundle
+import android.net.Uri
 import android.provider.Settings
 import android.text.InputType
 import android.view.ViewGroup
@@ -14,10 +15,17 @@ import androidx.core.content.ContextCompat
 import dev.nightglass.companion.ble.NightglassConnectionService
 import dev.nightglass.companion.protocol.NightglassProtocol
 import dev.nightglass.companion.weather.PhoneWeatherProxy
+import dev.nightglass.companion.update.OtaPackageLoader
 
 class MainActivity : AppCompatActivity() {
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants -> if (grants.values.all { it }) connect() }
     private var resetReceiverRegistered = false
+    private var otaReceiverRegistered = false
+    private lateinit var otaStatus: TextView
+    private val packagePicker = registerForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) inspectAndConfirmPackage(uris)
+    }
     private val resetResultReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != NightglassConnectionService.ACTION_FORGET_RESULT) return
@@ -28,6 +36,17 @@ class MainActivity : AppCompatActivity() {
                     "Watch authorization reset acknowledged" else
                     "Watch authorization reset failed"
             Toast.makeText(this@MainActivity, detail, Toast.LENGTH_LONG).show()
+        }
+    }
+    private val otaProgressReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != NightglassConnectionService.ACTION_OTA_PROGRESS) return
+            val detail = intent.getStringExtra(NightglassConnectionService.EXTRA_OTA_DETAIL)
+                ?: "Update state unavailable"
+            val percent = intent.getIntExtra(NightglassConnectionService.EXTRA_OTA_PERCENT, 0)
+            otaStatus.text = if (intent.getBooleanExtra(
+                    NightglassConnectionService.EXTRA_OTA_ACTIVE, false))
+                "$detail — $percent%" else detail
         }
     }
     override fun onCreate(state: Bundle?) {
@@ -71,6 +90,26 @@ class MainActivity : AppCompatActivity() {
             finally { secret.fill('\u0000'); password.text?.clear() }
         } })
         root.addView(Button(this).apply { text = "Clear watch Wi-Fi"; setOnClickListener { NightglassConnectionService.send(this@MainActivity, NightglassProtocol.clearWifi()) } })
+        root.addView(TextView(this).apply {
+            text = "Signed watch update"; textSize = 20f; setPadding(0, pad, 0, 0)
+        })
+        root.addView(TextView(this).apply {
+            text = "Select firmware.bin, manifest.json, manifest.payload, and manifest.sig from the Nightglass release packager. The phone validates the package before confirmation; the watch independently verifies its signature and writes only the inactive OTA slot."
+        })
+        otaStatus = TextView(this).apply { text = "No update selected" }
+        root.addView(otaStatus)
+        root.addView(Button(this).apply {
+            text = "Select signed update package…"
+            setOnClickListener { packagePicker.launch(arrayOf("*/*")) }
+        })
+        root.addView(Button(this).apply {
+            text = "Abort update"
+            setOnClickListener {
+                ContextCompat.startForegroundService(this@MainActivity,
+                    Intent(this@MainActivity, NightglassConnectionService::class.java)
+                        .setAction(NightglassConnectionService.ACTION_CANCEL_OTA))
+            }
+        })
         setContentView(ScrollView(this).apply { addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)) })
     }
     private fun field(hintText: String) = EditText(this).apply { hint = hintText; setSingleLine(true) }
@@ -82,11 +121,21 @@ class MainActivity : AppCompatActivity() {
                 ContextCompat.RECEIVER_NOT_EXPORTED)
             resetReceiverRegistered = true
         }
+        if (!otaReceiverRegistered) {
+            ContextCompat.registerReceiver(this, otaProgressReceiver,
+                IntentFilter(NightglassConnectionService.ACTION_OTA_PROGRESS),
+                ContextCompat.RECEIVER_NOT_EXPORTED)
+            otaReceiverRegistered = true
+        }
     }
     override fun onStop() {
         if (resetReceiverRegistered) {
             unregisterReceiver(resetResultReceiver)
             resetReceiverRegistered = false
+        }
+        if (otaReceiverRegistered) {
+            unregisterReceiver(otaProgressReceiver)
+            otaReceiverRegistered = false
         }
         super.onStop()
     }
@@ -110,6 +159,36 @@ class MainActivity : AppCompatActivity() {
         permissions += listOf(Manifest.permission.READ_CALENDAR,
             Manifest.permission.READ_PHONE_STATE, Manifest.permission.ANSWER_PHONE_CALLS)
         permissionRequest.launch(permissions.toTypedArray())
+    }
+    private fun inspectAndConfirmPackage(uris: List<Uri>) {
+        otaStatus.text = "Validating selected package…"
+        Thread {
+            val result = runCatching { OtaPackageLoader.load(contentResolver, uris) }
+            runOnUiThread {
+                val pkg = result.getOrNull()
+                if (pkg == null) {
+                    otaStatus.text = "Package rejected: ${result.exceptionOrNull()?.message ?: "invalid package"}"
+                    return@runOnUiThread
+                }
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("Install signed Nightglass update?")
+                    .setMessage("Version: ${pkg.manifest.appVersion}\nSize: ${pkg.manifest.imageSize} bytes\n\nKeep the phone and watch nearby until validation reaches 100%.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Transfer update") { _, _ ->
+                        uris.forEach { uri -> runCatching {
+                            contentResolver.takePersistableUriPermission(uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        } }
+                        ContextCompat.startForegroundService(this,
+                            Intent(this, NightglassConnectionService::class.java)
+                                .setAction(NightglassConnectionService.ACTION_START_OTA)
+                                .putStringArrayListExtra(
+                                    NightglassConnectionService.EXTRA_OTA_URIS,
+                                    ArrayList(uris.map(Uri::toString))))
+                    }
+                    .show()
+            }
+        }.start()
     }
     private fun connect() { ContextCompat.startForegroundService(this, Intent(this, NightglassConnectionService::class.java).setAction(NightglassConnectionService.ACTION_CONNECT)) }
 }

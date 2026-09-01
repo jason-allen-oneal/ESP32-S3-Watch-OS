@@ -11,17 +11,20 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERIFIER = ROOT / "scripts" / "verify-release-config.py"
+PUBLIC_KEY = (ROOT / "config" / "ota-public-key.hex").read_text(encoding="ascii").strip()
 
 GOOD = {
     "CONFIG_ESP_COREDUMP_ENABLE_TO_NONE": "y",
     "CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION": "y",
     "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL": "98304",
     "CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT": "8",
-    "CONFIG_NIGHTGLASS_OTA_P256_PUBLIC_KEY_HEX": '""',
+    "CONFIG_NIGHTGLASS_OTA_P256_PUBLIC_KEY_HEX": f'"{PUBLIC_KEY}"',
 }
 UNSAFE = (
     ("CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST", "y"),
     ("CONFIG_NIGHTGLASS_OTA_ALLOW_UNSIGNED_DEVELOPMENT", "y"),
+    ("CONFIG_NIGHTGLASS_OTA_HIL_FORCE_HEALTH_FAILURE", "y"),
+    ("CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK", "y"),
     ("CONFIG_NIGHTGLASS_OTA_P256_PUBLIC_KEY_HEX", '"04deadbeef"'),
     ("CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH", "y"),
     ("CONFIG_ESP_COREDUMP_ENABLE_TO_UART", "y"),
@@ -61,6 +64,13 @@ def main() -> int:
         run(sdkconfig({name: value}), False)
     run(sdkconfig({"CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL": "65536"}), False)
     run(sdkconfig({"CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT": "32"}), False)
+    invalid_version = subprocess.run(
+        [sys.executable, str(VERIFIER), "/dev/null", "--secure-version", "0"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    assert invalid_version.returncode != 0
     print("Nightglass release config tests passed")
     return 0
 

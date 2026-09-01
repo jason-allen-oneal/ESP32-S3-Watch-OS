@@ -1,5 +1,19 @@
 cmake_minimum_required(VERSION 3.16)
 
+if(NOT DEFINED PROJECT_VER)
+    set(PROJECT_VER "0.2.0")
+endif()
+# Nightglass uses a signed, software-enforced monotonic update version without
+# enabling ESP-IDF's irreversible eFuse anti-rollback path. Defining the app
+# descriptor field at compile time keeps the version inside the signed image.
+set(NIGHTGLASS_APP_SECURE_VERSION "1" CACHE STRING
+    "Monotonic Nightglass signed-update version")
+if(NOT NIGHTGLASS_APP_SECURE_VERSION MATCHES "^[1-9][0-9]*$")
+    message(FATAL_ERROR "NIGHTGLASS_APP_SECURE_VERSION must be a positive integer")
+endif()
+add_compile_definitions(
+    CONFIG_BOOTLOADER_APP_SECURE_VERSION=${NIGHTGLASS_APP_SECURE_VERSION}
+)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(nightglass)
 
@@ -8,7 +22,8 @@ project(nightglass)
 # weakens a reviewed safety-critical setting.
 execute_process(
     COMMAND ${PYTHON} ${CMAKE_CURRENT_LIST_DIR}/scripts/verify-release-config.py
-            ${CMAKE_CURRENT_LIST_DIR}/sdkconfig
+            ${CMAKE_CURRENT_LIST_DIR}/sdkconfig --secure-version
+            ${NIGHTGLASS_APP_SECURE_VERSION}
     RESULT_VARIABLE NIGHTGLASS_RELEASE_CONFIG_RESULT
 )
 if(NOT NIGHTGLASS_RELEASE_CONFIG_RESULT EQUAL 0)

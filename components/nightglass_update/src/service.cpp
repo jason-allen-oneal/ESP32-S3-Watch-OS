@@ -95,9 +95,41 @@ bool constant_time_equal(const std::array<std::uint8_t, kSha256Size> &left,
     return difference == 0;
 }
 
+bool partition_hash_matches(const esp_partition_t *partition, std::uint32_t image_size,
+                            const std::array<std::uint8_t, kSha256Size> &expected) {
+    if (partition == nullptr || image_size == 0 || image_size > partition->size) return false;
+    mbedtls_sha256_context context{};
+    mbedtls_sha256_init(&context);
+    if (mbedtls_sha256_starts(&context, 0) != 0) {
+        mbedtls_sha256_free(&context);
+        return false;
+    }
+    std::array<std::uint8_t, 1024> buffer{};
+    std::uint32_t offset = 0;
+    while (offset < image_size) {
+        const auto count = std::min<std::uint32_t>(buffer.size(), image_size - offset);
+        if (esp_partition_read(partition, offset, buffer.data(), count) != ESP_OK ||
+            mbedtls_sha256_update(&context, buffer.data(), count) != 0) {
+            mbedtls_sha256_free(&context);
+            return false;
+        }
+        offset += count;
+        if ((offset & 0xffffU) == 0) taskYIELD();
+    }
+    std::array<std::uint8_t, kSha256Size> actual{};
+    const bool finished = mbedtls_sha256_finish(&context, actual.data()) == 0;
+    mbedtls_sha256_free(&context);
+    return finished && constant_time_equal(actual, expected);
+}
+
 bool required_health_is_ok() {
-    constexpr std::array<const char *, 6> required{
-        "nvs", "display", "touch", "power", "clock", "ui"};
+#if CONFIG_NIGHTGLASS_OTA_HIL_FORCE_HEALTH_FAILURE
+    ESP_LOGE(kTag, "OTA_HIL forced essential-health failure");
+    return false;
+#endif
+    constexpr std::array<const char *, 9> required{
+        "nvs", "display", "touch", "power", "clock", "ui",
+        "update_crypto", "connectivity", "update_transport"};
     for (const auto *name : required) {
         nightglass::core::HealthRecord record{};
         if (!nightglass::core::health_registry().copy(name, record)) return false;
@@ -148,6 +180,10 @@ void health_gate_task(void *) {
                 nightglass::core::health_registry().set(
                     "recovery", nightglass::core::HealthState::ok,
                     "pending image accepted after 60-second health gate");
+                auto accepted = instance.snapshot();
+                accepted.pending_verification = false;
+                publish(accepted);
+                ESP_LOGI(kTag, "OTA_HEALTH_ACCEPTED state=VALID pending=0");
             } else {
                 nightglass::core::health_registry().set(
                     "recovery", nightglass::core::HealthState::failed,
@@ -516,12 +552,30 @@ nightglass::core::Status UpdateService::finish() {
         return {nightglass::core::StatusCode::invalid_state,
                 "embedded app descriptor mismatch"};
     }
+    if (!partition_hash_matches(target_partition, active_manifest.image_size,
+                                active_manifest.image_sha256)) {
+        target_partition = nullptr;
+        set_failed(snapshot.signature_state, "inactive-slot readback SHA-256 mismatch");
+        return {nightglass::core::StatusCode::io_error,
+                "inactive-slot readback SHA-256 mismatch"};
+    }
+    const auto *selected_partition = target_partition;
     if (esp_ota_set_boot_partition(target_partition) != ESP_OK) {
         target_partition = nullptr;
         set_failed(snapshot.signature_state, "could not select validated OTA slot");
         return {nightglass::core::StatusCode::io_error,
                 "could not select validated OTA slot"};
     }
+
+    esp_ota_img_states_t selected_state = ESP_OTA_IMG_UNDEFINED;
+    const esp_err_t state_result =
+        esp_ota_get_state_partition(selected_partition, &selected_state);
+    ESP_LOGI(kTag,
+             "OTA_READY target=%s@0x%08lx state=%ld readback_sha256=verified bytes=%lu",
+             selected_partition->label,
+             static_cast<unsigned long>(selected_partition->address),
+             state_result == ESP_OK ? static_cast<long>(selected_state) : -1L,
+             static_cast<unsigned long>(active_manifest.image_size));
 
     target_partition = nullptr;
     active_manifest = {};

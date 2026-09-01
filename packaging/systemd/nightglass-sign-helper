@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+payload=/var/lib/nightglass-sign/inbox/manifest.payload
+output=/var/lib/nightglass-sign/outbox/manifest.sig
+temporary=/var/lib/nightglass-sign/outbox/manifest.sig.tmp
+credential="${CREDENTIALS_DIRECTORY:?}/nightglass-ota-signing-key"
+passphrase_fifo=/run/nightglass-sign/passphrase.fifo
+
+[[ -f "${payload}" && -f "${credential}" && -p "${passphrase_fifo}" ]]
+payload_size="$(stat -c '%s' "${payload}")"
+if (( payload_size < 64 || payload_size > 4096 )); then
+  echo "Refusing manifest payload outside reviewed bounds" >&2
+  exit 1
+fi
+
+rm -f "${temporary}"
+openssl dgst -sha256 -sign "${credential}" \
+  -passin "file:${passphrase_fifo}" \
+  -out "${temporary}" "${payload}"
+mv "${temporary}" "${output}"

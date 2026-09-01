@@ -48,6 +48,9 @@ int main(int argc, char **argv) {
     copy_text(manifest.app_version, "v0.2.0");
     assert(validate_manifest(manifest, context) == ManifestStatus::same_version);
     manifest = valid_manifest();
+    manifest.secure_version = context.running_secure_version;
+    assert(validate_manifest(manifest, context) == ManifestStatus::secure_version_downgrade);
+    manifest = valid_manifest();
     manifest.secure_version = 0;
     assert(validate_manifest(manifest, context) == ManifestStatus::secure_version_downgrade);
     manifest = valid_manifest();

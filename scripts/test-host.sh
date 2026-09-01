@@ -6,6 +6,7 @@ gyro_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gyro-test.XXXXXX")"
 time_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-time-test.XXXXXX")"
 face_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-face-test.XXXXXX")"
 connectivity_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-connectivity-test.XXXXXX")"
+update_transport_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-update-transport-test.XXXXXX")"
 activity_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-test.XXXXXX")"
 activity_units_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-units-test.XXXXXX")"
 day_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-day-test.XXXXXX")"
@@ -15,10 +16,11 @@ audio_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-audio-test.XXXXXX")"
 update_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-update-test.XXXXXX")"
 verifier_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-verifier-test.XXXXXX")"
 clock_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-clock-policy-test.XXXXXX")"
-trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}"' EXIT
+trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${update_transport_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}"' EXIT
 
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
 python3 -B "${project_dir}/tests/ota_state_inspector_test.py"
+python3 -B "${project_dir}/tests/ota_hil_evidence_test.py"
 python3 -B "${project_dir}/tests/release_config_test.py"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
@@ -56,6 +58,14 @@ python3 -B "${project_dir}/tests/release_config_test.py"
   "${project_dir}/tests/connectivity_protocol_test.cpp" \
   -o "${connectivity_binary}"
 "${connectivity_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  -I"${project_dir}/components/nightglass_update/include" \
+  "${project_dir}/components/nightglass_services/src/update_transport_protocol.cpp" \
+  "${project_dir}/tests/update_transport_protocol_test.cpp" \
+  -o "${update_transport_binary}"
+"${update_transport_binary}"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \

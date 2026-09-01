@@ -76,6 +76,14 @@ object NightglassProtocol {
                                  val replyable: Boolean = false)
     data class AgendaEvent(val startEpochSeconds: Long, val endEpochSeconds: Long,
                            val title: String, val location: String, val allDay: Boolean)
+    data class OtaManifest(val formatVersion: Long, val boardId: String,
+                           val partitionId: String, val partitionRevision: Long,
+                           val appVersion: String, val secureVersion: Long,
+                           val imageSize: Long, val imageSha256: ByteArray,
+                           val signature: ByteArray)
+    data class OtaStatus(val session: ULong, val state: Int, val signatureState: Int,
+                         val result: Int, val expectedBytes: Long,
+                         val receivedBytes: Long)
     sealed interface WatchAction {
         data class Media(val sequence: Int, val command: Int): WatchAction
         data class Notification(val sequence: Int, val id: UInt, val dismiss: Boolean): WatchAction
@@ -215,6 +223,69 @@ object NightglassProtocol {
     }
     fun clearWifi() = byteArrayOf(VERSION, 0x22)
     fun forgetPeerAuthorization() = byteArrayOf(VERSION, 0x25)
+
+    private fun canonicalOtaText(value: String, maximum: Int): ByteArray {
+        val bytes = value.toByteArray(Charsets.US_ASCII)
+        require(bytes.isNotEmpty() && bytes.size <= maximum)
+        require(bytes.all { (it.toInt() and 0xff) in 0x21..0x7e && it != '\\'.code.toByte() &&
+            it != '='.code.toByte() })
+        return bytes
+    }
+
+    fun otaBegin(session: ULong, manifest: OtaManifest): ByteArray {
+        require(session != 0uL && manifest.formatVersion in 1..UInt.MAX_VALUE.toLong())
+        require(manifest.partitionRevision in 1..UInt.MAX_VALUE.toLong())
+        require(manifest.secureVersion in 0..UInt.MAX_VALUE.toLong())
+        require(manifest.imageSize in 1..6L * 1024 * 1024)
+        require(manifest.imageSha256.size == 32)
+        require(manifest.signature.size in 8..72)
+        val board = canonicalOtaText(manifest.boardId, 47)
+        val partition = canonicalOtaText(manifest.partitionId, 31)
+        val version = canonicalOtaText(manifest.appVersion, 31)
+        val size = 62 + board.size + partition.size + version.size + manifest.signature.size
+        require(size <= 244)
+        return ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x30).putLong(session.toLong())
+            .putInt(manifest.formatVersion.toInt())
+            .putInt(manifest.partitionRevision.toInt())
+            .putInt(manifest.secureVersion.toInt()).putInt(manifest.imageSize.toInt())
+            .put(manifest.imageSha256).put(board.size.toByte()).put(partition.size.toByte())
+            .put(version.size.toByte()).put(manifest.signature.size.toByte())
+            .put(board).put(partition).put(version).put(manifest.signature).array()
+    }
+
+    fun otaData(session: ULong, offset: Long, data: ByteArray): ByteArray {
+        require(session != 0uL && offset in 0..UInt.MAX_VALUE.toLong() && data.size in 1..230)
+        return ByteBuffer.allocate(14 + data.size).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x31).putLong(session.toLong()).putInt(offset.toInt())
+            .put(data).array()
+    }
+
+    fun otaFinish(session: ULong) = otaControl(0x32, session)
+    fun otaAbort(session: ULong) = otaControl(0x33, session)
+    fun otaStatusQuery(session: ULong) = otaControl(0x34, session)
+    private fun otaControl(opcode: Int, session: ULong): ByteArray {
+        require(session != 0uL)
+        return ByteBuffer.allocate(10).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(opcode.toByte()).putLong(session.toLong()).array()
+    }
+
+    fun parseOtaStatus(frame: ByteArray): OtaStatus? {
+        if (frame.size != 22 || frame[0] != VERSION ||
+            (frame[1].toInt() and 0xff) != 0x35 || frame[13].toInt() != 0) return null
+        val input = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN)
+        input.position(2)
+        val session = input.long.toULong()
+        val state = input.get().toInt() and 0xff
+        val signatureState = input.get().toInt() and 0xff
+        val result = input.get().toInt() and 0xff
+        input.get()
+        val expected = input.int.toUInt().toLong()
+        val received = input.int.toUInt().toLong()
+        if (session == 0uL || state !in 0..4 || signatureState !in 0..4 ||
+            result !in 0..9 || received > expected) return null
+        return OtaStatus(session, state, signatureState, result, expected, received)
+    }
 
     fun phoneWeather(observedEpochSeconds: Long, metric: Boolean, isDay: Boolean,
                      temperature: Double, apparentTemperature: Double,
