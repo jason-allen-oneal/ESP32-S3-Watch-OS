@@ -167,5 +167,11 @@ struct EncodedReply {
 [[nodiscard]] bool valid_peer_identity(const CompanionPeerIdentity &identity) noexcept;
 [[nodiscard]] bool peer_identity_matches(const CompanionPeerIdentity &expected,
                                          const CompanionPeerIdentity &candidate) noexcept;
+[[nodiscard]] bool authorization_matches(std::uint16_t expected_connection_handle,
+                                         std::uint32_t expected_generation,
+                                         const CompanionPeerIdentity &expected_peer,
+                                         std::uint16_t candidate_connection_handle,
+                                         std::uint32_t candidate_generation,
+                                         const CompanionPeerIdentity &candidate_peer) noexcept;
 
 }  // namespace nightglass::services

@@ -20,10 +20,14 @@ companion adapter.
   plus the bidirectional identity pins protect the radio link, but compromise
   of the Android companion process/UID, phone root, watch firmware, or BLE key
   storage remains in scope for a future authenticated application session.
-- Peer reset opcode `0x25` is accepted only over the currently authorized link.
-  It clears the watch identity pin before Android clears its local address pin;
-  offline/local-only reset is refused. The user must then remove the Android
-  system bond before a replacement or reinstalled companion can pair.
+- Peer reset opcode `0x25` is accepted only when the callback connection handle,
+  resolved peer identity, and authorization generation still match immediately
+  before the NVS clear. It clears the watch identity pin before Android clears
+  its local address pin; Android reports success only after the GATT write ACK.
+  The command arms one RAM-only repeat-pair permit for that same identity.
+  Without that explicit authenticated reset, repeat-pair requests never delete
+  bond keys. Offline/local-only reset is refused. The user must then remove the
+  Android system bond before pairing again.
 - Notification and command characteristics require link encryption.
 - Notification content is never written to logs or NVS. The six-item inbox is
   RAM-only and disappears on reboot.
@@ -50,8 +54,11 @@ companion adapter.
 
 Service UUID: `7a3b4001-6b6f-4f72-726f-772d6e696768`
 
-- Status `...4002`: encrypted read/notify. Five bytes: protocol version, link
-  state, inbox count, encrypted flag, bonded flag.
+- Status `...4002`: authenticated encrypted read/notify. Six bytes: protocol
+  version, link state, inbox count, encrypted flag, bonded flag, watch-side peer
+  identity-pinned flag. Android does not mark the link ready or persist its
+  address pin until an exact status read proves `connected_encrypted` with all
+  three authorization flags set.
 - Phone-to-watch `...4003`: encrypted write of a complete bounded frame.
 - Watch-to-phone `...4004`: encrypted notification carrying media and inbox
   actions.

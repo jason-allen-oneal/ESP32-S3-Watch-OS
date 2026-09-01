@@ -69,9 +69,6 @@ public:
     // immediately scrubs cached notification text; relaxing it does not
     // resurrect prior content and requires a fresh companion sync.
     void set_notification_privacy(NotificationPrivacyPolicy policy, bool unlocked);
-    // Recovery hook only. Callers must provide their own explicit user
-    // confirmation before clearing the allowlisted phone identity.
-    nightglass::core::Status clear_pinned_peer();
 };
 
 ConnectivityService &connectivity_service();

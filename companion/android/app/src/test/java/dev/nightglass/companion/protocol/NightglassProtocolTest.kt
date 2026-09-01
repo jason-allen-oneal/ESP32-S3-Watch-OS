@@ -4,6 +4,22 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NightglassProtocolTest {
+    @Test fun watchStatusRequiresExactAuthorizedProof() {
+        val authorized = NightglassProtocol.parseWatchStatus(
+            byteArrayOf(1, 3, 2, 1, 1, 1))
+        assertNotNull(authorized)
+        assertTrue(authorized!!.authorized)
+        assertFalse(NightglassProtocol.parseWatchStatus(
+            byteArrayOf(1, 2, 2, 1, 1, 1))!!.authorized)
+        assertFalse(NightglassProtocol.parseWatchStatus(
+            byteArrayOf(1, 3, 2, 1, 1, 0))!!.authorized)
+        assertNull(NightglassProtocol.parseWatchStatus(byteArrayOf(1, 3, 2, 1, 1)))
+        assertNull(NightglassProtocol.parseWatchStatus(
+            byteArrayOf(1, 3, 2, 1, 1, 2)))
+        assertNull(NightglassProtocol.parseWatchStatus(
+            byteArrayOf(1, 3, 7, 1, 1, 1)))
+    }
+
     @Test fun upsertMatchesFirmwareLayoutAndBounds() {
         val frame = NightglassProtocol.upsert(NightglassProtocol.RelayNotification(0x78563412u, 1, "app", "title", "x".repeat(120), true))
         assertArrayEquals(byteArrayOf(1, 1, 0x12, 0x34, 0x56, 0x78, 0xC1.toByte(), 3, 5, 96, 0), frame.copyOfRange(0, 11))

@@ -102,6 +102,11 @@ int main() {
     assert(peer_identity_matches(pinned, same));
     assert(!peer_identity_matches(pinned, wrong));
     assert(!valid_peer_identity(CompanionPeerIdentity{}));
+    assert(authorization_matches(7, 11, pinned, 7, 11, same));
+    assert(!authorization_matches(7, 11, pinned, 8, 11, same));
+    assert(!authorization_matches(7, 11, pinned, 7, 12, same));
+    assert(!authorization_matches(7, 11, pinned, 7, 11, wrong));
+    assert(!authorization_matches(7, 0, pinned, 7, 0, same));
 
     const std::array<std::uint8_t, 18> proxy{
         1, 0x23, 0x03, 0,

@@ -11,6 +11,25 @@ object NightglassProtocol {
     val WATCH_TO_PHONE: UUID = UUID.fromString("7a3b4004-6b6f-4f72-726f-772d6e696768")
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     const val VERSION: Byte = 1
+    private const val CONNECTED_ENCRYPTED = 3
+
+    data class WatchStatus(val state: Int, val notificationCount: Int,
+                           val encrypted: Boolean, val bonded: Boolean,
+                           val peerIdentityPinned: Boolean) {
+        val authorized: Boolean
+            get() = state == CONNECTED_ENCRYPTED && encrypted && bonded &&
+                peerIdentityPinned
+    }
+
+    fun parseWatchStatus(frame: ByteArray): WatchStatus? {
+        if (frame.size != 6 || frame[0] != VERSION) return null
+        val state = frame[1].toInt() and 0xff
+        val notificationCount = frame[2].toInt() and 0xff
+        val flags = frame.copyOfRange(3, 6).map { it.toInt() and 0xff }
+        if (state !in 0..4 || notificationCount > 6 || flags.any { it !in 0..1 }) return null
+        return WatchStatus(state, notificationCount, flags[0] != 0, flags[1] != 0,
+            flags[2] != 0)
+    }
 
     /** Wrap-safe 16-bit replay window; accepts only the next forward half-space. */
     fun acceptsForwardSequence(last: Int, candidate: Int): Boolean {

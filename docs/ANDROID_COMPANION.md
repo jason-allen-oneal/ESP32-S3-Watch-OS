@@ -11,8 +11,10 @@ and uses the platform BLE, notification-listener, and media APIs.
    foreground service scans only for the Nightglass service UUID and maintains
    the connection. Enter the random six-digit passkey displayed by the watch.
    The current watch requires authenticated LE Secure Connections and pins the
-   resolved phone identity after that visible pairing; Android pins the watch
-   address after the authenticated GATT subscription succeeds.
+   resolved phone identity after that visible pairing. After subscribing,
+   Android reads the status characteristic and pins the watch address only when
+   the watch reports its exact `connected_encrypted`, bonded, peer-pinned
+   authorization state for that connection.
 3. Tap **Grant notification access** and enable Nightglass in Android settings.
    Eligible notifications are relayed with the protocol's 24/48/96-byte bounds.
    Ongoing notifications, group summaries, and the companion's own notification
@@ -27,13 +29,16 @@ not convert a pre-existing bond into an identity pin without a newly displayed
 passkey. Clearing only the Android app's pinned address is not sufficient; the
 system bond must also be removed before pairing again.
 
-**Reset pinned watch** must be used while the authorized watch is connected.
-It sends the watch-side clear command first and clears Android's local pin only
-after the GATT write succeeds. It deliberately refuses an offline local-only
-reset, which would leave the two sides with contradictory allowlists. If the
-authorized phone is permanently unavailable, recovery requires the explicit
-USB/service path that calls `ConnectivityService::clear_pinned_peer()`; there is
-no unauthenticated radio reset.
+**Reset and re-pair watch** presents an explicit destructive confirmation and
+must be used while the authorized watch is connected. It sends the watch-side
+clear command first and reports success or clears Android's local pin only
+after the watch returns the GATT write acknowledgement. The watch then permits
+exactly one repeat-pair key replacement from that same peer identity; arbitrary
+repeat-pair requests never delete keys. It deliberately refuses an offline
+local-only reset, which would leave the two sides with contradictory
+allowlists. If the authorized phone is permanently unavailable, recovery
+requires a separately controlled USB service/recovery operation; there is no
+unauthenticated radio reset.
 
 Call control frames bind each command to a random call session, a state
 generation, and a wrap-safe command sequence. Microphone control is explicit

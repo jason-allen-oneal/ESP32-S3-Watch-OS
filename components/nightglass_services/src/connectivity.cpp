@@ -66,6 +66,17 @@ std::int64_t reply_started_us{};
 CompanionPeerIdentity pinned_peer{};
 bool pairing_confirmation_seen{};
 
+struct AuthorizationToken {
+    std::uint16_t connection_handle{kNoConnection};
+    std::uint32_t generation{0};
+    CompanionPeerIdentity peer{};
+};
+
+AuthorizationToken active_authorization{};
+std::uint32_t authorization_generation{1};
+CompanionPeerIdentity one_shot_repair_peer{};
+bool one_shot_repair_armed{};
+
 void secure_wipe(void *memory, std::size_t length) {
     auto *bytes = static_cast<volatile std::uint8_t *>(memory);
     while (length--) *bytes++ = 0;
@@ -164,6 +175,123 @@ void set_pinned_peer(const CompanionPeerIdentity &identity) {
     portEXIT_CRITICAL(&peer_lock);
 }
 
+std::uint32_t next_authorization_generation_locked() {
+    if (++authorization_generation == 0) ++authorization_generation;
+    return authorization_generation;
+}
+
+void invalidate_authorization() {
+    portENTER_CRITICAL(&peer_lock);
+    active_authorization = {};
+    (void)next_authorization_generation_locked();
+    portEXIT_CRITICAL(&peer_lock);
+}
+
+void establish_authorization(std::uint16_t handle,
+                             const CompanionPeerIdentity &identity) {
+    portENTER_CRITICAL(&peer_lock);
+    active_authorization.connection_handle = handle;
+    active_authorization.generation = next_authorization_generation_locked();
+    active_authorization.peer = identity;
+    portEXIT_CRITICAL(&peer_lock);
+}
+
+bool resolve_authorization(std::uint16_t handle, AuthorizationToken &token) {
+    ble_gap_conn_desc descriptor{};
+    if (handle == kNoConnection || ble_gap_conn_find(handle, &descriptor) != 0 ||
+        !descriptor.sec_state.encrypted || !descriptor.sec_state.authenticated ||
+        !descriptor.sec_state.bonded) {
+        return false;
+    }
+    const auto candidate = peer_identity(descriptor.peer_id_addr);
+    portENTER_CRITICAL(&peer_lock);
+    const auto grant = active_authorization;
+    const auto expected = pinned_peer;
+    const bool authorized = valid_peer_identity(expected) &&
+                            peer_identity_matches(expected, candidate) &&
+                            authorization_matches(grant.connection_handle, grant.generation,
+                                                  grant.peer, handle, grant.generation,
+                                                  candidate);
+    if (authorized) token = grant;
+    portEXIT_CRITICAL(&peer_lock);
+    return authorized;
+}
+
+bool authorization_still_valid(const AuthorizationToken &token) {
+    ble_gap_conn_desc descriptor{};
+    if (token.connection_handle == kNoConnection || token.generation == 0 ||
+        ble_gap_conn_find(token.connection_handle, &descriptor) != 0 ||
+        !descriptor.sec_state.encrypted || !descriptor.sec_state.authenticated ||
+        !descriptor.sec_state.bonded) {
+        return false;
+    }
+    const auto candidate = peer_identity(descriptor.peer_id_addr);
+    portENTER_CRITICAL(&peer_lock);
+    const auto grant = active_authorization;
+    const auto expected = pinned_peer;
+    const bool authorized = valid_peer_identity(expected) &&
+                            peer_identity_matches(expected, candidate) &&
+                            authorization_matches(grant.connection_handle, grant.generation,
+                                                  grant.peer, token.connection_handle,
+                                                  token.generation, token.peer) &&
+                            peer_identity_matches(token.peer, candidate);
+    portEXIT_CRITICAL(&peer_lock);
+    return authorized;
+}
+
+bool consume_one_shot_repair(const CompanionPeerIdentity &candidate) {
+    portENTER_CRITICAL(&peer_lock);
+    const bool allowed = one_shot_repair_armed &&
+                         peer_identity_matches(one_shot_repair_peer, candidate);
+    if (allowed) {
+        one_shot_repair_armed = false;
+        one_shot_repair_peer = {};
+    }
+    portEXIT_CRITICAL(&peer_lock);
+    return allowed;
+}
+
+nightglass::core::Status clear_pinned_peer_for_repair(
+    const AuthorizationToken &authorization) {
+    // GATT and GAP callbacks run on the NimBLE host task. Rechecking here,
+    // immediately before the NVS side effect, prevents a stale parsed frame
+    // from clearing the allowlist after its connection authorization changed.
+    if (!authorization_still_valid(authorization)) {
+        return {nightglass::core::StatusCode::invalid_state,
+                "Companion authorization changed before reset"};
+    }
+    nvs_handle_t nvs_handle{};
+    auto result = nvs_open(kNamespace, NVS_READWRITE, &nvs_handle);
+    if (result == ESP_OK) {
+        result = nvs_erase_key(nvs_handle, kPeerIdentityKey);
+        if (result == ESP_ERR_NVS_NOT_FOUND) result = ESP_OK;
+        if (result == ESP_OK) result = nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+    }
+    if (result != ESP_OK) {
+        return {nightglass::core::StatusCode::io_error,
+                "Pinned companion was not cleared"};
+    }
+
+    portENTER_CRITICAL(&peer_lock);
+    pinned_peer = {};
+    one_shot_repair_peer = authorization.peer;
+    one_shot_repair_armed = true;
+    active_authorization = {};
+    (void)next_authorization_generation_locked();
+    portEXIT_CRITICAL(&peer_lock);
+
+    portENTER_CRITICAL(&state_lock);
+    current.peer_identity_pinned = false;
+    current.encrypted = false;
+    current.bonded = false;
+    current.state = CompanionLinkState::connected_unsecured;
+    set_detail_locked("Authorization cleared; re-pair once");
+    ++current.sequence;
+    portEXIT_CRITICAL(&state_lock);
+    return nightglass::core::Status::Ok();
+}
+
 bool notification_details_redacted_locked() {
     return current.notification_privacy == NotificationPrivacyPolicy::always_redact ||
            (current.notification_privacy == NotificationPrivacyPolicy::redact_when_locked &&
@@ -215,7 +343,9 @@ SoundCue notification_cue(NotificationCategory category) {
     return SoundCue::notification;
 }
 
-bool apply_message(const CompanionMessage &message) {
+bool apply_message(const CompanionMessage &message,
+                   const AuthorizationToken &authorization) {
+    if (!authorization_still_valid(authorization)) return false;
     if (message.kind == CompanionMessageKind::media_state) {
         portENTER_CRITICAL(&state_lock);
         current.media = message.media;
@@ -269,7 +399,7 @@ bool apply_message(const CompanionMessage &message) {
         return network_weather_service().clear_credentials().is_ok();
     }
     if (message.kind == CompanionMessageKind::peer_forget) {
-        return instance.clear_pinned_peer().is_ok();
+        return clear_pinned_peer_for_repair(authorization).is_ok();
     }
     if (message.kind == CompanionMessageKind::weather_settings) {
         NetworkWeatherSettings settings{};
@@ -333,23 +463,25 @@ bool apply_message(const CompanionMessage &message) {
     return true;
 }
 
-int gatt_access(std::uint16_t, std::uint16_t attr_handle, ble_gatt_access_ctxt *context,
+int gatt_access(std::uint16_t conn_handle, std::uint16_t attr_handle,
+                ble_gatt_access_ctxt *context,
                 void *) {
+    AuthorizationToken authorization{};
+    if (!resolve_authorization(conn_handle, authorization)) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+    }
     if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attr_handle == status_handle) {
         const auto snapshot = instance.snapshot();
-        const std::array<std::uint8_t, 5> status{
+        const std::array<std::uint8_t, 6> status{
             kCompanionProtocolVersion, static_cast<std::uint8_t>(snapshot.state),
             snapshot.notification_count, snapshot.encrypted ? std::uint8_t{1} : std::uint8_t{0},
-            snapshot.bonded ? std::uint8_t{1} : std::uint8_t{0}};
+            snapshot.bonded ? std::uint8_t{1} : std::uint8_t{0},
+            snapshot.peer_identity_pinned ? std::uint8_t{1} : std::uint8_t{0}};
         return os_mbuf_append(context->om, status.data(), status.size()) == 0
                    ? 0
                    : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     if (context->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_UNLIKELY;
-    const auto link = instance.snapshot();
-    if (!link.encrypted || !link.bonded || !link.peer_identity_pinned) {
-        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
-    }
     const auto length = static_cast<std::size_t>(OS_MBUF_PKTLEN(context->om));
     if (length == 0 || length > kMaxInboundFrame) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     std::array<std::uint8_t, kMaxInboundFrame> frame{};
@@ -363,7 +495,10 @@ int gatt_access(std::uint16_t, std::uint16_t attr_handle, ble_gatt_access_ctxt *
         secure_wipe(frame.data(), frame.size());
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
-    const bool applied = apply_message(message);
+    // Parsing is side-effect free. Bind the frame to the same authorized
+    // connection generation again immediately before applying it.
+    const bool applied = authorization_still_valid(authorization) &&
+                         apply_message(message, authorization);
     secure_wipe(&message, sizeof(message));
     secure_wipe(frame.data(), frame.size());
     return applied ? 0 : BLE_ATT_ERR_UNLIKELY;
@@ -398,6 +533,7 @@ int gap_event(ble_gap_event *event, void *) {
     switch (event->type) {
         case BLE_GAP_EVENT_CONNECT:
             if (event->connect.status == 0) {
+                invalidate_authorization();
                 connection_handle = event->connect.conn_handle;
                 // Wearable-oriented parameters: 40-60 ms connection interval
                 // with peripheral latency 4 gives a bounded ~300 ms worst-case
@@ -432,6 +568,7 @@ int gap_event(ble_gap_event *event, void *) {
             }
             return 0;
         case BLE_GAP_EVENT_DISCONNECT: {
+            invalidate_authorization();
             connection_handle = kNoConnection;
             outbound_subscribed = false;
             portENTER_CRITICAL(&state_lock);
@@ -471,10 +608,16 @@ int gap_event(ble_gap_event *event, void *) {
                         authorized = true;
                     }
                 }
+                if (authorized) {
+                    establish_authorization(event->enc_change.conn_handle, candidate);
+                } else {
+                    invalidate_authorization();
+                }
+                const auto pinned_after = pinned_peer_snapshot();
                 portENTER_CRITICAL(&state_lock);
                 current.encrypted = authorized;
                 current.bonded = authorized;
-                current.peer_identity_pinned = authorized || valid_peer_identity(expected);
+                current.peer_identity_pinned = valid_peer_identity(pinned_after);
                 current.state = current.encrypted ? CompanionLinkState::connected_encrypted
                                                   : CompanionLinkState::connected_unsecured;
                 set_detail_locked(current.encrypted ? "Pinned companion authenticated"
@@ -489,11 +632,7 @@ int gap_event(ble_gap_event *event, void *) {
                 ++current.notification_sequence;
                 portEXIT_CRITICAL(&state_lock);
                 pairing_confirmation_seen = false;
-                if (descriptor.sec_state.encrypted && !descriptor.sec_state.authenticated) {
-                    (void)ble_store_util_delete_peer(&descriptor.peer_id_addr);
-                    (void)ble_gap_terminate(event->enc_change.conn_handle,
-                                            BLE_ERR_REM_USER_CONN_TERM);
-                } else if (!authorized) {
+                if (!authorized) {
                     (void)ble_gap_terminate(event->enc_change.conn_handle,
                                             BLE_ERR_REM_USER_CONN_TERM);
                 }
@@ -530,9 +669,9 @@ int gap_event(ble_gap_event *event, void *) {
             }
             return 0;
         case BLE_GAP_EVENT_REPEAT_PAIRING: {
-            // The peer has forgotten or replaced its keys while Nightglass
-            // still has the previous bond. Delete only that peer's stale bond
-            // and let NimBLE restart secure pairing on the existing link.
+            // Bond keys are never deleted merely because a peer asks to pair
+            // again. The sole exception is the same identity after an
+            // authenticated 0x25 reset explicitly armed one retry in RAM.
             ble_gap_conn_desc descriptor{};
             const auto find_result =
                 ble_gap_conn_find(event->repeat_pairing.conn_handle, &descriptor);
@@ -541,10 +680,8 @@ int gap_event(ble_gap_event *event, void *) {
                 return BLE_GAP_REPEAT_PAIRING_IGNORE;
             }
             const auto candidate = peer_identity(descriptor.peer_id_addr);
-            const auto expected = pinned_peer_snapshot();
-            if (valid_peer_identity(expected) &&
-                !peer_identity_matches(expected, candidate)) {
-                ESP_LOGW(kTag, "Rejected repeat pairing from unpinned peer identity");
+            if (!consume_one_shot_repair(candidate)) {
+                ESP_LOGW(kTag, "Rejected repeat pairing without reset authorization");
                 return BLE_GAP_REPEAT_PAIRING_IGNORE;
             }
             const auto delete_result = ble_store_util_delete_peer(&descriptor.peer_id_addr);
@@ -552,7 +689,7 @@ int gap_event(ble_gap_event *event, void *) {
                 ESP_LOGE(kTag, "Unable to remove stale companion bond: %d", delete_result);
                 return BLE_GAP_REPEAT_PAIRING_IGNORE;
             }
-            ESP_LOGI(kTag, "Removed stale companion bond; retrying secure pairing");
+            ESP_LOGI(kTag, "Consumed reset authorization; retrying secure pairing");
             return BLE_GAP_REPEAT_PAIRING_RETRY;
         }
         case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -603,6 +740,7 @@ void advertise() {
 
 void on_reset(int reason) {
     ESP_LOGE(kTag, "NimBLE reset: %d", reason);
+    invalidate_authorization();
     portENTER_CRITICAL(&state_lock);
     current.state = CompanionLinkState::failed;
     set_detail_locked("Bluetooth stack reset");
@@ -637,6 +775,11 @@ bool notify_outbound(const std::uint8_t *data, std::size_t length) {
 
 nightglass::core::Status ConnectivityService::start() {
     current = {};
+    invalidate_authorization();
+    portENTER_CRITICAL(&peer_lock);
+    one_shot_repair_peer = {};
+    one_shot_repair_armed = false;
+    portEXIT_CRITICAL(&peer_lock);
     current.settings = load_settings();
     set_pinned_peer(load_pinned_peer());
     current.peer_identity_pinned = valid_peer_identity(pinned_peer_snapshot());
@@ -708,6 +851,7 @@ nightglass::core::Status ConnectivityService::update_settings(
     }
     ble_svc_gap_device_name_set(settings.device_name.data());
     if (!settings.enabled) {
+        invalidate_authorization();
         if (ble_gap_adv_active()) ble_gap_adv_stop();
         const auto handle = connection_handle.load();
         if (handle != kNoConnection) ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
@@ -808,34 +952,6 @@ void ConnectivityService::set_notification_privacy(NotificationPrivacyPolicy pol
     }
     ++current.sequence;
     portEXIT_CRITICAL(&state_lock);
-}
-
-nightglass::core::Status ConnectivityService::clear_pinned_peer() {
-    nvs_handle_t nvs_handle{};
-    auto result = nvs_open(kNamespace, NVS_READWRITE, &nvs_handle);
-    if (result == ESP_OK) {
-        result = nvs_erase_key(nvs_handle, kPeerIdentityKey);
-        if (result == ESP_ERR_NVS_NOT_FOUND) result = ESP_OK;
-        if (result == ESP_OK) result = nvs_commit(nvs_handle);
-        nvs_close(nvs_handle);
-    } else if (result == ESP_ERR_NVS_NOT_FOUND) {
-        result = ESP_OK;
-    }
-    if (result != ESP_OK) {
-        return {nightglass::core::StatusCode::io_error, "Pinned companion was not cleared"};
-    }
-    set_pinned_peer({});
-    portENTER_CRITICAL(&state_lock);
-    current.peer_identity_pinned = false;
-    current.encrypted = false;
-    current.bonded = false;
-    if (connection_handle.load() != kNoConnection) {
-        current.state = CompanionLinkState::connected_unsecured;
-        set_detail_locked("Companion authorization cleared");
-    }
-    ++current.sequence;
-    portEXIT_CRITICAL(&state_lock);
-    return nightglass::core::Status::Ok();
 }
 
 ConnectivityService &connectivity_service() { return instance; }

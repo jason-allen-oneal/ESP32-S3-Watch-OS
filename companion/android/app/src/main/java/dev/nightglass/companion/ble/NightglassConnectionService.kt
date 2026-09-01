@@ -30,7 +30,10 @@ class NightglassConnectionService : Service() {
         const val ACTION_WRITE = "dev.nightglass.WRITE"
         const val ACTION_REFRESH_WEATHER = "dev.nightglass.REFRESH_WEATHER"
         const val ACTION_FORGET_PIN = "dev.nightglass.FORGET_PIN"
+        const val ACTION_FORGET_RESULT = "dev.nightglass.FORGET_RESULT"
         const val EXTRA_FRAME = "frame"
+        const val EXTRA_FORGET_SUCCESS = "forget_success"
+        const val EXTRA_FORGET_DETAIL = "forget_detail"
         const val CHANNEL = "nightglass_connection"
         private const val PREFS = "nightglass_link"
         private const val PINNED_ADDRESS = "pinned_address"
@@ -51,6 +54,7 @@ class NightglassConnectionService : Service() {
     private var writePending = false
     private var pendingOpcode = -1
     private var linkReady = false
+    private var authorizationProofPending = false
     private var lastActionSequence = 0
     private var forgetPending = false
     private val reconnectHandler = Handler(Looper.getMainLooper())
@@ -239,36 +243,28 @@ class NightglassConnectionService : Service() {
                 recoverDeadLink(client)
                 return
             }
-            reconnectAttempt = 0
-            synchronized(writes) {
-                linkReady = true
-                PhoneWeatherProxy.load(this@NightglassConnectionService)?.let { config ->
-                    val settings = NightglassProtocol.configureWeather(
-                        true, true, config.metric, config.refreshMinutes,
-                        config.latitudeE6, config.longitudeE6)
-                    if (writes.size >= 32) writes.removeLast()
-                    writes.addFirst(settings)
-                }
-                writeNextLocked()
-            }
-            Log.i(TAG, "Secure Nightglass link ready")
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putString(PINNED_ADDRESS, client.device.address).apply()
-            update("Nightglass connected")
-            // Rebuild the phone's active-notification cache as silent sync
-            // frames. Live posts received while the link was unavailable are
-            // never replayed later as surprise audible alerts.
-            NightglassNotificationListener.syncCurrent()
-            NightglassNotificationListener.syncMedia()
-            phoneIntegrations.refreshAll()
-            scheduleWeatherRefresh(0)
+            requestAuthorizationProof(client)
+        }
+        @Deprecated("API compatibility")
+        override fun onCharacteristicRead(client: BluetoothGatt,
+                                          characteristic: BluetoothGattCharacteristic,
+                                          status: Int) {
+            handleAuthorizationProof(client, characteristic, characteristic.value, status)
+        }
+        override fun onCharacteristicRead(client: BluetoothGatt,
+                                          characteristic: BluetoothGattCharacteristic,
+                                          value: ByteArray, status: Int) {
+            handleAuthorizationProof(client, characteristic, value, status)
         }
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (gatt !== client) return
             val completedOpcode = pendingOpcode
             Log.i(TAG, "Nightglass frame completion: opcode=$completedOpcode status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                if (completedOpcode == 0x25) forgetPending = false
+                if (completedOpcode == 0x25 && forgetPending) {
+                    forgetPending = false
+                    reportForgetResult(false, "Watch did not acknowledge authorization reset")
+                }
                 update("Nightglass link failed; reconnecting")
                 recoverDeadLink(client)
                 return
@@ -289,6 +285,7 @@ class NightglassConnectionService : Service() {
         else { @Suppress("DEPRECATION") descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; @Suppress("DEPRECATION") client.writeDescriptor(descriptor) }
     }
     private fun receive(frame: ByteArray) {
+        if (!linkReady) return
         val action = NightglassProtocol.parseAction(frame) ?: return
         if (action !is NightglassProtocol.WatchAction.Call) {
             val sequence = when (action) {
@@ -341,6 +338,7 @@ class NightglassConnectionService : Service() {
     private fun requestForgetPeer() {
         if (!linkReady || gatt == null) {
             update("Connect to the pinned Nightglass before resetting it")
+            reportForgetResult(false, "Connect to the authorized Nightglass first")
             return
         }
         synchronized(writes) {
@@ -359,7 +357,14 @@ class NightglassConnectionService : Service() {
         stopScan()
         closeGatt()
         update("Pinned Nightglass cleared; remove the system bond before pairing again")
+        reportForgetResult(true,
+            "Watch reset acknowledged. Remove its Bluetooth bond, then pair again.")
         stopSelf()
+    }
+    private fun reportForgetResult(success: Boolean, detail: String) {
+        sendBroadcast(Intent(ACTION_FORGET_RESULT).setPackage(packageName)
+            .putExtra(EXTRA_FORGET_SUCCESS, success)
+            .putExtra(EXTRA_FORGET_DETAIL, detail))
     }
     private fun silenceNotificationAlert(frame: ByteArray) {
         if (frame.size >= 7 && frame[0] == NightglassProtocol.VERSION &&
@@ -385,7 +390,70 @@ class NightglassConnectionService : Service() {
             pendingOpcode = frame.getOrNull(1)?.toInt()?.and(0xff) ?: -1
             Log.i(TAG, "Nightglass frame started: opcode=$pendingOpcode bytes=${frame.size}")
             writes.poll()
+        } else if ((frame.getOrNull(1)?.toInt()?.and(0xff) ?: -1) == 0x25 &&
+            forgetPending) {
+            writes.poll()
+            forgetPending = false
+            reportForgetResult(false, "Authorization reset could not be sent")
         }
+    }
+
+    private fun requestAuthorizationProof(client: BluetoothGatt) {
+        if (gatt !== client || client.device.bondState != BluetoothDevice.BOND_BONDED) {
+            update("Nightglass authorization unavailable; reconnecting")
+            recoverDeadLink(client)
+            return
+        }
+        val status = client.getService(NightglassProtocol.SERVICE)
+            ?.getCharacteristic(NightglassProtocol.STATUS)
+        authorizationProofPending = status != null && client.readCharacteristic(status)
+        if (!authorizationProofPending) {
+            update("Nightglass authorization proof failed; reconnecting")
+            recoverDeadLink(client)
+        }
+    }
+
+    private fun handleAuthorizationProof(client: BluetoothGatt,
+                                         characteristic: BluetoothGattCharacteristic,
+                                         value: ByteArray, status: Int) {
+        if (gatt !== client || characteristic.uuid != NightglassProtocol.STATUS ||
+            !authorizationProofPending) return
+        authorizationProofPending = false
+        val proof = if (status == BluetoothGatt.GATT_SUCCESS)
+            NightglassProtocol.parseWatchStatus(value) else null
+        if (client.device.bondState != BluetoothDevice.BOND_BONDED ||
+            proof?.authorized != true) {
+            update("Nightglass rejected companion authorization; reconnecting")
+            recoverDeadLink(client)
+            return
+        }
+        completeAuthorizedLink(client)
+    }
+
+    private fun completeAuthorizedLink(client: BluetoothGatt) {
+        if (gatt !== client) return
+        reconnectAttempt = 0
+        synchronized(writes) {
+            linkReady = true
+            PhoneWeatherProxy.load(this@NightglassConnectionService)?.let { config ->
+                val settings = NightglassProtocol.configureWeather(
+                    true, true, config.metric, config.refreshMinutes,
+                    config.latitudeE6, config.longitudeE6)
+                if (writes.size >= 32) writes.removeLast()
+                writes.addFirst(settings)
+            }
+            writeNextLocked()
+        }
+        // Persist only after the watch itself proves the callback connection is
+        // in its pinned, encrypted, bonded authorization state.
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putString(PINNED_ADDRESS, client.device.address).apply()
+        Log.i(TAG, "Authorized Nightglass link ready")
+        update("Nightglass connected")
+        NightglassNotificationListener.syncCurrent()
+        NightglassNotificationListener.syncMedia()
+        phoneIntegrations.refreshAll()
+        scheduleWeatherRefresh(0)
     }
     private fun stopScan() { if (scanning && hasConnectPermissions()) adapter.bluetoothLeScanner?.stopScan(scanCallback); scanning = false }
     private fun scheduleReconnect() {
@@ -396,7 +464,11 @@ class NightglassConnectionService : Service() {
         reconnectHandler.postDelayed(reconnect, delay)
     }
     private fun resetLinkState() {
-        forgetPending = false
+        if (forgetPending) {
+            forgetPending = false
+            reportForgetResult(false, "Authorization reset was not acknowledged")
+        }
+        authorizationProofPending = false
         synchronized(writes) {
             writePending = false
             linkReady = false
@@ -413,7 +485,7 @@ class NightglassConnectionService : Service() {
         if (gatt === client) gatt = null
         scheduleReconnect()
     }
-    private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false; linkReady = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
+    private fun closeGatt() { synchronized(writes) { writes.clear(); writePending = false; linkReady = false; authorizationProofPending = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
 
     private fun scheduleWeatherRefresh(delayMs: Long? = null) {
         if (destroyed) return

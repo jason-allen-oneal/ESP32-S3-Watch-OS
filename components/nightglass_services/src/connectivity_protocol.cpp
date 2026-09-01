@@ -346,6 +346,17 @@ bool peer_identity_matches(const CompanionPeerIdentity &expected,
            expected.address == candidate.address;
 }
 
+bool authorization_matches(std::uint16_t expected_connection_handle,
+                           std::uint32_t expected_generation,
+                           const CompanionPeerIdentity &expected_peer,
+                           std::uint16_t candidate_connection_handle,
+                           std::uint32_t candidate_generation,
+                           const CompanionPeerIdentity &candidate_peer) noexcept {
+    return expected_connection_handle == candidate_connection_handle &&
+           expected_generation != 0 && expected_generation == candidate_generation &&
+           peer_identity_matches(expected_peer, candidate_peer);
+}
+
 std::array<std::uint8_t, 4> encode_phone_command(PhoneCommand command,
                                                  std::uint8_t sequence) noexcept {
     return {kCompanionProtocolVersion, kPhone, sequence, static_cast<std::uint8_t>(command)};
