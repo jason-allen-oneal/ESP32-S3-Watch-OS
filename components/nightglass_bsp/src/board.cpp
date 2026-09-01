@@ -4,18 +4,95 @@
 #include "bsp/display.h"
 #include "bsp/touch.h"
 #include "driver/gpio.h"
+#include "esp_log.h"
 #include "esp_lvgl_port.h"
+#include "esp_timer.h"
 #include "nightglass/core/health.hpp"
 
 namespace nightglass::bsp {
 
 namespace {
 Board instance;
+constexpr char kTag[] = "nightglass_bsp";
 lv_display_t *display_handle = nullptr;
 lv_indev_t *touch_input = nullptr;
 esp_lcd_panel_handle_t panel_handle = nullptr;
 esp_lcd_panel_io_handle_t panel_io = nullptr;
 esp_lcd_touch_handle_t touch_handle = nullptr;
+std::int64_t last_touch_error_log_us = 0;
+lv_indev_state_t last_touch_state = LV_INDEV_STATE_RELEASED;
+lv_point_t last_touch_point{};
+std::uint8_t consecutive_touch_errors = 0;
+bool touch_degraded = false;
+
+void IRAM_ATTR touch_interrupt(esp_lcd_touch_handle_t) {
+    if (touch_input) lvgl_port_task_wake(LVGL_PORT_EVENT_TOUCH, touch_input);
+}
+
+void handle_touch_error(lv_indev_t *input, lv_indev_data_t *data,
+                        const char *operation, esp_err_t error) {
+    ++consecutive_touch_errors;
+    if (consecutive_touch_errors <= 2) {
+        // Preserve an in-progress press across a bounded missed sample. An
+        // ordinary RELEASED here would synthesize CLICKED on the active
+        // control even though the finger never left the panel.
+        data->state = last_touch_state;
+        data->point = last_touch_point;
+    } else {
+        // Cancel the gesture without delivering RELEASED/CLICKED. LVGL's
+        // reset query terminates processing of this sample and clears the
+        // active object before the released state can be interpreted.
+        lv_indev_reset(input, nullptr);
+        data->state = LV_INDEV_STATE_RELEASED;
+        last_touch_state = LV_INDEV_STATE_RELEASED;
+        if (!touch_degraded) {
+            nightglass::core::health_registry().set(
+                "touch", nightglass::core::HealthState::degraded,
+                "Touch samples failing; active gesture cancelled safely");
+            touch_degraded = true;
+        }
+    }
+
+    const auto now = esp_timer_get_time();
+    if (last_touch_error_log_us == 0 || now - last_touch_error_log_us >= 10'000'000) {
+        ESP_LOGW(kTag, "%s skipped: %s", operation, esp_err_to_name(error));
+        last_touch_error_log_us = now;
+    }
+}
+
+void touchpad_read(lv_indev_t *input, lv_indev_data_t *data) {
+    data->state = LV_INDEV_STATE_RELEASED;
+    if (!touch_handle) return;
+
+    const auto read_result = esp_lcd_touch_read_data(touch_handle);
+    if (read_result != ESP_OK) {
+        handle_touch_error(input, data, "Touch sample", read_result);
+        return;
+    }
+
+    std::uint8_t touch_count = 0;
+    esp_lcd_touch_point_data_t point{};
+    const auto get_result = esp_lcd_touch_get_data(touch_handle, &point, &touch_count, 1);
+    if (get_result != ESP_OK) {
+        handle_touch_error(input, data, "Touch decode", get_result);
+        return;
+    }
+
+    if (touch_degraded) {
+        nightglass::core::health_registry().set(
+            "touch", nightglass::core::HealthState::ok,
+            "BSP touch input active; transient failure recovered");
+        touch_degraded = false;
+    }
+    consecutive_touch_errors = 0;
+    if (touch_count > 0) {
+        data->point.x = point.x;
+        data->point.y = point.y;
+        data->state = LV_INDEV_STATE_PRESSED;
+    }
+    last_touch_state = data->state;
+    last_touch_point = data->point;
+}
 
 void round_display_area(lv_area_t *area) {
     area->x1 &= ~1;
@@ -113,12 +190,26 @@ nightglass::core::Status Board::start_essential() {
                                            "BSP touch initialization failed");
         return {nightglass::core::StatusCode::io_error, "touch initialization failed"};
     }
-    const lvgl_port_touch_cfg_t touch_config{
-        .disp = display_handle,
-        .handle = touch_handle,
-        .scale = {.x = 1.0F, .y = 1.0F},
-    };
-    touch_input = lvgl_port_add_touch(&touch_config);
+    // esp_lvgl_port 2.7.2 wraps transient touch-controller read failures in
+    // ESP_ERROR_CHECK(), turning an ordinary missed sample into a full-system
+    // abort from the LVGL task. Nightglass owns the input callback instead:
+    // failed samples are released and rate-limited in the log, while the
+    // display, clock, BLE, and audio services continue running.
+    if (!lvgl_port_lock(0)) {
+        return {nightglass::core::StatusCode::timeout, "LVGL touch lock failed"};
+    }
+    touch_input = lv_indev_create();
+    if (touch_input) {
+        lv_indev_set_type(touch_input, LV_INDEV_TYPE_POINTER);
+        lv_indev_set_read_cb(touch_input, touchpad_read);
+        lv_indev_set_disp(touch_input, display_handle);
+        if (touch_handle->config.int_gpio_num != GPIO_NUM_NC &&
+            esp_lcd_touch_register_interrupt_callback_with_data(
+                touch_handle, touch_interrupt, nullptr) == ESP_OK) {
+            lv_indev_set_mode(touch_input, LV_INDEV_MODE_EVENT);
+        }
+    }
+    lvgl_port_unlock();
     if (touch_input == nullptr) {
         nightglass::core::health_registry().set("touch", nightglass::core::HealthState::failed,
                                            "BSP touch initialization failed");
