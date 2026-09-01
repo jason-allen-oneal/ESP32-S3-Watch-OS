@@ -12,6 +12,7 @@
 #include "nightglass/bsp/board.hpp"
 #include "nightglass/core/health.hpp"
 #include "nightglass/services/clock.hpp"
+#include "nightglass/services/activity.hpp"
 #include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/connectivity.hpp"
 
@@ -94,6 +95,11 @@ esp_err_t save_settings(const PowerSettings &settings) {
 void publish_activity(std::int64_t when, nightglass::core::WakeReason reason) {
     portENTER_CRITICAL(&snapshot_mux);
     current.last_activity_us = when;
+    current.last_activity_reason = reason;
+    if (reason == nightglass::core::WakeReason::touch ||
+        reason == nightglass::core::WakeReason::button) {
+        current.last_physical_input_us = when;
+    }
     if (current.state != nightglass::core::PowerState::active) current.last_wake = reason;
     if (reason == nightglass::core::WakeReason::touch) current.wake_touch_pending = false;
     ++current.sequence;
@@ -156,6 +162,14 @@ void enter_light_sleep(std::int64_t observed_activity_us) {
     // between connection events, preserving notifications without pinning the
     // CPU and controller fully awake.
     if (connectivity_service().snapshot().settings.enabled) return;
+    // CPU-side recognition stops in manual light sleep. Until QMI8658 INT1
+    // wake-on-motion passes its own hardware gate, keep the IMU stream alive
+    // whenever raise-to-wake is enabled.
+    const auto activity = activity_service().snapshot();
+    if (activity.service_started && activity.sensor_present && activity.sample_valid &&
+        activity.settings.raise_to_wake) {
+        return;
+    }
     if (gpio_get_level(kTouchInterruptGpio) == 0) {
         publish_activity(esp_timer_get_time(), nightglass::core::WakeReason::touch);
         return;
@@ -359,6 +373,7 @@ nightglass::core::Status PowerService::start() {
     current.side_key_ready = true;
     current.side_key_pressed = side_key_pressed;
     current.last_activity_us = now;
+    current.last_physical_input_us = now;
     current.light_sleep_enabled = settings.sleep_after_blank_seconds > 0;
     current.automatic_light_sleep_enabled = automatic_light_sleep_enabled;
     current.settings = settings;

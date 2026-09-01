@@ -69,6 +69,14 @@ a cross-core critical section and never performs I2C or GPIO work.
   count or orientation. Because constant rotation cannot be distinguished from
   sensor bias without an external reference, the watch must remain still until
   calibration completes; the UI never labels gyro data live before that point.
+- The activity service also feeds each fresh 25 Hz sample into an allocation-free
+  gesture processor. Raise-to-wake may use bounded raw gyro data while stationary
+  gyro calibration is still running; double-twist, shake, and flick require the
+  calibrated stream. Detection uses explicit sample-gap resets, per-gesture
+  cooldowns, acceleration/rotation gates, and a separate policy layer that
+  suppresses actions during charging/USB, recent touch/button input, alerts,
+  pairing, replies, and OTA sessions. All four actions default off until physical
+  axis and false-positive calibration passes on the fitted watch.
 - GPIO18 starts low. The schematic's P1/P2 motor path and its ALDO3 supply were
   electrically exercised, but this physical unit produced no mechanical
   response and Waveshare does not list an installed actuator. Haptics are

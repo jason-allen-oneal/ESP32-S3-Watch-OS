@@ -161,10 +161,13 @@ void publish_motion() {
             next.accel_x_g = static_cast<float>(raw_ax) / 4096.0F;
             next.accel_y_g = static_cast<float>(raw_ay) / 4096.0F;
             next.accel_z_g = static_cast<float>(raw_az) / 4096.0F;
+            next.gyro_raw_x_dps = static_cast<float>(raw_gx) / 64.0F;
+            next.gyro_raw_y_dps = static_cast<float>(raw_gy) / 64.0F;
+            next.gyro_raw_z_dps = static_cast<float>(raw_gz) / 64.0F;
             const auto gyro = gyro_processor.process({
-                .x_dps = static_cast<float>(raw_gx) / 64.0F,
-                .y_dps = static_cast<float>(raw_gy) / 64.0F,
-                .z_dps = static_cast<float>(raw_gz) / 64.0F,
+                .x_dps = next.gyro_raw_x_dps,
+                .y_dps = next.gyro_raw_y_dps,
+                .z_dps = next.gyro_raw_z_dps,
                 .accel_x_g = next.accel_x_g,
                 .accel_y_g = next.accel_y_g,
                 .accel_z_g = next.accel_z_g,
@@ -176,9 +179,13 @@ void publish_motion() {
             next.gyro_x_dps = gyro.display_x_dps;
             next.gyro_y_dps = gyro.display_y_dps;
             next.gyro_z_dps = gyro.display_z_dps;
+            next.gyro_corrected_x_dps = gyro.corrected_x_dps;
+            next.gyro_corrected_y_dps = gyro.corrected_y_dps;
+            next.gyro_corrected_z_dps = gyro.corrected_z_dps;
             next.gyro_bias_x_dps = gyro.bias_x_dps;
             next.gyro_bias_y_dps = gyro.bias_y_dps;
             next.gyro_bias_z_dps = gyro.bias_z_dps;
+            next.sample_sequence = current.motion.sample_sequence + 1U;
 
             if (gyro.calibration_restarted) {
                 ESP_LOGW(kTag, "Gyro calibration restarted: keep watch stationary");

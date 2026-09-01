@@ -51,6 +51,9 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
         case NavigationAction::open_activity:
             push_route(state, Route::activity);
             break;
+        case NavigationAction::open_gestures:
+            push_route(state, Route::gestures);
+            break;
         case NavigationAction::open_weather:
             push_route(state, Route::weather);
             break;

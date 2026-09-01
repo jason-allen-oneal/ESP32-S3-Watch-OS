@@ -47,9 +47,16 @@ struct MotionSnapshot {
     float gyro_x_dps{0.0F};
     float gyro_y_dps{0.0F};
     float gyro_z_dps{0.0F};
+    float gyro_raw_x_dps{0.0F};
+    float gyro_raw_y_dps{0.0F};
+    float gyro_raw_z_dps{0.0F};
+    float gyro_corrected_x_dps{0.0F};
+    float gyro_corrected_y_dps{0.0F};
+    float gyro_corrected_z_dps{0.0F};
     float gyro_bias_x_dps{0.0F};
     float gyro_bias_y_dps{0.0F};
     float gyro_bias_z_dps{0.0F};
+    std::uint32_t sample_sequence{0};
     std::int64_t sampled_at_us{0};
 };
 

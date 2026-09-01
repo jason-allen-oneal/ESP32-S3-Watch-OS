@@ -11,6 +11,7 @@
 #include "lvgl.h"
 #include "nightglass/services/clock.hpp"
 #include "nightglass/services/activity.hpp"
+#include "nightglass/services/gesture_policy.hpp"
 #include "nightglass/services/activity_units.hpp"
 #include "nightglass/services/audio.hpp"
 #include "nightglass/services/connectivity.hpp"
@@ -458,7 +459,9 @@ void Shell::timer_callback(lv_timer_t *timer) {
 }
 
 void Shell::system_timer_callback(lv_timer_t *timer) {
-    static_cast<Shell *>(lv_timer_get_user_data(timer))->refresh_system_overlay();
+    auto *self = static_cast<Shell *>(lv_timer_get_user_data(timer));
+    self->handle_gesture();
+    self->refresh_system_overlay();
 }
 
 void Shell::input_callback(lv_event_t *event) {
@@ -991,6 +994,43 @@ void Shell::activity_reset_callback(lv_event_t *event) {
     self->refresh_activity();
 }
 
+void Shell::gesture_settings_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_gestures);
+}
+
+void Shell::gesture_raise_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::activity_service().snapshot().settings;
+    settings.raise_to_wake = !settings.raise_to_wake;
+    nightglass::services::activity_service().update_settings(settings);
+    self->refresh_gestures();
+}
+
+void Shell::gesture_twist_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::activity_service().snapshot().settings;
+    settings.double_twist_quick_settings = !settings.double_twist_quick_settings;
+    nightglass::services::activity_service().update_settings(settings);
+    self->refresh_gestures();
+}
+
+void Shell::gesture_shake_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::activity_service().snapshot().settings;
+    settings.shake_notifications = !settings.shake_notifications;
+    nightglass::services::activity_service().update_settings(settings);
+    self->refresh_gestures();
+}
+
+void Shell::gesture_flick_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto settings = nightglass::services::activity_service().snapshot().settings;
+    settings.flick_media_next = !settings.flick_media_next;
+    nightglass::services::activity_service().update_settings(settings);
+    self->refresh_gestures();
+}
+
 void Shell::weather_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
         nightglass::core::NavigationAction::open_weather);
@@ -1217,6 +1257,9 @@ void Shell::render_route() {
             break;
         case nightglass::core::Route::activity:
             render_activity();
+            break;
+        case nightglass::core::Route::gestures:
+            render_gestures();
             break;
         case nightglass::core::Route::weather:
             render_weather();
@@ -1490,15 +1533,17 @@ void Shell::render_settings() {
                 kSurface, kPrimary, watchface_settings_callback, this);
     make_button(scroller, 0, 270, kSafeContentWidth - 16, 76, "ACTIVITY",
                 kSurface, kPrimary, activity_callback, this);
-    make_button(scroller, 0, 360, kSafeContentWidth - 16, 76, "NETWORK & WEATHER",
+    make_button(scroller, 0, 360, kSafeContentWidth - 16, 76, "GESTURES",
+                kSurface, kPrimary, gesture_settings_callback, this);
+    make_button(scroller, 0, 450, kSafeContentWidth - 16, 76, "NETWORK & WEATHER",
                 kSurface, kPrimary, weather_callback, this);
-    make_button(scroller, 0, 450, kSafeContentWidth - 16, 76, "PHONE",
+    make_button(scroller, 0, 540, kSafeContentWidth - 16, 76, "PHONE",
                 kSurface, kPrimary, connectivity_callback, this);
-    make_button(scroller, 0, 540, kSafeContentWidth - 16, 76, "SOUND & DND",
+    make_button(scroller, 0, 630, kSafeContentWidth - 16, 76, "SOUND & DND",
                 kSurface, kPrimary, audio_callback, this);
     auto *note = label(scroller, "All settings are stored on the watch.",
                        &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(note, 8, 630);
+    lv_obj_set_pos(note, 8, 720);
     lv_obj_set_width(note, kSafeContentWidth - 32);
     lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
 }
@@ -1547,6 +1592,32 @@ void Shell::render_activity() {
                 kSurface, kAmber, activity_reset_callback, this);
     configure_refresh_timer(1000);
     refresh_activity();
+}
+
+void Shell::render_gestures() {
+    add_header(content_host_, "GESTURES", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    gesture_state_ = label(scroller, "WAITING FOR CALIBRATION", &lv_font_montserrat_16,
+                           kSecondary);
+    lv_obj_set_pos(gesture_state_, 8, 4);
+    lv_obj_set_width(gesture_state_, kSafeContentWidth - 32);
+    gesture_raise_ = make_button(scroller, 0, 64, kSafeContentWidth - 16, 64, "",
+                                 kSurface, kPrimary, gesture_raise_callback, this);
+    gesture_twist_ = make_button(scroller, 0, 138, kSafeContentWidth - 16, 64, "",
+                                 kSurface, kPrimary, gesture_twist_callback, this);
+    gesture_shake_ = make_button(scroller, 0, 212, kSafeContentWidth - 16, 64, "",
+                                 kSurface, kPrimary, gesture_shake_callback, this);
+    gesture_flick_ = make_button(scroller, 0, 286, kSafeContentWidth - 16, 64, "",
+                                 kSurface, kPrimary, gesture_flick_callback, this);
+    auto *note = label(scroller,
+                       "Actions default off until physical axis and false-positive "
+                       "calibration passes on this watch.",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, 8, 370);
+    lv_obj_set_width(note, kSafeContentWidth - 32);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
+    configure_refresh_timer(500);
+    refresh_gestures();
 }
 
 void Shell::render_weather() {
@@ -2130,6 +2201,9 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::activity:
             refresh_activity();
             break;
+        case nightglass::core::Route::gestures:
+            refresh_gestures();
+            break;
         case nightglass::core::Route::weather:
             refresh_weather();
             break;
@@ -2193,6 +2267,31 @@ void Shell::refresh_activity() {
     std::snprintf(text, sizeof(text), "DAILY GOAL  %lu",
                   static_cast<unsigned long>(snapshot.settings.daily_goal_steps));
     set_button_text(activity_goal_, text);
+}
+
+void Shell::refresh_gestures() {
+    if (!gesture_state_) return;
+    const auto snapshot = nightglass::services::activity_service().snapshot();
+    char text[128]{};
+    std::snprintf(text, sizeof(text), "LAST  %s | R%lu T%lu S%lu F%lu",
+                  nightglass::services::gesture_name(snapshot.last_gesture),
+                  static_cast<unsigned long>(snapshot.raise_count),
+                  static_cast<unsigned long>(snapshot.double_twist_count),
+                  static_cast<unsigned long>(snapshot.shake_count),
+                  static_cast<unsigned long>(snapshot.flick_count));
+    lv_label_set_text(gesture_state_, text);
+    set_button_text(gesture_raise_, snapshot.settings.raise_to_wake
+                                        ? "RAISE TO WAKE  ON"
+                                        : "RAISE TO WAKE  OFF");
+    set_button_text(gesture_twist_, snapshot.settings.double_twist_quick_settings
+                                        ? "DOUBLE TWIST  QUICK SETTINGS"
+                                        : "DOUBLE TWIST  OFF");
+    set_button_text(gesture_shake_, snapshot.settings.shake_notifications
+                                        ? "SHAKE  NOTIFICATIONS"
+                                        : "SHAKE  OFF");
+    set_button_text(gesture_flick_, snapshot.settings.flick_media_next
+                                        ? "FLICK  NEXT TRACK"
+                                        : "FLICK  OFF");
 }
 
 void Shell::refresh_weather() {
@@ -2954,6 +3053,50 @@ void Shell::refresh_system_overlay() {
     displayed_alert_alarm_index_ = alarm_index;
 }
 
+void Shell::handle_gesture() {
+    const auto activity = nightglass::services::activity_service().snapshot();
+    if (activity.gesture_sequence == 0 ||
+        activity.gesture_sequence == handled_gesture_sequence_) {
+        return;
+    }
+    handled_gesture_sequence_ = activity.gesture_sequence;
+    if (!activity.last_gesture_actionable) {
+        return;
+    }
+
+    const auto clock = nightglass::services::clock_service().active_alert();
+    const auto connectivity = nightglass::services::connectivity_service().snapshot();
+    const auto update = nightglass::services::update_transport().snapshot();
+    const bool critical_overlay = clock != nightglass::services::AlertKind::none ||
+                                  connectivity.pairing_passkey_active ||
+                                  update.session != 0 || update.awaiting_confirmation ||
+                                  update.ready_to_reboot;
+    const auto action = nightglass::services::decide_gesture_action({
+        .kind = activity.last_gesture,
+        .enabled = true,
+        .screen_inactive = activity.last_gesture_screen_inactive,
+        .critical_overlay = critical_overlay,
+        .reply_active = notification_reply_box_ != nullptr,
+    });
+    switch (action) {
+        case nightglass::services::GestureAction::open_quick_settings:
+            quick_settings_open_ = true;
+            render_route();
+            break;
+        case nightglass::services::GestureAction::open_notifications:
+            quick_settings_open_ = false;
+            navigate(nightglass::core::NavigationAction::open_notifications);
+            break;
+        case nightglass::services::GestureAction::media_next:
+            nightglass::services::connectivity_service().send_media(
+                nightglass::services::MediaCommand::next);
+            break;
+        case nightglass::services::GestureAction::wake_only:
+        case nightglass::services::GestureAction::none:
+            break;
+    }
+}
+
 void Shell::refresh_diagnostics() {
     if (!diagnostics_rtc_state_) return;
     const auto snapshot = nightglass::services::hardware_service().snapshot();
@@ -3111,6 +3254,11 @@ void Shell::clear_route_objects() {
     activity_step_length_ = nullptr;
     activity_units_ = nullptr;
     activity_goal_ = nullptr;
+    gesture_state_ = nullptr;
+    gesture_raise_ = nullptr;
+    gesture_twist_ = nullptr;
+    gesture_shake_ = nullptr;
+    gesture_flick_ = nullptr;
     weather_state_ = nullptr;
     weather_detail_ = nullptr;
     weather_toggle_ = nullptr;

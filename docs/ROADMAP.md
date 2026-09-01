@@ -47,3 +47,9 @@ Any touch resets inactivity; the first touch while blank is consumed as
 wake-only. GPIO38 touch and GPIO10 side-key wake have passed physical light-
 sleep validation. Timer/alarm deadlines arm timer wake. Deep sleep, motion
 wake, direct RTC-alarm wake, and rail gating remain deferred.
+
+The QMI8658 gesture slice implements bounded raise, double-twist, shake, and
+flick recognition with persistent per-action settings and on-watch diagnostic
+counts. Actions remain disabled by default until the fitted unit passes physical
+calibration. Raise-to-wake currently keeps CPU-side motion sampling available;
+low-power INT1 wake-on-motion remains a later hardware gate.

@@ -22,6 +22,7 @@ struct PowerSnapshot {
     std::uint32_t sequence{0};
     nightglass::core::PowerState state{nightglass::core::PowerState::active};
     nightglass::core::WakeReason last_wake{nightglass::core::WakeReason::cold_boot};
+    nightglass::core::WakeReason last_activity_reason{nightglass::core::WakeReason::cold_boot};
     std::uint8_t requested_brightness{30};
     bool side_key_ready{false};
     bool side_key_pressed{false};
@@ -32,6 +33,7 @@ struct PowerSnapshot {
     std::uint32_t sleep_count{0};
     std::uint32_t last_sleep_ms{0};
     std::int64_t last_activity_us{0};
+    std::int64_t last_physical_input_us{0};
     PowerSettings settings{};
 };
 

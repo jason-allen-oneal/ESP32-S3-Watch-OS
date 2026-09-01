@@ -3,6 +3,8 @@ set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 gyro_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gyro-test.XXXXXX")"
+gesture_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gesture-test.XXXXXX")"
+gesture_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gesture-policy-test.XXXXXX")"
 time_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-time-test.XXXXXX")"
 face_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-face-test.XXXXXX")"
 connectivity_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-connectivity-test.XXXXXX")"
@@ -16,7 +18,7 @@ audio_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-audio-test.XXXXXX")"
 update_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-update-test.XXXXXX")"
 verifier_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-verifier-test.XXXXXX")"
 clock_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-clock-policy-test.XXXXXX")"
-trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${update_transport_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}"' EXIT
+trap 'rm -f "${gyro_binary}" "${gesture_binary}" "${gesture_policy_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${update_transport_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}"' EXIT
 
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
 python3 -B "${project_dir}/tests/ota_state_inspector_test.py"
@@ -29,6 +31,20 @@ python3 -B "${project_dir}/tests/release_config_test.py"
   "${project_dir}/tests/gyro_processor_test.cpp" \
   -o "${gyro_binary}"
 "${gyro_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/gesture_processor.cpp" \
+  "${project_dir}/tests/gesture_processor_test.cpp" \
+  -o "${gesture_binary}"
+"${gesture_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/gesture_policy.cpp" \
+  "${project_dir}/tests/gesture_policy_test.cpp" \
+  -o "${gesture_policy_binary}"
+"${gesture_policy_binary}"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \

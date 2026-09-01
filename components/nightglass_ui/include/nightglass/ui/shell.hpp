@@ -32,6 +32,11 @@ private:
     static void activity_units_callback(lv_event_t *event);
     static void activity_goal_callback(lv_event_t *event);
     static void activity_reset_callback(lv_event_t *event);
+    static void gesture_settings_callback(lv_event_t *event);
+    static void gesture_raise_callback(lv_event_t *event);
+    static void gesture_twist_callback(lv_event_t *event);
+    static void gesture_shake_callback(lv_event_t *event);
+    static void gesture_flick_callback(lv_event_t *event);
     static void weather_callback(lv_event_t *event);
     static void weather_toggle_callback(lv_event_t *event);
     static void weather_units_callback(lv_event_t *event);
@@ -108,6 +113,7 @@ private:
     void render_clock_settings();
     void render_watchface_settings();
     void render_activity();
+    void render_gestures();
     void render_weather();
     void render_connectivity();
     void render_media();
@@ -128,6 +134,7 @@ private:
     void refresh_clock_settings();
     void refresh_watchface_settings();
     void refresh_activity();
+    void refresh_gestures();
     void refresh_weather();
     void refresh_connectivity();
     void refresh_media();
@@ -141,6 +148,7 @@ private:
     void refresh_diagnostics();
     void clear_route_objects();
     void refresh_settings_labels();
+    void handle_gesture();
 
     nightglass::core::NavigationState navigation_{};
     lv_obj_t *screen_{nullptr};
@@ -166,6 +174,12 @@ private:
     lv_obj_t *activity_step_length_{nullptr};
     lv_obj_t *activity_units_{nullptr};
     lv_obj_t *activity_goal_{nullptr};
+    lv_obj_t *gesture_state_{nullptr};
+    lv_obj_t *gesture_raise_{nullptr};
+    lv_obj_t *gesture_twist_{nullptr};
+    lv_obj_t *gesture_shake_{nullptr};
+    lv_obj_t *gesture_flick_{nullptr};
+    std::uint32_t handled_gesture_sequence_{0};
     lv_obj_t *weather_state_{nullptr};
     lv_obj_t *weather_detail_{nullptr};
     lv_obj_t *weather_toggle_{nullptr};

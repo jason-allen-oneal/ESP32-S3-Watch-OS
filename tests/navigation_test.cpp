@@ -44,4 +44,8 @@ int main() {
     state = reduce_navigation({}, NavigationAction::open_media);
     assert(state.route == Route::media);
     assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
+
+    state = reduce_navigation({}, NavigationAction::open_gestures);
+    assert(state.route == Route::gestures);
+    assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
 }

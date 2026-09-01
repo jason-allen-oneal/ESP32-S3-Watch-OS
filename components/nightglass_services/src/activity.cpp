@@ -8,13 +8,19 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "driver/usb_serial_jtag.h"
 #include "nvs.h"
 #include "nightglass/core/health.hpp"
 #include "nightglass/services/activity_day.hpp"
 #include "nightglass/services/activity_processor.hpp"
 #include "nightglass/services/clock.hpp"
+#include "nightglass/services/connectivity.hpp"
 #include "nightglass/services/hardware.hpp"
+#include "nightglass/services/gesture_processor.hpp"
+#include "nightglass/services/gesture_policy.hpp"
+#include "nightglass/services/power.hpp"
 #include "nightglass/services/time_math.hpp"
+#include "nightglass/services/update_transport.hpp"
 
 namespace nightglass::services {
 namespace {
@@ -43,6 +49,7 @@ QueueHandle_t command_queue = nullptr;
 portMUX_TYPE snapshot_mux = portMUX_INITIALIZER_UNLOCKED;
 ActivitySnapshot current{};
 ActivityProcessor processor;
+GestureProcessor gesture_processor;
 ActivityDayState day_state{};
 std::uint32_t persisted_steps = 0;
 std::int64_t last_save_us = 0;
@@ -79,11 +86,15 @@ bool save_state() {
     nvs_handle_t handle{};
     esp_err_t result = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
     if (result != ESP_OK) return false;
-    if ((result = nvs_set_u8(handle, "version", 1)) == ESP_OK &&
+    if ((result = nvs_set_u8(handle, "version", 2)) == ESP_OK &&
         // Retain the legacy NVS key so existing calibrated values migrate in place.
         (result = nvs_set_u16(handle, "stride_mm", copy.settings.step_length_mm)) == ESP_OK &&
         (result = nvs_set_u8(handle, "units", static_cast<std::uint8_t>(copy.settings.units))) == ESP_OK &&
         (result = nvs_set_u32(handle, "goal", copy.settings.daily_goal_steps)) == ESP_OK &&
+        (result = nvs_set_u8(handle, "g_raise", copy.settings.raise_to_wake)) == ESP_OK &&
+        (result = nvs_set_u8(handle, "g_twist", copy.settings.double_twist_quick_settings)) == ESP_OK &&
+        (result = nvs_set_u8(handle, "g_shake", copy.settings.shake_notifications)) == ESP_OK &&
+        (result = nvs_set_u8(handle, "g_flick", copy.settings.flick_media_next)) == ESP_OK &&
         (result = nvs_set_u32(handle, "steps", copy.steps_today)) == ESP_OK &&
         (result = nvs_set_i64(handle, "local_day", day_state.tracked_local_day)) == ESP_OK) {
         result = nvs_commit(handle);
@@ -130,6 +141,19 @@ void load_state() {
                                         ? ActivityUnits::metric : ActivityUnits::imperial;
         }
         if (nvs_get_u32(handle, "goal", &value) == ESP_OK) loaded.settings.daily_goal_steps = value;
+        std::uint8_t enabled{};
+        if (nvs_get_u8(handle, "g_raise", &enabled) == ESP_OK) {
+            loaded.settings.raise_to_wake = enabled != 0;
+        }
+        if (nvs_get_u8(handle, "g_twist", &enabled) == ESP_OK) {
+            loaded.settings.double_twist_quick_settings = enabled != 0;
+        }
+        if (nvs_get_u8(handle, "g_shake", &enabled) == ESP_OK) {
+            loaded.settings.shake_notifications = enabled != 0;
+        }
+        if (nvs_get_u8(handle, "g_flick", &enabled) == ESP_OK) {
+            loaded.settings.flick_media_next = enabled != 0;
+        }
         if (nvs_get_u32(handle, "steps", &value) == ESP_OK) loaded.steps_today = value;
         if (nvs_get_i64(handle, "local_day", &local_day) == ESP_OK) day_state.tracked_local_day = local_day;
         nvs_close(handle);
@@ -178,9 +202,67 @@ void publish_processor(const ActivityProcessorOutput &output, const MotionSnapsh
     portEXIT_CRITICAL(&snapshot_mux);
 }
 
+void publish_gesture(const GestureProcessorOutput &output, std::int64_t now_us,
+                     bool external_power, bool recent_physical_input,
+                     bool screen_inactive) {
+    if (output.detected == GestureKind::none) return;
+    ActivitySettings settings{};
+    portENTER_CRITICAL(&snapshot_mux);
+    settings = current.settings;
+    portEXIT_CRITICAL(&snapshot_mux);
+    bool enabled = false;
+    switch (output.detected) {
+        case GestureKind::raise: enabled = settings.raise_to_wake; break;
+        case GestureKind::double_twist:
+            enabled = settings.double_twist_quick_settings; break;
+        case GestureKind::shake: enabled = settings.shake_notifications; break;
+        case GestureKind::flick: enabled = settings.flick_media_next; break;
+        case GestureKind::none: break;
+    }
+    const auto update = update_transport().snapshot();
+    const bool critical_overlay =
+        clock_service().active_alert() != AlertKind::none ||
+        connectivity_service().snapshot().pairing_passkey_active ||
+        update.session != 0 || update.awaiting_confirmation || update.ready_to_reboot;
+    const auto action = decide_gesture_action({
+        .kind = output.detected,
+        .enabled = enabled,
+        .screen_inactive = screen_inactive,
+        .external_power = external_power,
+        .recent_physical_input = recent_physical_input,
+        .critical_overlay = critical_overlay,
+    });
+    const bool should_wake = action != GestureAction::none;
+    const bool actionable = action != GestureAction::none &&
+                            action != GestureAction::wake_only;
+    portENTER_CRITICAL(&snapshot_mux);
+    current.last_gesture = output.detected;
+    current.last_gesture_us = now_us;
+    current.last_gesture_strength = output.strength;
+    current.last_gesture_actionable = actionable;
+    current.last_gesture_screen_inactive = screen_inactive;
+    ++current.gesture_sequence;
+    switch (output.detected) {
+        case GestureKind::raise: ++current.raise_count; break;
+        case GestureKind::double_twist: ++current.double_twist_count; break;
+        case GestureKind::shake: ++current.shake_count; break;
+        case GestureKind::flick: ++current.flick_count; break;
+        case GestureKind::none: break;
+    }
+    ++current.sequence;
+    portEXIT_CRITICAL(&snapshot_mux);
+    if (should_wake) {
+        power_service().note_activity(nightglass::core::WakeReason::motion);
+    }
+    ESP_LOGI(kTag, "Gesture %s detected strength=%.2f action=%s",
+             gesture_name(output.detected), output.strength,
+             actionable ? "armed" : should_wake ? "wake-only" : "suppressed");
+}
+
 void worker(void *) {
     TickType_t wake = xTaskGetTickCount();
     std::int64_t last_motion_sample_us = 0;
+    std::int64_t last_gesture_motion_sample_us = 0;
     bool readiness_announced = false;
     while (true) {
         const auto now_us = esp_timer_get_time();
@@ -238,7 +320,37 @@ void worker(void *) {
         }
         portEXIT_CRITICAL(&snapshot_mux);
 
-        const auto motion = hardware_service().snapshot().motion;
+        const auto hardware = hardware_service().snapshot();
+        const auto motion = hardware.motion;
+        if (motion.valid && motion.sampled_at_us > last_gesture_motion_sample_us) {
+            ActivitySettings settings{};
+            portENTER_CRITICAL(&snapshot_mux);
+            settings = current.settings;
+            portEXIT_CRITICAL(&snapshot_mux);
+            const auto power = power_service().snapshot();
+            const bool recent_physical_input =
+                now_us - power.last_physical_input_us < 1'000'000;
+            const bool external_power = hardware.battery.charging ||
+                                        usb_serial_jtag_is_connected();
+            const bool screen_inactive = power.state != nightglass::core::PowerState::active;
+            const auto gesture = gesture_processor.process({
+                .accel_x_g = motion.accel_x_g,
+                .accel_y_g = motion.accel_y_g,
+                .accel_z_g = motion.accel_z_g,
+                .gyro_x_dps = motion.gyro_calibrated ? motion.gyro_corrected_x_dps
+                                                     : motion.gyro_raw_x_dps,
+                .gyro_y_dps = motion.gyro_calibrated ? motion.gyro_corrected_y_dps
+                                                     : motion.gyro_raw_y_dps,
+                .gyro_z_dps = motion.gyro_calibrated ? motion.gyro_corrected_z_dps
+                                                     : motion.gyro_raw_z_dps,
+                .sampled_at_us = motion.sampled_at_us,
+                .allow_raise = screen_inactive,
+                .gyro_calibrated = motion.gyro_calibrated,
+            });
+            last_gesture_motion_sample_us = motion.sampled_at_us;
+            publish_gesture(gesture, now_us, external_power, recent_physical_input,
+                            screen_inactive);
+        }
         if (motion.valid && motion.gyro_calibrated &&
             motion.sampled_at_us > last_motion_sample_us) {
             const auto output = processor.process({motion.accel_x_g, motion.accel_y_g,
@@ -307,6 +419,7 @@ nightglass::core::Status ActivityService::start() {
     load_state();
     day_state.fallback_rollover_us = esp_timer_get_time() + 86'400LL * 1'000'000LL;
     processor.reset();
+    gesture_processor.reset();
     command_queue = xQueueCreate(4, sizeof(Command));
     if (!command_queue) {
         return {nightglass::core::StatusCode::no_memory, "activity command queue failed"};
@@ -317,6 +430,10 @@ nightglass::core::Status ActivityService::start() {
         command_queue = nullptr;
         return {nightglass::core::StatusCode::no_memory, "activity task creation failed"};
     }
+    portENTER_CRITICAL(&snapshot_mux);
+    current.service_started = true;
+    ++current.sequence;
+    portEXIT_CRITICAL(&snapshot_mux);
     nightglass::core::health_registry().set(
         "activity", current.persistence_ok ? nightglass::core::HealthState::degraded
                                             : nightglass::core::HealthState::failed,

@@ -16,7 +16,8 @@ endif()
 idf_component_register(
     SRCS "src/activity.cpp" "src/activity_day.cpp" "src/activity_processor.cpp"
          "src/activity_units.cpp"
-         "src/gyro_processor.cpp" "src/hardware.cpp" "src/power.cpp"
+         "src/gyro_processor.cpp" "src/gesture_processor.cpp" "src/gesture_policy.cpp"
+         "src/hardware.cpp" "src/power.cpp"
          "src/time_math.cpp" "src/clock.cpp" "src/watchface.cpp"
          "src/watchface_schema.cpp" "src/connectivity_protocol.cpp"
          "src/update_transport_protocol.cpp" "src/update_transport.cpp" "src/connectivity.cpp"
