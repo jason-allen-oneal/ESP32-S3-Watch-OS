@@ -14,6 +14,7 @@ VERIFIER = ROOT / "scripts" / "verify-release-config.py"
 PUBLIC_KEY = (ROOT / "config" / "ota-public-key.hex").read_text(encoding="ascii").strip()
 
 GOOD = {
+    "CONFIG_ESP_MAIN_TASK_STACK_SIZE": "8192",
     "CONFIG_ESP_COREDUMP_ENABLE_TO_NONE": "y",
     "CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION": "y",
     "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL": "98304",

@@ -127,10 +127,12 @@ bool required_health_is_ok() {
     ESP_LOGE(kTag, "OTA_HIL forced essential-health failure");
     return false;
 #endif
-    constexpr std::array<const char *, 9> required{
+    constexpr std::array<const char *, 7> safe_mode_required{
+        "nvs", "display", "touch", "power", "clock", "ui", "update_crypto"};
+    constexpr std::array<const char *, 9> full_required{
         "nvs", "display", "touch", "power", "clock", "ui",
         "update_crypto", "connectivity", "update_transport"};
-    for (const auto *name : required) {
+    const auto check = [](const char *name) {
         nightglass::core::HealthRecord record{};
         if (!nightglass::core::health_registry().copy(name, record)) return false;
         const bool degradation_allowed = std::strcmp(name, "display") == 0 ||
@@ -139,6 +141,17 @@ bool required_health_is_ok() {
         if (record.state != nightglass::core::HealthState::ok &&
             !(degradation_allowed && record.state == nightglass::core::HealthState::degraded)) {
             return false;
+        }
+        return true;
+    };
+    const auto safe_mode = instance.snapshot().safe_mode;
+    if (safe_mode) {
+        for (const auto *name : safe_mode_required) {
+            if (!check(name)) return false;
+        }
+    } else {
+        for (const auto *name : full_required) {
+            if (!check(name)) return false;
         }
     }
     return true;
