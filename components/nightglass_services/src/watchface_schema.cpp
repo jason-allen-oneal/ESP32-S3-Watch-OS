@@ -49,6 +49,7 @@ std::uint16_t field_complication(FaceField field) {
         case FaceField::battery:
         case FaceField::battery_detail:
             return complication_battery;
+        case FaceField::steps_icon:
         case FaceField::steps:
             return complication_steps;
         case FaceField::motion:

@@ -44,6 +44,7 @@ enum class FaceField : std::uint8_t {
     date,
     battery,
     battery_detail,
+    steps_icon,
     steps,
     motion,
     alarm,

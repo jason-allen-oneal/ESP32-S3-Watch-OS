@@ -184,6 +184,18 @@ void draw_weather_icon(lv_obj_t *parent, nightglass::services::WeatherIcon icon,
     }
 }
 
+void draw_steps_icon(lv_obj_t *parent, std::uint32_t color) {
+    if (!parent) return;
+    lv_obj_clean(parent);
+
+    // Two compact footprints. Native LVGL geometry avoids depending on a
+    // Unicode glyph that is not part of the compiled Montserrat fonts.
+    weather_shape(parent, 25, 7, 7, 10, color, 4);
+    weather_shape(parent, 23, 2, 5, 5, color, 3);
+    weather_shape(parent, 37, 3, 7, 10, color, 4);
+    weather_shape(parent, 41, 0, 5, 5, color, 3);
+}
+
 lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int width, int height,
                       const char *text, std::uint32_t background,
                       std::uint32_t foreground, lv_event_cb_t callback,
@@ -1341,14 +1353,20 @@ void Shell::render_pack_home() {
 
     for (std::uint8_t index = 0; index < pack.text_slot_count; ++index) {
         const auto &slot = pack.text_slots[index];
-        if (slot.field == nightglass::services::FaceField::weather_icon) {
+        if (slot.field == nightglass::services::FaceField::weather_icon ||
+            slot.field == nightglass::services::FaceField::steps_icon) {
             auto *obj = lv_obj_create(content_host_);
             lv_obj_remove_style_all(obj);
             lv_obj_set_pos(obj, slot.bounds.x, slot.bounds.y);
             lv_obj_set_size(obj, slot.bounds.width, slot.bounds.height);
             lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
-            home_weather_icon_ = obj;
+            if (slot.field == nightglass::services::FaceField::weather_icon) {
+                home_weather_icon_ = obj;
+            } else {
+                home_steps_icon_ = obj;
+                draw_steps_icon(obj, face_color(pack.palette, slot.color));
+            }
             continue;
         }
         auto *obj = label(content_host_, slot.fixed_text ? slot.fixed_text : "--",
@@ -1375,6 +1393,8 @@ void Shell::render_pack_home() {
                 break;
             case nightglass::services::FaceField::battery_detail:
                 home_battery_detail_ = obj;
+                break;
+            case nightglass::services::FaceField::steps_icon:
                 break;
             case nightglass::services::FaceField::steps:
                 home_steps_ = obj;
@@ -3034,6 +3054,7 @@ void Shell::clear_route_objects() {
     home_battery_ = nullptr;
     home_battery_detail_ = nullptr;
     home_motion_ = nullptr;
+    home_steps_icon_ = nullptr;
     home_steps_ = nullptr;
     diagnostics_rtc_state_ = nullptr;
     diagnostics_rtc_detail_ = nullptr;

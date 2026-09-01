@@ -238,6 +238,7 @@ private:
     lv_obj_t *home_battery_{nullptr};
     lv_obj_t *home_battery_detail_{nullptr};
     lv_obj_t *home_motion_{nullptr};
+    lv_obj_t *home_steps_icon_{nullptr};
     lv_obj_t *home_steps_{nullptr};
     lv_obj_t *home_alarm_{nullptr};
     lv_obj_t *home_timer_{nullptr};

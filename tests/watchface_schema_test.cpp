@@ -13,6 +13,8 @@ constexpr FaceTextSlot kText[]{
      FaceTextAlign::center, FaceColorRole::accent, nullptr},
     {FaceField::weather_icon, {300, 100, 50, 50}, FaceTextStyle::caption_14,
      FaceTextAlign::center, FaceColorRole::accent, nullptr},
+    {FaceField::steps_icon, {50, 100, 50, 24}, FaceTextStyle::caption_14,
+     FaceTextAlign::center, FaceColorRole::accent, nullptr},
 };
 constexpr FaceActionSlot kActions[]{
     {FaceAction::open_apps, {28, 400, 100, 74}},
@@ -25,12 +27,12 @@ FacePack full_pack() {
             "Test",
             5,
             FaceLayout::full_background,
-            complication_time | complication_weather,
+            complication_time | complication_weather | complication_steps,
             kPalette,
             FaceAsset::revenant_grid_v2,
             {ChromeTheme::revenant, FaceAsset::revenant_grid_v2, 36},
             kText,
-            3,
+            4,
             kActions,
             2};
 }
@@ -46,6 +48,10 @@ int main() {
     auto pack = full_pack();
     assert(valid_face_pack(pack));
 
+    pack.complications &= ~complication_steps;
+    assert(!valid_face_pack(pack));
+
+    pack = full_pack();
     pack.format_version = 99;
     assert(!valid_face_pack(pack));
     pack = full_pack();
