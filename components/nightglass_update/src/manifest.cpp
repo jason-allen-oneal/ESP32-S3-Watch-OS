@@ -7,8 +7,24 @@ namespace nightglass::update {
 namespace {
 
 template <std::size_t Size>
-bool terminated_nonempty(const std::array<char, Size> &value) noexcept {
-    return value[0] != '\0' && std::memchr(value.data(), '\0', value.size()) != nullptr;
+bool canonical_text(const std::array<char, Size> &value) noexcept {
+    if (value[0] == '\0') return false;
+    bool terminated = false;
+    for (const char character : value) {
+        if (terminated) {
+            if (character != '\0') return false;
+            continue;
+        }
+        if (character == '\0') {
+            terminated = true;
+            continue;
+        }
+        const auto byte = static_cast<unsigned char>(character);
+        if (byte < 0x21 || byte > 0x7E || character == '\\' || character == '=') {
+            return false;
+        }
+    }
+    return terminated;
 }
 
 bool digest_is_nonzero(const std::array<std::uint8_t, kSha256Size> &digest) noexcept {
@@ -21,9 +37,9 @@ bool digest_is_nonzero(const std::array<std::uint8_t, kSha256Size> &digest) noex
 
 ManifestStatus validate_manifest(const UpdateManifest &manifest,
                                  const ValidationContext &context) noexcept {
-    if (!terminated_nonempty(manifest.board_id) ||
-        !terminated_nonempty(manifest.partition_id) ||
-        !terminated_nonempty(manifest.app_version) || !digest_is_nonzero(manifest.image_sha256)) {
+    if (!canonical_text(manifest.board_id) ||
+        !canonical_text(manifest.partition_id) ||
+        !canonical_text(manifest.app_version) || !digest_is_nonzero(manifest.image_sha256)) {
         return ManifestStatus::malformed;
     }
     if (manifest.format_version != kManifestFormatVersion) {
@@ -53,9 +69,9 @@ ManifestStatus canonical_signature_payload(const UpdateManifest &manifest,
                                            std::span<char> output,
                                            std::size_t &written) noexcept {
     written = 0;
-    if (!terminated_nonempty(manifest.board_id) ||
-        !terminated_nonempty(manifest.partition_id) ||
-        !terminated_nonempty(manifest.app_version)) {
+    if (!canonical_text(manifest.board_id) ||
+        !canonical_text(manifest.partition_id) ||
+        !canonical_text(manifest.app_version)) {
         return ManifestStatus::malformed;
     }
 

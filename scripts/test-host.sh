@@ -13,8 +13,9 @@ weather_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-weather-test.XXXXXX")"
 navigation_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-navigation-test.XXXXXX")"
 audio_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-audio-test.XXXXXX")"
 update_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-update-test.XXXXXX")"
+verifier_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-verifier-test.XXXXXX")"
 clock_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-clock-policy-test.XXXXXX")"
-trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${clock_policy_binary}"' EXIT
+trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}"' EXIT
 
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
 python3 -B "${project_dir}/tests/ota_state_inspector_test.py"
@@ -106,5 +107,19 @@ python3 -B "${project_dir}/tests/release_config_test.py"
   "${project_dir}/tests/update_manifest_test.cpp" \
   -o "${update_binary}"
 "${update_binary}"
+
+idf_dir="${NIGHTGLASS_IDF_PATH:-${IDF_PATH:-${HOME}/esp/esp-idf-v5.5.5}}"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/tests/fixtures" \
+  -I"${project_dir}/components/nightglass_update/include" \
+  -I"${project_dir}/components/nightglass_core/include" \
+  -I"${idf_dir}/components/mbedtls/mbedtls/include" \
+  "${project_dir}/components/nightglass_update/src/verifier.cpp" \
+  "${project_dir}/tests/update_verifier_test.cpp" \
+  -Wl,-l:libmbedcrypto.so.16 \
+  -o "${verifier_binary}"
+"${verifier_binary}"
+python3 -B "${project_dir}/tests/ota_crypto_test.py" \
+  "${update_binary}" "${verifier_binary}"
 
 printf 'Nightglass host tests passed\n'

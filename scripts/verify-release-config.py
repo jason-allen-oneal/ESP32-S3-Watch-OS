@@ -21,6 +21,9 @@ REQUIRED_DISABLED = (
 REQUIRED_VALUES = {
     "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL": "98304",
     "CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT": "8",
+    # Until production key custody and provisioning are separately approved,
+    # release artifacts must remain dormant/fail-closed.
+    "CONFIG_NIGHTGLASS_OTA_P256_PUBLIC_KEY_HEX": '""',
 }
 
 

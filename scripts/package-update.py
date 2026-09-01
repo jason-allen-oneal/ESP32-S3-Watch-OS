@@ -16,10 +16,18 @@ PARTITION_ID = "nightglass-32m-r1"
 SLOT_SIZE = 6 * 1024 * 1024
 APP_DESC_OFFSET = 0x20
 APP_DESC_MAGIC = 0xABCD5432
+SIGNATURE_ALGORITHM = "ecdsa-p256-sha256-der"
 
 
 def fixed_string(raw: bytes) -> str:
-    return raw.split(b"\0", 1)[0].decode("utf-8", errors="strict")
+    terminator = raw.find(b"\0")
+    if terminator <= 0 or any(raw[terminator + 1 :]):
+        raise ValueError("fixed string is not uniquely NUL padded")
+    value = raw[:terminator].decode("ascii", errors="strict")
+    if any(ord(character) < 0x21 or ord(character) > 0x7E or character in "\\="
+           for character in value):
+        raise ValueError("fixed string contains non-canonical characters")
+    return value
 
 
 def canonical_payload(manifest: dict[str, object]) -> str:
@@ -53,8 +61,11 @@ def main() -> int:
     magic, secure_version = struct.unpack_from("<II", image, APP_DESC_OFFSET)
     if magic != APP_DESC_MAGIC:
         raise SystemExit("ESP application descriptor not found at expected offset")
-    app_version = fixed_string(image[APP_DESC_OFFSET + 16 : APP_DESC_OFFSET + 48])
-    project_name = fixed_string(image[APP_DESC_OFFSET + 48 : APP_DESC_OFFSET + 80])
+    try:
+        app_version = fixed_string(image[APP_DESC_OFFSET + 16 : APP_DESC_OFFSET + 48])
+        project_name = fixed_string(image[APP_DESC_OFFSET + 48 : APP_DESC_OFFSET + 80])
+    except (UnicodeDecodeError, ValueError) as error:
+        raise SystemExit(f"application descriptor strings are malformed: {error}") from error
     if project_name != "nightglass" or not app_version:
         raise SystemExit("image is not a versioned Nightglass application")
     if len(app_version.encode()) >= 32:
@@ -63,6 +74,10 @@ def main() -> int:
         raise SystemExit("--signature-algorithm is required with --signature")
     if args.signature_algorithm and not args.signature:
         raise SystemExit("--signature is required with --signature-algorithm")
+    if args.signature_algorithm and args.signature_algorithm != SIGNATURE_ALGORITHM:
+        raise SystemExit(
+            f"unsupported signature algorithm; expected {SIGNATURE_ALGORITHM}"
+        )
 
     outputs = [args.output / "firmware.bin", args.output / "manifest.json", args.output / "manifest.payload"]
     if args.signature:

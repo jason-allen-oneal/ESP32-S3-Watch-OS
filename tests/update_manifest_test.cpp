@@ -5,6 +5,7 @@
 #include <array>
 #include <cassert>
 #include <cstring>
+#include <iostream>
 #include <string_view>
 
 namespace {
@@ -27,7 +28,7 @@ nightglass::update::UpdateManifest valid_manifest() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char **argv) {
     using namespace nightglass::update;
     const ValidationContext context{
         .running_version = "v0.2.0",
@@ -52,6 +53,15 @@ int main() {
     manifest = valid_manifest();
     manifest.image_sha256 = {};
     assert(validate_manifest(manifest, context) == ManifestStatus::malformed);
+    manifest = valid_manifest();
+    manifest.app_version[7] = 'x';
+    assert(validate_manifest(manifest, context) == ManifestStatus::malformed);
+    manifest = valid_manifest();
+    copy_text(manifest.app_version, "v0.3.0\nforged=1");
+    assert(validate_manifest(manifest, context) == ManifestStatus::malformed);
+    manifest = valid_manifest();
+    copy_text(manifest.app_version, "v0.3.0=forged");
+    assert(validate_manifest(manifest, context) == ManifestStatus::malformed);
 
     manifest = valid_manifest();
     std::array<char, 512> payload{};
@@ -64,6 +74,10 @@ int main() {
     assert(payload_view.find("size=1024\n") != std::string_view::npos);
     assert(payload_view.ends_with(
         "sha256=abababababababababababababababababababababababababababababababab\n"));
+    if (argc == 2 && std::string_view(argv[1]) == "--print-payload") {
+        std::cout.write(payload.data(), static_cast<std::streamsize>(payload_size));
+        return 0;
+    }
     std::array<char, 16> too_small{};
     assert(canonical_signature_payload(manifest, too_small, payload_size) ==
            ManifestStatus::output_too_small);

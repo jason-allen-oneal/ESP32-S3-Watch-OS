@@ -18,4 +18,15 @@ config NIGHTGLASS_OTA_ALLOW_UNSIGNED_DEVELOPMENT
         for production. Snapshots and logs explicitly identify this mode as
         unsigned development, never as signature verified.
 
+config NIGHTGLASS_OTA_P256_PUBLIC_KEY_HEX
+    string "Provisioned OTA ECDSA P-256 public key (SEC1 hex)"
+    depends on NIGHTGLASS_OTA_ENABLED
+    default ""
+    help
+        Uncompressed SEC1 P-256 public key encoded as exactly 130 hexadecimal
+        characters (04 || X || Y). The private signing key must never be placed
+        in firmware or this repository. An empty value installs no verifier;
+        malformed configured values install a rejecting sentinel. Both states
+        fail closed before slot erase.
+
 endmenu

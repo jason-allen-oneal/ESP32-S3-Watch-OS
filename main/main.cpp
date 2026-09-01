@@ -21,6 +21,7 @@
 #include "nightglass/services/audio.hpp"
 #include "nightglass/ui/shell.hpp"
 #include "nightglass/update/service.hpp"
+#include "nightglass/update/verifier.hpp"
 
 namespace {
 constexpr char kTag[] = "nightglass_boot";
@@ -112,6 +113,27 @@ extern "C" void app_main() {
     }
 
     auto &update = nightglass::update::update_service();
+    const auto verifier_init =
+        nightglass::update::initialize_provisioned_signature_verifier();
+    if (verifier_init.is_ok()) {
+        nightglass::core::health_registry().set(
+            "update_crypto", nightglass::core::HealthState::ok,
+            "P-256 update verifier provisioned");
+    } else if (verifier_init.code == nightglass::core::StatusCode::unavailable) {
+        nightglass::core::health_registry().set(
+            "update_crypto", nightglass::core::HealthState::degraded,
+            "OTA signing key not provisioned; updates disabled");
+    } else {
+        nightglass::core::health_registry().set(
+            "update_crypto", nightglass::core::HealthState::failed,
+            verifier_init.detail);
+        ESP_LOGE(kTag, "OTA verifier provisioning failed: %s", verifier_init.detail);
+    }
+    const auto verifier_status =
+        update.set_signature_verifier(nightglass::update::provisioned_signature_verifier());
+    if (!verifier_status.is_ok()) {
+        ESP_LOGE(kTag, "OTA verifier setup failed: %s", verifier_status.detail);
+    }
     const bool recovery_button = nightglass::update::recovery_button_held_at_boot();
     const auto recovery_status = update.begin_boot(nvs_result == ESP_OK, recovery_button);
     if (!recovery_status.is_ok()) {

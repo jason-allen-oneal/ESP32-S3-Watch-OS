@@ -90,7 +90,7 @@ and an eight-row display transfer chunk. This prevents a stale ignored
 The safe path is an on-device transport that feeds the existing
 `UpdateService`:
 
-1. provision a reviewed public verification key and concrete verifier;
+1. provision a reviewed public verification key for the dormant P-256 verifier;
 2. authenticate and frame the USB transport without sharing the logging stream;
 3. pass the signed manifest to `begin_update` before erasing anything;
 4. stream bounded sequential chunks through `write`;

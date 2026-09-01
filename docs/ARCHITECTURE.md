@@ -138,8 +138,8 @@ slot. Bootloader rollback remains armed until the runtime health gate succeeds.
 
 The backend now enforces those metadata, stream, inactive-slot, embedded image,
 and 60-second rollback checks. The production-default signature policy is
-fail-closed because no verifier or public key has been provisioned. Companion
-transport, update/recovery UI, and production key selection remain open. See
+fail-closed because the P-256 verifier has no provisioned public key. Companion
+transport, update/recovery UI, and production key custody remain open. See
 `docs/UPDATE_RECOVERY.md`.
 
 Secure Boot V2 and flash encryption remain deferred because their eFuse changes

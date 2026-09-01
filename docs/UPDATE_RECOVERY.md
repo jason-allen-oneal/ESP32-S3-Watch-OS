@@ -1,9 +1,10 @@
 # Update and recovery
 
-Nightglass now has an ESP-IDF OTA backend and recovery supervisor. It does not
-yet have an update screen, BLE/Wi-Fi transfer protocol, signing key, or concrete
-signature algorithm. The production-default build therefore refuses every OTA
-image before erasing the inactive slot: no `SignatureVerifier` is installed and
+Nightglass now has an ESP-IDF OTA backend, ECDSA P-256 verifier, and recovery
+supervisor. It does not yet have an update screen, authenticated BLE/Wi-Fi
+transfer protocol, or provisioned signing key. The production-default build
+therefore refuses every OTA image before erasing the inactive slot: no public
+verification key is installed and
 `CONFIG_NIGHTGLASS_OTA_ALLOW_UNSIGNED_DEVELOPMENT` is disabled.
 
 USB release status and the reason raw `esptool`/`otatool` deployment is blocked
@@ -91,8 +92,37 @@ installed verifier's signature rejection. ESP-IDF rollback protects the next
 boot until the runtime health gate accepts it.
 
 It does **not** currently provide an authenticated transport, a provisioned
-verification key/algorithm, confidentiality, hardware-backed anti-rollback,
+verification key, confidentiality, hardware-backed anti-rollback,
 Secure Boot V2, flash encryption, or physical-attacker resistance. The
 `secure_version` comparison is software-only because no eFuse anti-rollback
 policy is enabled. Enabling secure boot, flash encryption, or burning eFuses
 requires a separate production recovery plan and explicit approval.
+
+## Production verifier provisioning
+
+The firmware includes an ECDSA P-256 verifier for DER-encoded signatures over
+the SHA-256 digest of `manifest.payload`. It is installed only when
+`CONFIG_NIGHTGLASS_OTA_P256_PUBLIC_KEY_HEX` contains an uncompressed SEC1
+public point (`04 || X || Y`, exactly 130 hexadecimal characters). Empty or
+malformed configuration leaves updates disabled before `esp_ota_begin()` can
+erase the inactive slot. A malformed configured key installs a rejecting
+verifier sentinel rather than appearing absent, so unsigned-development mode
+cannot bypass provisioning failure.
+
+Provisioning validates the SEC1 point against the P-256 curve during boot and
+publishes an `update_crypto` health record. Empty configuration is reported as
+degraded/disabled; malformed or off-curve configuration is a failed health
+state. Once any key text is configured, crypto initialization and verification
+errors are signature rejections rather than `unavailable`, so development
+unsigned mode cannot bypass a broken provisioned verifier.
+
+Nightglass currently accepts both low-S and high-S mathematically valid ECDSA
+signatures because mbedTLS does. Signature bytes are never used as an update
+identity; the canonical manifest and image SHA-256 are authoritative. Release
+packaging should emit low-S signatures for interoperability and stable
+artifacts.
+
+The matching private key is a release credential. It must be created and held
+outside the repository by an approved secure credential facility. Do not place
+it in `sdkconfig`, build logs, shell arguments, URLs, or package metadata.
+Nightglass does not generate or provision that credential automatically.

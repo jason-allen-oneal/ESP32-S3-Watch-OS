@@ -812,7 +812,7 @@ OperationResult run_operation(AudioOperation operation, SoundCue cue,
     if (!cleanup.amplifier_disabled) {
         result.status = {nightglass::core::StatusCode::io_error,
                          "audio PA low could not be verified after test"};
-    } else if (!cleanup.resources_released) {
+    } else if (!result.resources_released) {
         result.status = {nightglass::core::StatusCode::io_error,
                          "audio cleanup incomplete; restart required"};
     }
