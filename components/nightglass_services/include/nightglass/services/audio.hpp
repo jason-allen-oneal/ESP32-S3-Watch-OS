@@ -12,6 +12,7 @@
 using i2c_master_bus_handle_t = void *;
 #endif
 #include "nightglass/core/status.hpp"
+#include "nightglass/services/voice_codec.hpp"
 
 namespace nightglass::services {
 
@@ -62,7 +63,20 @@ enum class AudioOperation : std::uint8_t {
     none,
     playback,
     capture,
+    voice_capture,
 };
+
+struct VoiceCaptureResult {
+    nightglass::core::StatusCode status{nightglass::core::StatusCode::ok};
+    std::size_t encoded_bytes{0};
+    std::uint32_t rms{0};
+    bool cancelled{false};
+};
+
+using VoiceCaptureCallback = void (*)(void *context,
+                                      const VoiceCaptureResult &result);
+using VoiceCaptureSink = bool (*)(void *context,
+                                  std::span<const std::uint8_t> encoded);
 
 struct AudioSettings {
     std::uint8_t volume_percent{100};
@@ -133,6 +147,15 @@ public:
     // codec/I2S I/O begins, keeping LVGL responsive. No samples are retained
     // or transmitted after the worker exits.
     nightglass::core::Status request_microphone_sample();
+    // Capture a bounded foreground voice turn into a caller-owned append sink.
+    // The sink runs synchronously on the single audio worker. The completion
+    // callback runs only after codec/I2S/PM cleanup is complete.
+    nightglass::core::Status request_voice_capture(
+        std::size_t maximum_encoded_bytes, VoiceCaptureSink sink,
+        VoiceCaptureCallback callback, void *context);
+    // `cancel=false` submits samples already captured; `cancel=true` wipes and
+    // reports a cancelled turn after the hardware owner has shut down.
+    void stop_voice_capture(bool cancel);
     nightglass::core::Status request_test_tone();
     nightglass::core::Status request_sound(SoundCue cue);
     // Invalidates queued and in-flight instances of the specified repeating

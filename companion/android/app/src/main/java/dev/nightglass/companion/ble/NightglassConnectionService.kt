@@ -21,6 +21,10 @@ import dev.nightglass.companion.notifications.NightglassNotificationListener
 import dev.nightglass.companion.phone.PhoneIntegrationManager
 import dev.nightglass.companion.weather.PhoneWeatherProxy
 import dev.nightglass.companion.update.OtaTransferManager
+import dev.nightglass.companion.voice.OpenClawVoiceGateway
+import dev.nightglass.companion.voice.VoiceResponseQueue
+import dev.nightglass.companion.voice.VoiceTransferReceiver
+import dev.nightglass.companion.voice.VoiceTurnOwner
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 
@@ -62,10 +66,15 @@ class NightglassConnectionService : Service() {
     private var negotiatedPayload = 20
     private val writes = ArrayDeque<ByteArray>()
     private val otaWrites = ArrayDeque<ByteArray>()
+    private val voiceWrites = VoiceResponseQueue()
     private var writePending = false
     private var pendingOtaWrite = false
+    private var pendingVoiceWrite = false
     private var pendingOpcode = -1
     private var linkReady = false
+    private var linkGeneration = 0L
+    private var voiceTurnGeneration = 0L
+    private var activeVoiceOwner: VoiceTurnOwner? = null
     private var authorizationProofPending = false
     private var lastActionSequence = 0
     private var forgetPending = false
@@ -80,6 +89,36 @@ class NightglassConnectionService : Service() {
     private val otaTransfers by lazy {
         OtaTransferManager(contentResolver, otaExecutor, { negotiatedPayload },
             ::writeOta, ::reportOtaProgress)
+    }
+    private val openClawVoice by lazy {
+        OpenClawVoiceGateway(this) { detail -> update(detail) }
+    }
+    private val voiceReceiver by lazy {
+        VoiceTransferReceiver(::writeVoiceControl, { session, audio ->
+            val owner = VoiceTurnOwner(session, linkGeneration, ++voiceTurnGeneration)
+            activeVoiceOwner = owner
+            val accepted = openClawVoice.submit(owner, audio) { completedOwner, result ->
+                reconnectHandler.post {
+                    if (destroyed || !linkReady || completedOwner != activeVoiceOwner ||
+                        completedOwner.linkGeneration != linkGeneration) return@post
+                    result.fold(
+                        onSuccess = { text -> sendVoiceResponse(completedOwner, text) },
+                        onFailure = { error ->
+                            activeVoiceOwner = null
+                            val status = if (error is SecurityException) 7 else 6
+                            writeVoiceControl(NightglassProtocol.voiceStatus(
+                                completedOwner.watchSession, status))
+                            update("OpenClaw voice unavailable")
+                        },
+                    )
+                }
+            }
+            audio.fill(0)
+            if (!accepted) {
+                activeVoiceOwner = null
+                writeVoiceControl(NightglassProtocol.voiceStatus(session, 2))
+            }
+        }, ::cancelVoiceTurn)
     }
     private val phoneIntegrations by lazy { PhoneIntegrationManager(this, weatherExecutor) }
     @Volatile private var destroyed = false
@@ -136,6 +175,8 @@ class NightglassConnectionService : Service() {
         pendingBondAddress = null
         reconnectHandler.removeCallbacks(weatherRefresh)
         phoneIntegrations.stop()
+        voiceReceiver.linkLost()
+        openClawVoice.close()
         weatherExecutor.shutdownNow()
         otaExecutor.shutdownNow()
         closeGatt()
@@ -312,9 +353,14 @@ class NightglassConnectionService : Service() {
         override fun onCharacteristicWrite(client: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (gatt !== client) return
             val completedOpcode = pendingOpcode
+            var completedVoiceOwner: VoiceTurnOwner? = null
             if (completedOpcode != 0x31)
                 Log.i(TAG, "Nightglass frame completion: opcode=$completedOpcode status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                synchronized(writes) {
+                    if (pendingVoiceWrite) voiceWrites.failWrite()
+                    pendingVoiceWrite = false
+                }
                 if (completedOpcode == 0x25 && forgetPending) {
                     forgetPending = false
                     reportForgetResult(false, "Watch did not acknowledge authorization reset")
@@ -323,7 +369,19 @@ class NightglassConnectionService : Service() {
                 recoverDeadLink(client)
                 return
             }
-            synchronized(writes) { writePending = false; pendingOpcode = -1; writeNextLocked() }
+            synchronized(writes) {
+                if (pendingVoiceWrite) completedVoiceOwner = voiceWrites.completeWrite()
+                pendingVoiceWrite = false
+                writePending = false
+                pendingOpcode = -1
+                writeNextLocked()
+            }
+            completedVoiceOwner?.let { owner ->
+                if (owner == activeVoiceOwner && owner.linkGeneration == linkGeneration) {
+                    activeVoiceOwner = null
+                    update("OpenClaw replied on Nightglass")
+                }
+            }
             if (completedOpcode == 0x25 && forgetPending) completeForgetPeer()
         }
         @Deprecated("API compatibility")
@@ -342,6 +400,10 @@ class NightglassConnectionService : Service() {
         if (!linkReady) return
         NightglassProtocol.parseOtaStatus(frame)?.let {
             otaTransfers.onStatus(it)
+            return
+        }
+        NightglassProtocol.parseVoiceRequest(frame)?.let { request ->
+            voiceReceiver.accept(request)
             return
         }
         val action = NightglassProtocol.parseAction(frame) ?: return
@@ -383,6 +445,37 @@ class NightglassConnectionService : Service() {
         val key = when(command) { 1 -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE; 2 -> KeyEvent.KEYCODE_MEDIA_NEXT; 3 -> KeyEvent.KEYCODE_MEDIA_PREVIOUS; 4 -> KeyEvent.KEYCODE_VOLUME_UP; 5 -> KeyEvent.KEYCODE_VOLUME_DOWN; else -> return }
         val audio = getSystemService(AudioManager::class.java)
         audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, key)); audio.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, key))
+    }
+    private fun sendVoiceResponse(owner: VoiceTurnOwner, text: String) {
+        if (!linkReady || owner != activeVoiceOwner || owner.linkGeneration != linkGeneration) return
+        val responseId = java.security.SecureRandom().nextInt().toUInt().let {
+            if (it == 0u) 1u else it
+        }
+        val accepted = synchronized(writes) {
+            val queued = voiceWrites.enqueueResponse(owner, responseId, text, negotiatedPayload)
+            if (queued) writeNextLocked()
+            queued
+        }
+        if (!accepted) {
+            activeVoiceOwner = null
+            writeVoiceControl(NightglassProtocol.voiceStatus(owner.watchSession, 8))
+            update("OpenClaw response could not be delivered")
+        }
+    }
+
+    private fun writeVoiceControl(frame: ByteArray): Boolean {
+        return synchronized(writes) {
+            val queued = linkReady && voiceWrites.enqueueControl(frame, negotiatedPayload)
+            if (queued) writeNextLocked()
+            queued
+        }
+    }
+
+    private fun cancelVoiceTurn(session: UInt) {
+        val owner = activeVoiceOwner?.takeIf { it.watchSession == session } ?: return
+        activeVoiceOwner = null
+        openClawVoice.cancel(owner)
+        synchronized(writes) { voiceWrites.purge(owner) }
     }
     private fun write(frame: ByteArray) {
         synchronized(writes) {
@@ -443,9 +536,14 @@ class NightglassConnectionService : Service() {
         val client = gatt ?: return
         val c = client.getService(NightglassProtocol.SERVICE)?.getCharacteristic(NightglassProtocol.PHONE_TO_WATCH) ?: return
         val otaFrame = otaWrites.peek()
-        val frame = otaFrame ?: writes.peek() ?: return
+        val voiceEntry = if (otaFrame == null) voiceWrites.beginWrite() else null
+        val frame = otaFrame ?: voiceEntry?.frame ?: writes.peek() ?: return
         if (frame.size > negotiatedPayload) {
-            writes.poll()
+            when {
+                otaFrame != null -> otaWrites.poll()?.fill(0)
+                voiceEntry != null -> voiceWrites.failWrite()
+                else -> writes.poll()?.fill(0)
+            }
             update("Nightglass frame exceeds negotiated MTU")
             writeNextLocked()
             return
@@ -455,10 +553,19 @@ class NightglassConnectionService : Service() {
         writePending = started
         if (started) {
             pendingOtaWrite = otaFrame != null
+            pendingVoiceWrite = voiceEntry != null
             pendingOpcode = frame.getOrNull(1)?.toInt()?.and(0xff) ?: -1
             if (pendingOpcode != 0x31)
                 Log.i(TAG, "Nightglass frame started: opcode=$pendingOpcode bytes=${frame.size}")
-            if (pendingOtaWrite) otaWrites.poll() else writes.poll()
+            if (pendingOtaWrite) otaWrites.poll()
+            else if (!pendingVoiceWrite) writes.poll()
+        } else if (voiceEntry != null) {
+            pendingVoiceWrite = false
+            voiceWrites.failWrite()
+            val owner = activeVoiceOwner
+            activeVoiceOwner = null
+            openClawVoice.cancel(owner)
+            update("OpenClaw response transport failed")
         } else if ((frame.getOrNull(1)?.toInt()?.and(0xff) ?: -1) == 0x25 &&
             forgetPending) {
             writes.poll()
@@ -535,6 +642,11 @@ class NightglassConnectionService : Service() {
     }
     private fun resetLinkState() {
         otaTransfers.linkLost()
+        linkGeneration++
+        val owner = activeVoiceOwner
+        activeVoiceOwner = null
+        openClawVoice.cancel(owner)
+        voiceReceiver.linkLost()
         if (forgetPending) {
             forgetPending = false
             reportForgetResult(false, "Authorization reset was not acknowledged")
@@ -543,9 +655,18 @@ class NightglassConnectionService : Service() {
         synchronized(writes) {
             writePending = false
             pendingOtaWrite = false
+            pendingVoiceWrite = false
+            pendingOpcode = -1
             linkReady = false
+            voiceWrites.reset()
+            otaWrites.forEach { it.fill(0) }
             otaWrites.clear()
-            writes.removeIf { frame -> frame.getOrNull(1)?.toInt()?.and(0xff) == 0x24 }
+            writes.removeIf { frame ->
+                val opcode = frame.getOrNull(1)?.toInt()?.and(0xff) ?: -1
+                val remove = opcode == 0x24 || opcode in 0x44..0x48
+                if (remove) frame.fill(0)
+                remove
+            }
             writes.forEach(::silenceNotificationAlert)
         }
         negotiatedPayload = 20
@@ -558,7 +679,17 @@ class NightglassConnectionService : Service() {
         if (gatt === client) gatt = null
         scheduleReconnect()
     }
-    private fun closeGatt() { synchronized(writes) { writes.clear(); otaWrites.clear(); writePending = false; pendingOtaWrite = false; linkReady = false; authorizationProofPending = false }; negotiatedPayload = 20; if (hasConnectPermissions()) gatt?.disconnect(); gatt?.close(); gatt = null }
+    private fun closeGatt() {
+        resetLinkState()
+        synchronized(writes) {
+            writes.forEach { it.fill(0) }
+            writes.clear()
+            authorizationProofPending = false
+        }
+        if (hasConnectPermissions()) gatt?.disconnect()
+        gatt?.close()
+        gatt = null
+    }
 
     private fun scheduleWeatherRefresh(delayMs: Long? = null) {
         if (destroyed) return

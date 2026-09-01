@@ -1,5 +1,7 @@
 package dev.nightglass.companion.protocol
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -162,5 +164,52 @@ class NightglassProtocolTest {
         assertNull(NightglassProtocol.parseOtaStatus(status.copyOf().also { it[18] = 1; it[19] = 0x10 }))
         assertArrayEquals(byteArrayOf(1, 0x34, 7, 0, 0, 0, 0, 0, 0, 0),
             NightglassProtocol.otaStatusQuery(7uL))
+    }
+
+    @Test fun voiceFramesAreBoundedAndStrict() {
+        val begin = byteArrayOf(1, 0x40, 7, 0, 0, 0, 9, 0, 0, 0,
+            0x66, 0x49, 0xcf.toByte(), 0xcb.toByte(), 1, 8)
+        assertEquals(NightglassProtocol.VoiceRequest.Begin(7u, 9, 0xcbcf4966u),
+            NightglassProtocol.parseVoiceRequest(begin))
+        val data = byteArrayOf(1, 0x41, 7, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+            'N'.code.toByte())
+        val parsed = NightglassProtocol.parseVoiceRequest(data)
+            as NightglassProtocol.VoiceRequest.Data
+        assertEquals(1, parsed.sequence)
+        assertArrayEquals(byteArrayOf('N'.code.toByte()), parsed.payload)
+        assertNull(NightglassProtocol.parseVoiceRequest(begin.copyOf().also { it[14] = 2 }))
+        assertEquals(12, NightglassProtocol.voiceAck(7u, 9, 4, 0).size)
+        assertEquals(16, NightglassProtocol.voiceResponseBegin(7u, 8u, 9, 1u).size)
+        assertEquals(13, NightglassProtocol.voiceResponseData(
+            7u, 8u, 0, byteArrayOf('x'.code.toByte())).size)
+        assertEquals(7, NightglassProtocol.voiceStatus(7u, 6).size)
+    }
+
+    @Test fun voiceFramesAcceptFiveMinuteBoundaryOnly() {
+        val maximum = NightglassProtocol.MAX_VOICE_ENCODED_BYTES
+        fun begin(total: Int) = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
+            .put(1).put(0x40).putInt(9).putInt(total).putInt(0x12345678)
+            .put(1).put(8).array()
+        fun end(total: Int) = ByteBuffer.allocate(14).order(ByteOrder.LITTLE_ENDIAN)
+            .put(1).put(0x42).putInt(9).putInt(total).putInt(0x12345678).array()
+        fun data(offset: Int) = ByteBuffer.allocate(13).order(ByteOrder.LITTLE_ENDIAN)
+            .put(1).put(0x41).putInt(9).putShort(1).putInt(offset).put(0x55).array()
+
+        assertEquals(NightglassProtocol.VoiceRequest.Begin(9u, maximum, 0x12345678u),
+            NightglassProtocol.parseVoiceRequest(begin(maximum)))
+        assertEquals(NightglassProtocol.VoiceRequest.End(9u, maximum, 0x12345678u),
+            NightglassProtocol.parseVoiceRequest(end(maximum)))
+        assertNotNull(NightglassProtocol.parseVoiceRequest(data(maximum - 1)))
+        assertNull(NightglassProtocol.parseVoiceRequest(begin(maximum + 1)))
+        assertNull(NightglassProtocol.parseVoiceRequest(end(maximum + 1)))
+        assertNull(NightglassProtocol.parseVoiceRequest(data(maximum)))
+        assertEquals(12, NightglassProtocol.voiceAck(9u, maximum, 4, 0).size)
+        assertThrows(IllegalArgumentException::class.java) {
+            NightglassProtocol.voiceAck(9u, maximum + 1, 4, 0)
+        }
+        assertEquals(60, NightglassProtocol.DEFAULT_VOICE_DURATION_SECONDS)
+        assertEquals(300, NightglassProtocol.MAX_VOICE_DURATION_SECONDS)
+        assertTrue(listOf(30, 60, 120, 300).all(NightglassProtocol::voiceDurationAllowed))
+        assertFalse(NightglassProtocol.voiceDurationAllowed(301))
     }
 }

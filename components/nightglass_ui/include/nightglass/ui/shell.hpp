@@ -46,6 +46,11 @@ private:
     static void weather_clear_wifi_callback(lv_event_t *event);
     static void connectivity_callback(lv_event_t *event);
     static void notifications_callback(lv_event_t *event);
+    static void openclaw_callback(lv_event_t *event);
+    static void openclaw_press_callback(lv_event_t *event);
+    static void openclaw_release_callback(lv_event_t *event);
+    static void openclaw_cancel_callback(lv_event_t *event);
+    static void openclaw_duration_callback(lv_event_t *event);
     static void media_app_callback(lv_event_t *event);
     static void notification_detail_callback(lv_event_t *event);
     static void notification_list_callback(lv_event_t *event);
@@ -118,6 +123,7 @@ private:
     void render_connectivity();
     void render_media();
     void render_notifications();
+    void render_openclaw();
     void render_classic_home();
     void render_pack_home();
     void render_aod_home();
@@ -139,6 +145,7 @@ private:
     void refresh_connectivity();
     void refresh_media();
     void refresh_notifications();
+    void refresh_openclaw();
     void refresh_alarm();
     void refresh_countdown();
     void refresh_stopwatch();
@@ -200,6 +207,11 @@ private:
     lv_obj_t *media_time_{nullptr};
     lv_obj_t *notification_status_{nullptr};
     lv_obj_t *notification_privacy_{nullptr};
+    lv_obj_t *openclaw_state_{nullptr};
+    lv_obj_t *openclaw_detail_{nullptr};
+    lv_obj_t *openclaw_response_{nullptr};
+    lv_obj_t *openclaw_ptt_{nullptr};
+    lv_obj_t *openclaw_duration_{nullptr};
 
     struct NotificationActionContext {
         Shell *shell{nullptr};

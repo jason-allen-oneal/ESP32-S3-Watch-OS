@@ -10,6 +10,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "nightglass/services/hardware.hpp"
+#include "nightglass/services/voice.hpp"
 #include "nightglass/update/service.hpp"
 
 namespace nightglass::services {
@@ -101,10 +102,16 @@ void handle(UpdateTransportCommand &command) {
                 }
                 break;
             }
+            if (!voice_service().prepare_for_update(1500)) {
+                result = {nightglass::core::StatusCode::invalid_state,
+                          "voice service did not become quiescent"};
+                break;
+            }
             if (snapshot.state == nightglass::update::UpdateState::failed) {
                 const auto abort_result = service.abort();
                 if (!abort_result.is_ok()) {
                     result = abort_result;
+                    voice_service().update_finished();
                     break;
                 }
             }
@@ -113,6 +120,7 @@ void handle(UpdateTransportCommand &command) {
             if (!battery.percent_valid || (!battery.charging && battery.percent < 40)) {
                 result = {nightglass::core::StatusCode::invalid_state,
                           "watch battery must be charging or at least 40 percent"};
+                voice_service().update_finished();
                 break;
             }
             result = service.begin_update(
@@ -122,6 +130,8 @@ void handle(UpdateTransportCommand &command) {
                 active_session = command.session;
                 active_manifest = command.manifest;
                 publish_transport_snapshot(false);
+            } else {
+                voice_service().update_finished();
             }
             }
             break;
@@ -170,6 +180,7 @@ void handle(UpdateTransportCommand &command) {
                     active_session = 0;
                     active_manifest = {};
                     publish_transport_snapshot(false);
+                    voice_service().update_finished();
                 }
             }
             break;
@@ -206,6 +217,7 @@ void worker(void *) {
                     active_session = 0;
                     active_manifest = {};
                     publish_transport_snapshot(false);
+                    voice_service().update_finished();
                 }
             }
         }

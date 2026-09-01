@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -29,6 +30,7 @@
 #include "freertos/task.h"
 #include "nightglass/core/health.hpp"
 #include "nightglass/services/power.hpp"
+#include "nightglass/services/voice_codec.hpp"
 #include "nvs.h"
 #define NIGHTGLASS_AUDIO_RUNTIME 1
 #else
@@ -184,6 +186,8 @@ struct OperationResult {
     std::size_t transferred_bytes{0};
     std::size_t expected_bytes{kDiagnosticBytes};
     std::uint32_t capture_rms{0};
+    std::size_t encoded_bytes{0};
+    bool cancelled{false};
     bool amplifier_disabled{true};
     bool resources_released{true};
 };
@@ -192,6 +196,10 @@ struct AudioCommand {
     AudioOperation operation{AudioOperation::none};
     SoundCue cue{SoundCue::test};
     std::uint32_t generation{0};
+    std::size_t voice_capacity{0};
+    VoiceCaptureSink voice_sink{nullptr};
+    VoiceCaptureCallback voice_callback{nullptr};
+    void *voice_context{nullptr};
 };
 
 AudioService instance;
@@ -207,6 +215,8 @@ SemaphoreHandle_t request_mutex{nullptr};
 std::uint16_t pending_cues{};
 std::uint8_t pending_count{};
 bool capture_pending{};
+std::atomic_bool voice_stop_requested{false};
+std::atomic_bool voice_cancel_requested{false};
 std::uint32_t alarm_generation{1};
 std::uint32_t timer_generation{1};
 
@@ -635,9 +645,11 @@ void generate_sound_cue(std::int16_t *samples, SoundCue cue,
     }
 }
 
-OperationResult run_operation(AudioOperation operation, SoundCue cue,
-                              std::uint32_t generation) {
+OperationResult run_operation(const AudioCommand &command) {
     OperationResult result{};
+    const auto operation = command.operation;
+    const auto cue = command.cue;
+    const auto generation = command.generation;
     const auto embedded = operation == AudioOperation::playback
                               ? embedded_sound(cue)
                               : EmbeddedSoundView{};
@@ -648,6 +660,8 @@ OperationResult run_operation(AudioOperation operation, SoundCue cue,
     }
     result.expected_bytes = operation == AudioOperation::capture
                                 ? kDiagnosticBytes
+                                : operation == AudioOperation::voice_capture
+                                      ? 0
                                 : pcm.data != nullptr
                                       ? pcm.size
                                       : sound_cue_transfer_bytes(cue);
@@ -764,34 +778,96 @@ OperationResult run_operation(AudioOperation operation, SoundCue cue,
             // Let the ES7210 bias/HPF settle and allow its two-buffer DMA ring
             // to overwrite startup zeros before measuring the live capsules.
             vTaskDelay(pdMS_TO_TICKS(kMicrophoneSettleMs));
-            std::size_t read{};
-            const auto io_status = i2s_channel_read(resources.channel, buffer,
-                                                    kDiagnosticBytes, &read,
-                                                    kIoTimeoutMs);
-            result.transferred_bytes = read;
-            if (io_status == ESP_OK && read == kDiagnosticBytes) {
-                result.capture_rms = pcm16_rms(
-                    reinterpret_cast<const std::int16_t *>(buffer), read / sizeof(std::int16_t));
-#if CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST
-                const auto *samples = reinterpret_cast<const std::int16_t *>(buffer);
-                std::int16_t minimum = samples[0];
-                std::int16_t maximum = samples[0];
-                std::size_t nonzero{};
-                for (std::size_t index = 0; index < read / sizeof(std::int16_t); ++index) {
-                    minimum = std::min(minimum, samples[index]);
-                    maximum = std::max(maximum, samples[index]);
-                    if (samples[index] != 0) ++nonzero;
+            if (operation == AudioOperation::voice_capture) {
+                if (command.voice_sink == nullptr || command.voice_capacity == 0 ||
+                    command.voice_capacity > kVoiceMaximumEncodedBytes ||
+                    command.voice_callback == nullptr) {
+                    result.status = {nightglass::core::StatusCode::invalid_state,
+                                     "voice capture target invalid"};
+                } else {
+                    bool transfer_ok = true;
+                    std::array<std::uint8_t, kDiagnosticBytes / 4U> encoded_chunk{};
+                    while (result.encoded_bytes < command.voice_capacity &&
+                           !voice_stop_requested.load(std::memory_order_acquire)) {
+                        std::size_t read{};
+                        const auto io_status = i2s_channel_read(
+                            resources.channel, buffer, kDiagnosticBytes, &read,
+                            kIoTimeoutMs);
+                        if (io_status != ESP_OK || read != kDiagnosticBytes) {
+                            result.status = {
+                                io_status == ESP_ERR_TIMEOUT
+                                    ? nightglass::core::StatusCode::timeout
+                                    : nightglass::core::StatusCode::io_error,
+                                "voice microphone transfer incomplete"};
+                            transfer_ok = false;
+                            break;
+                        }
+                        const auto samples = std::span<const std::int16_t>(
+                            reinterpret_cast<const std::int16_t *>(buffer),
+                            read / sizeof(std::int16_t));
+                        const auto available = std::min<std::size_t>(
+                            encoded_chunk.size(),
+                            command.voice_capacity - result.encoded_bytes);
+                        const auto encoded = encode_voice_mulaw_8khz(
+                            samples, {encoded_chunk.data(), available});
+                        if (encoded != samples.size() / 2U ||
+                            !command.voice_sink(command.voice_context,
+                                                {encoded_chunk.data(), encoded})) {
+                            result.status = {nightglass::core::StatusCode::no_memory,
+                                             "voice page store exhausted"};
+                            transfer_ok = false;
+                            break;
+                        }
+                        result.capture_rms = std::max(result.capture_rms,
+                                                      pcm16_rms(samples.data(), samples.size()));
+                        result.transferred_bytes += read;
+                        result.encoded_bytes += encoded;
+                    }
+                    result.cancelled = voice_cancel_requested.load(std::memory_order_acquire);
+                    if (result.cancelled) {
+                        result.encoded_bytes = 0;
+                        result.status = {nightglass::core::StatusCode::invalid_state,
+                                         "voice capture cancelled"};
+                    } else if (transfer_ok && result.encoded_bytes > 0) {
+                        result.status = nightglass::core::Status::Ok();
+                    } else if (transfer_ok) {
+                        result.status = {nightglass::core::StatusCode::invalid_state,
+                                         "voice capture empty"};
+                    }
+                    // A user-ended recording is complete, not a short transfer.
+                    result.expected_bytes = result.transferred_bytes;
                 }
-                ESP_LOGI(kTag, "capture raw min=%d max=%d nonzero=%u/%u",
-                         minimum, maximum, static_cast<unsigned>(nonzero),
-                         static_cast<unsigned>(read / sizeof(std::int16_t)));
-#endif
-                result.status = nightglass::core::Status::Ok();
             } else {
-                result.status = {io_status == ESP_ERR_TIMEOUT
-                                     ? nightglass::core::StatusCode::timeout
-                                     : nightglass::core::StatusCode::io_error,
-                                 "microphone transfer incomplete"};
+                std::size_t read{};
+                const auto io_status = i2s_channel_read(resources.channel, buffer,
+                                                        kDiagnosticBytes, &read,
+                                                        kIoTimeoutMs);
+                result.transferred_bytes = read;
+                if (io_status == ESP_OK && read == kDiagnosticBytes) {
+                    result.capture_rms = pcm16_rms(
+                        reinterpret_cast<const std::int16_t *>(buffer),
+                        read / sizeof(std::int16_t));
+#if CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST
+                    const auto *samples = reinterpret_cast<const std::int16_t *>(buffer);
+                    std::int16_t minimum = samples[0];
+                    std::int16_t maximum = samples[0];
+                    std::size_t nonzero{};
+                    for (std::size_t index = 0; index < read / sizeof(std::int16_t); ++index) {
+                        minimum = std::min(minimum, samples[index]);
+                        maximum = std::max(maximum, samples[index]);
+                        if (samples[index] != 0) ++nonzero;
+                    }
+                    ESP_LOGI(kTag, "capture raw min=%d max=%d nonzero=%u/%u",
+                             minimum, maximum, static_cast<unsigned>(nonzero),
+                             static_cast<unsigned>(read / sizeof(std::int16_t)));
+#endif
+                    result.status = nightglass::core::Status::Ok();
+                } else {
+                    result.status = {io_status == ESP_ERR_TIMEOUT
+                                         ? nightglass::core::StatusCode::timeout
+                                         : nightglass::core::StatusCode::io_error,
+                                     "microphone transfer incomplete"};
+                }
             }
         }
     }
@@ -804,6 +880,7 @@ OperationResult run_operation(AudioOperation operation, SoundCue cue,
     }
 
     const auto cleanup = release_resources(resources);
+    std::memset(buffer, 0, kDiagnosticBytes);
     heap_caps_free(buffer);
     const bool power_lock_released = release_audio_power_lock(pm_lock);
     if (!power_lock_released) ESP_LOGE(kTag, "audio PM lock cleanup failed");
@@ -832,7 +909,8 @@ void finish_operation(AudioOperation operation, const OperationResult &result) {
     state.last_io_us = esp_timer_get_time();
     state.amplifier_disabled = result.amplifier_disabled;
     state.amplifier_disabled_verified = result.amplifier_disabled;
-    if (operation == AudioOperation::capture) {
+    if (operation == AudioOperation::capture ||
+        operation == AudioOperation::voice_capture) {
         state.frames_captured += static_cast<std::uint32_t>(result.transferred_bytes / kFrameBytes);
         state.last_capture_rms = result.capture_rms;
         if (!result.status.is_ok()) ++state.read_errors;
@@ -892,10 +970,23 @@ void audio_worker_task(void *) {
         portEXIT_CRITICAL(&state_mux);
         const bool stale = command.generation != 0 &&
                            cue_cancelled(command.cue, command.generation);
+        OperationResult result{};
+        bool ran = false;
         if (!locked && allowed && !stale) {
-            const auto result = run_operation(command.operation, command.cue,
-                                              command.generation);
+            result = run_operation(command);
+            ran = true;
             finish_operation(command.operation, result);
+        }
+        if (command.operation == AudioOperation::voice_capture &&
+            command.voice_callback != nullptr) {
+            if (!ran) {
+                result.status = {nightglass::core::StatusCode::unavailable,
+                                 "voice capture unavailable"};
+            }
+            const VoiceCaptureResult completion{
+                result.status.code, result.encoded_bytes,
+                result.capture_rms, result.cancelled};
+            command.voice_callback(command.voice_context, completion);
         }
         portENTER_CRITICAL(&state_mux);
         const bool safety_locked = state.hardware_failed;
@@ -916,7 +1007,8 @@ void audio_worker_task(void *) {
             continue;
         }
         portENTER_CRITICAL(&state_mux);
-        if (command.operation == AudioOperation::capture) {
+        if (command.operation == AudioOperation::capture ||
+            command.operation == AudioOperation::voice_capture) {
             capture_pending = false;
         } else {
             if (command.generation == 0 ||
@@ -933,7 +1025,11 @@ void audio_worker_task(void *) {
 }
 
 nightglass::core::Status request(AudioOperation operation, SoundCue cue,
-                                 nightglass::core::WakeReason wake_reason) {
+                                 nightglass::core::WakeReason wake_reason,
+                                 std::size_t voice_capacity = 0,
+                                 VoiceCaptureSink voice_sink = nullptr,
+                                 VoiceCaptureCallback voice_callback = nullptr,
+                                 void *voice_context = nullptr) {
     if (audio_bus == nullptr || audio_queue == nullptr || audio_worker == nullptr ||
         request_mutex == nullptr) {
         return {nightglass::core::StatusCode::unavailable, "audio service is not armed"};
@@ -948,9 +1044,13 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
                           (cue == SoundCue::alarm || cue == SoundCue::timer);
     portENTER_CRITICAL(&state_mux);
     const bool locked = state.hardware_failed;
-    const bool duplicate = operation == AudioOperation::capture
+    const bool capture_operation = operation == AudioOperation::capture ||
+                                   operation == AudioOperation::voice_capture;
+    const bool duplicate = capture_operation
                                ? capture_pending
                                : (pending_cues & cue_bit) != 0;
+    const bool voice_busy = operation == AudioOperation::voice_capture &&
+                            pending_count != 0;
     const bool reserved_capacity = !critical &&
                                    pending_count >=
                                        kAudioQueueDepth - kCriticalCueReserve;
@@ -960,9 +1060,13 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
         return {nightglass::core::StatusCode::unavailable,
                 "audio diagnostics locked after a safety failure"};
     }
-    if (duplicate) {
+    if (duplicate || voice_busy) {
         xSemaphoreGive(request_mutex);
-        return nightglass::core::Status::Ok();
+        return operation == AudioOperation::voice_capture
+                   ? nightglass::core::Status{
+                         nightglass::core::StatusCode::unavailable,
+                         "audio path is busy"}
+                   : nightglass::core::Status::Ok();
     }
     if (reserved_capacity) {
         portENTER_CRITICAL(&state_mux);
@@ -983,7 +1087,8 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
     portENTER_CRITICAL(&state_mux);
     generation = cue_generation_locked(cue);
     portEXIT_CRITICAL(&state_mux);
-    const AudioCommand command{operation, cue, generation};
+    const AudioCommand command{operation, cue, generation, voice_capacity,
+                               voice_sink, voice_callback, voice_context};
     const bool urgent = critical || cue == SoundCue::call;
     const auto queued = urgent ? xQueueSendToFront(audio_queue, &command, 0)
                                : xQueueSendToBack(audio_queue, &command, 0);
@@ -1000,7 +1105,7 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
     // present in the queue. The request mutex prevents a concurrent caller
     // from observing a reservation that a failed send later rolls back.
     portENTER_CRITICAL(&state_mux);
-    if (operation == AudioOperation::capture) capture_pending = true;
+    if (capture_operation) capture_pending = true;
     else pending_cues |= cue_bit;
     ++pending_count;
     state.operation_pending = true;
@@ -1064,6 +1169,8 @@ nightglass::core::Status AudioService::start(i2c_master_bus_handle_t bus_handle)
     pending_cues = 0;
     pending_count = 0;
     capture_pending = false;
+    voice_stop_requested.store(false, std::memory_order_release);
+    voice_cancel_requested.store(false, std::memory_order_release);
     alarm_generation = 1;
     timer_generation = 1;
     request_mutex = xSemaphoreCreateMutexStatic(&request_mutex_state);
@@ -1099,6 +1206,40 @@ nightglass::core::Status AudioService::request_microphone_sample() {
 #endif
 }
 
+nightglass::core::Status AudioService::request_voice_capture(
+    std::size_t maximum_encoded_bytes, VoiceCaptureSink sink,
+    VoiceCaptureCallback callback, void *context) {
+#if !NIGHTGLASS_AUDIO_RUNTIME
+    (void)maximum_encoded_bytes;
+    (void)sink;
+    (void)callback;
+    (void)context;
+    return {nightglass::core::StatusCode::unavailable,
+            "audio disabled by build configuration"};
+#else
+    if (maximum_encoded_bytes == 0 ||
+        maximum_encoded_bytes > kVoiceMaximumEncodedBytes ||
+        sink == nullptr || callback == nullptr) {
+        return {nightglass::core::StatusCode::invalid_state,
+                "invalid voice capture target"};
+    }
+    voice_stop_requested.store(false, std::memory_order_release);
+    voice_cancel_requested.store(false, std::memory_order_release);
+    return request(AudioOperation::voice_capture, SoundCue::test,
+                   nightglass::core::WakeReason::touch,
+                   maximum_encoded_bytes, sink, callback, context);
+#endif
+}
+
+void AudioService::stop_voice_capture(bool cancel) {
+#if NIGHTGLASS_AUDIO_RUNTIME
+    if (cancel) voice_cancel_requested.store(true, std::memory_order_release);
+    voice_stop_requested.store(true, std::memory_order_release);
+#else
+    (void)cancel;
+#endif
+}
+
 nightglass::core::Status AudioService::request_test_tone() {
 #if !NIGHTGLASS_AUDIO_RUNTIME
     return {nightglass::core::StatusCode::unavailable, "audio disabled by build configuration"};
@@ -1112,6 +1253,9 @@ nightglass::core::Status AudioService::request_sound(SoundCue cue) {
     (void)cue;
     return {nightglass::core::StatusCode::unavailable, "audio disabled by build configuration"};
 #else
+    if (cue == SoundCue::alarm || cue == SoundCue::timer || cue == SoundCue::call) {
+        stop_voice_capture(true);
+    }
     AudioSettings settings{};
     portENTER_CRITICAL(&state_mux);
     settings = state.settings;

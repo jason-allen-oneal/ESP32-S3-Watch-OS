@@ -20,6 +20,7 @@ idf_component_register(
          "src/hardware.cpp" "src/power.cpp"
          "src/time_math.cpp" "src/clock.cpp" "src/watchface.cpp"
          "src/watchface_schema.cpp" "src/connectivity_protocol.cpp"
+         "src/voice_codec.cpp" "src/voice_protocol.cpp" "src/voice_state.cpp" "src/voice.cpp"
          "src/update_transport_protocol.cpp" "src/update_transport.cpp" "src/connectivity.cpp"
          "src/weather_logic.cpp" "src/network_weather.cpp"
          "src/audio.cpp" "src/storage.cpp"

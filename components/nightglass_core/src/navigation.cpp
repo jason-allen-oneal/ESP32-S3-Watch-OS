@@ -66,6 +66,9 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
         case NavigationAction::open_notifications:
             push_route(state, Route::notifications);
             break;
+        case NavigationAction::open_openclaw:
+            push_route(state, Route::openclaw);
+            break;
         case NavigationAction::open_alarm:
             push_route(state, Route::alarm);
             break;

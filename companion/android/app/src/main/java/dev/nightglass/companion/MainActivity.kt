@@ -12,10 +12,14 @@ import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.nightglass.companion.ble.NightglassConnectionService
 import dev.nightglass.companion.protocol.NightglassProtocol
 import dev.nightglass.companion.weather.PhoneWeatherProxy
 import dev.nightglass.companion.update.OtaPackageLoader
+import dev.nightglass.companion.voice.OpenClawVoiceGateway
 
 class MainActivity : AppCompatActivity() {
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants -> if (grants.values.all { it }) connect() }
@@ -91,6 +95,30 @@ class MainActivity : AppCompatActivity() {
         } })
         root.addView(Button(this).apply { text = "Clear watch Wi-Fi"; setOnClickListener { NightglassConnectionService.send(this@MainActivity, NightglassProtocol.clearWifi()) } })
         root.addView(TextView(this).apply {
+            text = "OpenClaw voice"; textSize = 20f; setPadding(0, pad, 0, 0)
+        })
+        root.addView(TextView(this).apply {
+            text = "Scan an OpenClaw voice-node setup QR. The constrained identity is encrypted by Android Keystore; audio is held only in memory and is never recorded by the phone microphone."
+        })
+        root.addView(Button(this).apply {
+            text = "Scan OpenClaw voice setup QR"
+            setOnClickListener { scanOpenClawVoiceSetup() }
+        })
+        root.addView(Button(this).apply {
+            text = "Clear OpenClaw voice authorization"
+            setOnClickListener {
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Clear OpenClaw voice authorization?")
+                    .setMessage("Nightglass will stop sending voice turns until a new constrained setup code is entered. Revoke the old device in OpenClaw as well.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Clear") { _, _ ->
+                        OpenClawVoiceGateway(this@MainActivity) { detail ->
+                            Toast.makeText(this@MainActivity, detail, Toast.LENGTH_LONG).show()
+                        }.also { it.clear(); it.close() }
+                    }.show()
+            }
+        })
+        root.addView(TextView(this).apply {
             text = "Signed watch update"; textSize = 20f; setPadding(0, pad, 0, 0)
         })
         root.addView(TextView(this).apply {
@@ -113,6 +141,33 @@ class MainActivity : AppCompatActivity() {
         setContentView(ScrollView(this).apply { addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)) })
     }
     private fun field(hintText: String) = EditText(this).apply { hint = hintText; setSingleLine(true) }
+    private fun scanOpenClawVoiceSetup() {
+        val options = GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .enableAutoZoom()
+            .build()
+        GmsBarcodeScanning.getClient(this, options).startScan()
+            .addOnSuccessListener { barcode ->
+                val setupCode = barcode.rawValue
+                if (setupCode.isNullOrBlank()) {
+                    Toast.makeText(this, "QR code did not contain OpenClaw setup data", Toast.LENGTH_LONG).show()
+                    return@addOnSuccessListener
+                }
+                val bridge = OpenClawVoiceGateway(this) { detail ->
+                    runOnUiThread { Toast.makeText(this, detail, Toast.LENGTH_LONG).show() }
+                }
+                try {
+                    bridge.provision(setupCode)
+                } catch (_: Throwable) {
+                    Toast.makeText(this, "Invalid or expired OpenClaw voice setup QR", Toast.LENGTH_LONG).show()
+                } finally {
+                    bridge.close()
+                }
+            }
+            .addOnFailureListener {
+                Toast.makeText(this, "Unable to scan OpenClaw setup QR", Toast.LENGTH_LONG).show()
+            }
+    }
     override fun onStart() {
         super.onStart()
         if (!resetReceiverRegistered) {

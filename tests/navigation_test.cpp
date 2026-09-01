@@ -48,4 +48,8 @@ int main() {
     state = reduce_navigation({}, NavigationAction::open_gestures);
     assert(state.route == Route::gestures);
     assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
+
+    state = reduce_navigation({}, NavigationAction::open_openclaw);
+    assert(state.route == Route::openclaw);
+    assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
 }

@@ -11,6 +11,13 @@ object NightglassProtocol {
     val WATCH_TO_PHONE: UUID = UUID.fromString("7a3b4004-6b6f-4f72-726f-772d6e696768")
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     const val VERSION: Byte = 1
+    /** Five minutes of 8 kHz G.711 mu-law audio. */
+    const val MAX_VOICE_ENCODED_BYTES = 2_400_000
+    const val DEFAULT_VOICE_DURATION_SECONDS = 60
+    const val MAX_VOICE_DURATION_SECONDS = 300
+
+    fun voiceDurationAllowed(seconds: Int): Boolean =
+        seconds == 30 || seconds == 60 || seconds == 120 || seconds == 300
     private const val CONNECTED_ENCRYPTED = 3
 
     data class WatchStatus(val state: Int, val notificationCount: Int,
@@ -84,6 +91,16 @@ object NightglassProtocol {
     data class OtaStatus(val session: ULong, val state: Int, val signatureState: Int,
                          val result: Int, val expectedBytes: Long,
                          val receivedBytes: Long)
+    sealed interface VoiceRequest {
+        val sessionId: UInt
+        data class Begin(override val sessionId: UInt, val totalBytes: Int,
+                         val crc32: UInt): VoiceRequest
+        data class Data(override val sessionId: UInt, val sequence: Int,
+                        val offset: Int, val payload: ByteArray): VoiceRequest
+        data class End(override val sessionId: UInt, val totalBytes: Int,
+                       val crc32: UInt): VoiceRequest
+        data class Cancel(override val sessionId: UInt, val reason: Int): VoiceRequest
+    }
     sealed interface WatchAction {
         data class Media(val sequence: Int, val command: Int): WatchAction
         data class Notification(val sequence: Int, val id: UInt, val dismiss: Boolean): WatchAction
@@ -203,6 +220,84 @@ object NightglassProtocol {
                 WatchAction.Phone(frame[2].toInt() and 0xff, frame[3].toInt() and 0xff) else null
             else -> null
         }
+    }
+
+    fun parseVoiceRequest(frame: ByteArray): VoiceRequest? {
+        if (frame.size < 7 || frame[0] != VERSION) return null
+        val input = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN)
+        input.position(2)
+        val session = input.int.toUInt()
+        if (session == 0u) return null
+        return when (frame[1].toInt() and 0xff) {
+            0x40 -> if (frame.size == 16) {
+                val total = input.int.toUInt().toLong()
+                val crc = input.int.toUInt()
+                val codec = input.get().toInt() and 0xff
+                val rateKhz = input.get().toInt() and 0xff
+                if (total in 1..MAX_VOICE_ENCODED_BYTES.toLong() && codec == 1 && rateKhz == 8)
+                    VoiceRequest.Begin(session, total.toInt(), crc) else null
+            } else null
+            0x41 -> if (frame.size in 13..244) {
+                val sequence = input.short.toInt() and 0xffff
+                val offset = input.int.toUInt().toLong()
+                val payload = frame.copyOfRange(12, frame.size)
+                if (sequence != 0 && offset in 0..MAX_VOICE_ENCODED_BYTES.toLong() &&
+                    payload.isNotEmpty() && payload.size <= 232 &&
+                    payload.size <= MAX_VOICE_ENCODED_BYTES.toLong() - offset)
+                    VoiceRequest.Data(session, sequence, offset.toInt(), payload) else null
+            } else null
+            0x42 -> if (frame.size == 14) {
+                val total = input.int.toUInt().toLong()
+                val crc = input.int.toUInt()
+                if (total in 1..MAX_VOICE_ENCODED_BYTES.toLong())
+                    VoiceRequest.End(session, total.toInt(), crc)
+                else null
+            } else null
+            0x43 -> if (frame.size == 7) {
+                val reason = input.get().toInt() and 0xff
+                if (reason in 1..8) VoiceRequest.Cancel(session, reason) else null
+            } else null
+            else -> null
+        }
+    }
+
+    fun voiceAck(session: UInt, nextOffset: Int, credits: Int, status: Int): ByteArray {
+        require(session != 0u && nextOffset in 0..MAX_VOICE_ENCODED_BYTES &&
+            credits in 0..8 && status in 0..8)
+        return ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x44).putInt(session.toInt()).putInt(nextOffset)
+            .put(credits.toByte()).put(status.toByte()).array()
+    }
+
+    fun voiceResponseBegin(session: UInt, responseId: UInt, totalBytes: Int,
+                           crc32: UInt): ByteArray {
+        require(session != 0u && responseId != 0u && totalBytes in 1..2048)
+        return ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x45).putInt(session.toInt()).putInt(responseId.toInt())
+            .putShort(totalBytes.toShort()).putInt(crc32.toInt()).array()
+    }
+
+    fun voiceResponseData(session: UInt, responseId: UInt, offset: Int,
+                          payload: ByteArray): ByteArray {
+        require(session != 0u && responseId != 0u && offset in 0..2048 &&
+            payload.isNotEmpty() && payload.size <= 232 && payload.size <= 2048 - offset)
+        return ByteBuffer.allocate(12 + payload.size).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x46).putInt(session.toInt()).putInt(responseId.toInt())
+            .putShort(offset.toShort()).put(payload).array()
+    }
+
+    fun voiceResponseEnd(session: UInt, responseId: UInt, totalBytes: Int,
+                         crc32: UInt): ByteArray {
+        require(session != 0u && responseId != 0u && totalBytes in 1..2048)
+        return ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x47).putInt(session.toInt()).putInt(responseId.toInt())
+            .putShort(totalBytes.toShort()).putInt(crc32.toInt()).array()
+    }
+
+    fun voiceStatus(session: UInt, status: Int): ByteArray {
+        require(session != 0u && status in 0..8)
+        return ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x48).putInt(session.toInt()).put(status.toByte()).array()
     }
     fun replyResult(sequence: Int, status: Int, id: UInt, nonce: UInt): ByteArray {
         require(sequence in 1..0xff && status in 0..5 && id != 0u && nonce != 0u)

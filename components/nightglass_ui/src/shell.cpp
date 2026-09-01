@@ -21,6 +21,7 @@
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/watchface.hpp"
 #include "nightglass/services/update_transport.hpp"
+#include "nightglass/services/voice.hpp"
 #include "nightglass/ui/assets/revenant_grid_v2.hpp"
 
 namespace nightglass::ui {
@@ -218,7 +219,7 @@ lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int width, int height,
                          : (background == kCyan ? kViolet : kElevated)),
         LV_STATE_PRESSED);
     lv_obj_set_style_border_color(button, lv_color_hex(chrome.accent), LV_STATE_PRESSED);
-    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
+    if (callback) lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
 
     auto *button_label = label(button, text, &lv_font_montserrat_18, foreground);
     lv_obj_center(button_label);
@@ -460,6 +461,17 @@ void Shell::timer_callback(lv_timer_t *timer) {
 
 void Shell::system_timer_callback(lv_timer_t *timer) {
     auto *self = static_cast<Shell *>(lv_timer_get_user_data(timer));
+    const auto power = nightglass::services::power_service().snapshot();
+    if (power.state == nightglass::core::PowerState::screen_blank ||
+        power.state == nightglass::core::PowerState::light_sleep) {
+        const auto voice = nightglass::services::voice_service().snapshot();
+        if (voice.state == nightglass::services::VoiceTurnState::recording ||
+            voice.state == nightglass::services::VoiceTurnState::finishing ||
+            voice.state == nightglass::services::VoiceTurnState::uploading ||
+            voice.state == nightglass::services::VoiceTurnState::processing) {
+            nightglass::services::voice_service().cancel();
+        }
+    }
     self->handle_gesture();
     self->refresh_system_overlay();
 }
@@ -1101,6 +1113,52 @@ void Shell::notifications_callback(lv_event_t *event) {
     self->navigate(nightglass::core::NavigationAction::open_notifications);
 }
 
+void Shell::openclaw_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_openclaw);
+}
+
+void Shell::openclaw_press_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    const auto status = nightglass::services::voice_service().begin_capture();
+    if (!status.is_ok() && self->openclaw_detail_) {
+        set_state(self->openclaw_state_, "UNAVAILABLE", kRed);
+        lv_label_set_text(self->openclaw_detail_, status.detail);
+    }
+}
+
+void Shell::openclaw_release_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (lv_event_get_code(event) == LV_EVENT_PRESS_LOST) {
+        nightglass::services::voice_service().cancel();
+    } else {
+        nightglass::services::voice_service().finish_capture();
+    }
+    self->refresh_openclaw();
+}
+
+void Shell::openclaw_cancel_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::voice_service().cancel();
+    self->refresh_openclaw();
+}
+
+void Shell::openclaw_duration_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    const auto snapshot = nightglass::services::voice_service().snapshot();
+    auto settings = snapshot.settings;
+    settings.maximum_duration_seconds = static_cast<std::uint16_t>(
+        nightglass::services::next_voice_duration(
+            settings.maximum_duration_seconds));
+    const auto status = nightglass::services::voice_service().update_settings(settings);
+    if (!status.is_ok() && self->openclaw_detail_) {
+        set_state(self->openclaw_state_, "BUSY", kAmber);
+        lv_label_set_text(self->openclaw_detail_, status.detail);
+        return;
+    }
+    self->refresh_openclaw();
+}
+
 void Shell::media_app_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
         nightglass::core::NavigationAction::open_media);
@@ -1208,6 +1266,10 @@ void Shell::face_action_callback(lv_event_t *event) {
 void Shell::navigate(nightglass::core::NavigationAction action) {
     const auto next = nightglass::core::reduce_navigation(navigation_, action);
     if (next == navigation_) return;
+    if (navigation_.route == nightglass::core::Route::openclaw &&
+        next.route != nightglass::core::Route::openclaw) {
+        nightglass::services::voice_service().cancel();
+    }
     navigation_ = next;
     render_route();
 }
@@ -1272,6 +1334,9 @@ void Shell::render_route() {
             break;
         case nightglass::core::Route::notifications:
             render_notifications();
+            break;
+        case nightglass::core::Route::openclaw:
+            render_openclaw();
             break;
         case nightglass::core::Route::alarm:
             render_alarm();
@@ -1496,12 +1561,50 @@ void Shell::render_launcher() {
                 kSurface, kPrimary, notifications_callback, this);
     make_button(scroller, 0, 9 * gap, kSafeContentWidth - 16, row_height, "AUDIO",
                 kSurface, kPrimary, audio_callback, this);
-    make_button(scroller, 0, 10 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
+    make_button(scroller, 0, 10 * gap, kSafeContentWidth - 16, row_height, "OPENCLAW",
+                kCyan, kVoid, openclaw_callback, this);
+    make_button(scroller, 0, 11 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
                 kSurface, kPrimary, diagnostics_callback, this);
-    make_button(scroller, 0, 11 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
+    make_button(scroller, 0, 12 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
                 kSurface, kPrimary, about_callback, this);
-    make_button(scroller, 0, 12 * gap, kSafeContentWidth - 16, row_height, "QUICK SETTINGS",
+    make_button(scroller, 0, 13 * gap, kSafeContentWidth - 16, row_height, "QUICK SETTINGS",
                 kSurface, kPrimary, quick_settings_callback, this);
+}
+
+void Shell::render_openclaw() {
+    add_header(content_host_, "OPENCLAW", back_callback, this);
+    auto *card = make_route_card(content_host_, 104, 160);
+    openclaw_state_ = label(card, "READY", &lv_font_montserrat_20, kGreen);
+    lv_obj_set_pos(openclaw_state_, 0, 0);
+    openclaw_detail_ = label(card, "Hold to speak. Release to send.",
+                             &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(openclaw_detail_, 0, 36);
+    lv_obj_set_width(openclaw_detail_, kSafeContentWidth - 32);
+    lv_label_set_long_mode(openclaw_detail_, LV_LABEL_LONG_MODE_WRAP);
+
+    openclaw_response_ = label(content_host_, "Your response will appear here.",
+                               &lv_font_montserrat_16, kPrimary);
+    lv_obj_set_pos(openclaw_response_, kSafeInset, 188);
+    lv_obj_set_size(openclaw_response_, kSafeContentWidth, 72);
+    lv_label_set_long_mode(openclaw_response_, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+
+    openclaw_duration_ = make_button(content_host_, kSafeInset, 270,
+                                     kSafeContentWidth, 48, "MAX 60 SECONDS",
+                                     kSurface, kPrimary,
+                                     openclaw_duration_callback, this);
+
+    openclaw_ptt_ = make_button(content_host_, kSafeInset, 326, kSafeContentWidth,
+                                82, "HOLD TO SPEAK", kCyan, kVoid, nullptr, this);
+    lv_obj_add_event_cb(openclaw_ptt_, openclaw_press_callback,
+                        LV_EVENT_PRESSED, this);
+    lv_obj_add_event_cb(openclaw_ptt_, openclaw_release_callback,
+                        LV_EVENT_RELEASED, this);
+    lv_obj_add_event_cb(openclaw_ptt_, openclaw_release_callback,
+                        LV_EVENT_PRESS_LOST, this);
+    make_button(content_host_, kSafeInset, 418, kSafeContentWidth, 52,
+                "CANCEL", kSurface, kAmber, openclaw_cancel_callback, this);
+    configure_refresh_timer(100);
+    refresh_openclaw();
 }
 
 void Shell::render_quick_settings() {
@@ -2216,6 +2319,9 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::notifications:
             refresh_notifications();
             break;
+        case nightglass::core::Route::openclaw:
+            refresh_openclaw();
+            break;
         case nightglass::core::Route::alarm:
             refresh_alarm();
             break;
@@ -2233,6 +2339,67 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::launcher:
         case nightglass::core::Route::about:
             break;
+    }
+}
+
+void Shell::refresh_openclaw() {
+    if (!openclaw_state_) return;
+    const auto snapshot = nightglass::services::voice_service().snapshot();
+    char detail[96]{};
+    const char *state = "READY";
+    auto color = kGreen;
+    switch (snapshot.state) {
+        case nightglass::services::VoiceTurnState::recording:
+            state = "RECORDING";
+            color = kRed;
+            std::snprintf(detail, sizeof(detail), "Listening  %lu.%lus / %us",
+                          static_cast<unsigned long>(snapshot.recorded_ms / 1000U),
+                          static_cast<unsigned long>((snapshot.recorded_ms / 100U) % 10U),
+                          static_cast<unsigned>(snapshot.settings.maximum_duration_seconds));
+            break;
+        case nightglass::services::VoiceTurnState::finishing:
+            state = "FINISHING"; color = kAmber;
+            std::snprintf(detail, sizeof(detail), "Closing microphone safely");
+            break;
+        case nightglass::services::VoiceTurnState::uploading:
+            state = "SENDING"; color = kAmber;
+            std::snprintf(detail, sizeof(detail), "%lu bytes | microphone off",
+                          static_cast<unsigned long>(snapshot.encoded_bytes));
+            break;
+        case nightglass::services::VoiceTurnState::processing:
+            state = "THINKING"; color = kAmber;
+            std::snprintf(detail, sizeof(detail), "OpenClaw is processing the turn");
+            break;
+        case nightglass::services::VoiceTurnState::complete:
+            state = "COMPLETE"; color = kGreen;
+            std::snprintf(detail, sizeof(detail), "Response received | hold to ask again");
+            break;
+        case nightglass::services::VoiceTurnState::cancelled:
+            state = "CANCELLED"; color = kAmber;
+            std::snprintf(detail, sizeof(detail), "Audio discarded");
+            break;
+        case nightglass::services::VoiceTurnState::failed:
+        case nightglass::services::VoiceTurnState::unavailable:
+            state = "UNAVAILABLE"; color = kRed;
+            std::snprintf(detail, sizeof(detail), "Phone or OpenClaw voice link unavailable");
+            break;
+        case nightglass::services::VoiceTurnState::idle:
+            std::snprintf(detail, sizeof(detail),
+                          "Hold to speak. Audio is sent to your configured provider.");
+            break;
+    }
+    set_state(openclaw_state_, state, color);
+    lv_label_set_text(openclaw_detail_, detail);
+    lv_label_set_text(openclaw_response_, snapshot.response_bytes > 0
+                                               ? snapshot.response.data()
+                                               : "Your response will appear here.");
+    set_button_text(openclaw_ptt_, snapshot.state == nightglass::services::VoiceTurnState::recording
+                                      ? "RELEASE TO SEND" : "HOLD TO SPEAK");
+    if (openclaw_duration_) {
+        char duration[32]{};
+        std::snprintf(duration, sizeof(duration), "MAX %u SECONDS",
+                      static_cast<unsigned>(snapshot.settings.maximum_duration_seconds));
+        set_button_text(openclaw_duration_, duration);
     }
 }
 
@@ -3279,6 +3446,11 @@ void Shell::clear_route_objects() {
     media_time_ = nullptr;
     notification_status_ = nullptr;
     notification_privacy_ = nullptr;
+    openclaw_state_ = nullptr;
+    openclaw_detail_ = nullptr;
+    openclaw_response_ = nullptr;
+    openclaw_ptt_ = nullptr;
+    openclaw_duration_ = nullptr;
     notification_reply_box_ = nullptr;
     notification_action_count_ = 0;
 }

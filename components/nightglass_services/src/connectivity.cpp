@@ -24,6 +24,8 @@
 #include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/update_transport.hpp"
+#include "nightglass/services/voice.hpp"
+#include "nightglass/services/voice_protocol.hpp"
 
 extern "C" void ble_store_config_init(void);
 
@@ -502,6 +504,16 @@ int gatt_access(std::uint16_t conn_handle, std::uint16_t attr_handle,
         secure_wipe(frame.data(), frame.size());
         return queued ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
+    const auto opcode = length >= 2 ? frame[1] : std::uint8_t{};
+    if (opcode >= static_cast<std::uint8_t>(VoiceFrameKind::request_ack) &&
+        opcode <= static_cast<std::uint8_t>(VoiceFrameKind::response_status)) {
+        VoiceFrame voice_frame{};
+        const bool parsed = parse_voice_frame(std::span(frame.data(), length), voice_frame);
+        const bool applied = parsed && authorization_still_valid(authorization) &&
+                             voice_service().accept_frame(voice_frame);
+        secure_wipe(frame.data(), frame.size());
+        return applied ? 0 : BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
     CompanionMessage message{};
     if (!parse_companion_message(std::span(frame.data(), length), message)) {
         secure_wipe(frame.data(), frame.size());
@@ -582,6 +594,7 @@ int gap_event(ble_gap_event *event, void *) {
         case BLE_GAP_EVENT_DISCONNECT: {
             invalidate_authorization();
             update_transport().link_lost();
+            voice_service().link_lost();
             connection_handle = kNoConnection;
             outbound_subscribed = false;
             portENTER_CRITICAL(&state_lock);
@@ -785,7 +798,10 @@ void host_task(void *) {
 bool notify_outbound(const std::uint8_t *data, std::size_t length) {
     const auto handle = connection_handle.load();
     const auto state = instance.snapshot();
-    if (handle == kNoConnection || !outbound_subscribed.load() || !state.encrypted) {
+    const auto mtu = handle == kNoConnection ? std::uint16_t{0} : ble_att_mtu(handle);
+    const auto maximum = mtu > 3 ? static_cast<std::size_t>(mtu - 3U) : 0U;
+    if (handle == kNoConnection || !outbound_subscribed.load() || !state.encrypted ||
+        length == 0 || length > maximum) {
         return false;
     }
     auto *buffer = ble_hs_mbuf_from_flat(data, static_cast<std::uint16_t>(length));
@@ -994,6 +1010,23 @@ bool ConnectivityService::reply_notification(std::uint32_t id, const char *reply
     ++current.sequence;
     portEXIT_CRITICAL(&state_lock);
     return true;
+}
+
+bool ConnectivityService::send_voice_frame(std::span<const std::uint8_t> frame) {
+    if (frame.size() < 2 || frame.size() > kVoiceMaximumFrameBytes ||
+        frame[0] != kVoiceProtocolVersion ||
+        frame[1] < static_cast<std::uint8_t>(VoiceFrameKind::request_begin) ||
+        frame[1] > static_cast<std::uint8_t>(VoiceFrameKind::request_cancel)) {
+        return false;
+    }
+    return notify_outbound(frame.data(), frame.size());
+}
+
+std::size_t ConnectivityService::maximum_outbound_frame() const {
+    const auto handle = connection_handle.load();
+    if (handle == kNoConnection || !outbound_subscribed.load()) return 0;
+    const auto mtu = ble_att_mtu(handle);
+    return mtu > 3 ? std::min<std::size_t>(mtu - 3U, kVoiceMaximumFrameBytes) : 0;
 }
 
 void ConnectivityService::set_notification_privacy(NotificationPrivacyPolicy policy,

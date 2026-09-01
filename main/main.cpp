@@ -18,6 +18,7 @@
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/storage.hpp"
 #include "nightglass/services/watchface.hpp"
+#include "nightglass/services/voice.hpp"
 #include "nightglass/services/audio.hpp"
 #include "nightglass/ui/shell.hpp"
 #include "nightglass/update/service.hpp"
@@ -198,6 +199,11 @@ extern "C" void app_main() {
         const auto connectivity_status = nightglass::services::connectivity_service().start();
         if (!connectivity_status.is_ok()) {
             ESP_LOGW(kTag, "Connectivity service degraded: %s", connectivity_status.detail);
+        }
+
+        const auto voice_status = nightglass::services::voice_service().start();
+        if (!voice_status.is_ok()) {
+            ESP_LOGW(kTag, "Voice service unavailable: %s", voice_status.detail);
         }
 
         const auto network_status = nightglass::services::network_weather_service().start();

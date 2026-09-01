@@ -8,6 +8,9 @@ gesture_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gesture-policy-test.
 time_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-time-test.XXXXXX")"
 face_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-face-test.XXXXXX")"
 connectivity_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-connectivity-test.XXXXXX")"
+voice_codec_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-voice-codec-test.XXXXXX")"
+voice_protocol_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-voice-protocol-test.XXXXXX")"
+voice_state_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-voice-state-test.XXXXXX")"
 update_transport_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-update-transport-test.XXXXXX")"
 activity_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-test.XXXXXX")"
 activity_units_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-units-test.XXXXXX")"
@@ -18,7 +21,7 @@ audio_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-audio-test.XXXXXX")"
 update_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-update-test.XXXXXX")"
 verifier_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-verifier-test.XXXXXX")"
 clock_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-clock-policy-test.XXXXXX")"
-trap 'rm -f "${gyro_binary}" "${gesture_binary}" "${gesture_policy_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${update_transport_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}"' EXIT
+trap 'rm -f "${gyro_binary}" "${gesture_binary}" "${gesture_policy_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${voice_codec_binary}" "${voice_protocol_binary}" "${voice_state_binary}" "${update_transport_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}"' EXIT
 
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
 python3 -B "${project_dir}/tests/ota_state_inspector_test.py"
@@ -74,6 +77,27 @@ python3 -B "${project_dir}/tests/release_config_test.py"
   "${project_dir}/tests/connectivity_protocol_test.cpp" \
   -o "${connectivity_binary}"
 "${connectivity_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/voice_codec.cpp" \
+  "${project_dir}/tests/voice_codec_test.cpp" \
+  -o "${voice_codec_binary}"
+"${voice_codec_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/voice_protocol.cpp" \
+  "${project_dir}/tests/voice_protocol_test.cpp" \
+  -o "${voice_protocol_binary}"
+"${voice_protocol_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/voice_state.cpp" \
+  "${project_dir}/tests/voice_state_test.cpp" \
+  -o "${voice_state_binary}"
+"${voice_state_binary}"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \

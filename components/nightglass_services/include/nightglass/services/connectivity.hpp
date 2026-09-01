@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <type_traits>
 
 #include "nightglass/core/status.hpp"
@@ -65,6 +66,8 @@ public:
     bool send_phone(PhoneCommand command);
     bool mark_notification(std::uint32_t id, bool dismiss);
     bool reply_notification(std::uint32_t id, const char *reply);
+    bool send_voice_frame(std::span<const std::uint8_t> frame);
+    [[nodiscard]] std::size_t maximum_outbound_frame() const;
     // Runtime-only hook for a future PIN/privacy UI. Tightening the policy
     // immediately scrubs cached notification text; relaxing it does not
     // resurrect prior content and requires a fresh companion sync.
