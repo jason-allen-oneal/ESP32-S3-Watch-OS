@@ -202,10 +202,24 @@ nightglass::core::Status UpdateService::begin_boot(bool nvs_available,
 
     bool pending_verification = false;
     const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *configured_boot = esp_ota_get_boot_partition();
     esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
     if (running != nullptr && esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
         pending_verification = ota_state == ESP_OTA_IMG_PENDING_VERIFY;
     }
+    // This bounded line is the authoritative, non-resetting USB diagnostic.
+    // Host-side otadata inspection can identify only the boot candidate; it
+    // cannot prove which image actually ran after bootloader fallback.
+    ESP_LOGI(kTag,
+             "OTA_BOOT running=%s@0x%08lx configured=%s@0x%08lx state=%lu "
+             "pending=%u rollback_possible=%u",
+             running == nullptr ? "none" : running->label,
+             static_cast<unsigned long>(running == nullptr ? 0 : running->address),
+             configured_boot == nullptr ? "none" : configured_boot->label,
+             static_cast<unsigned long>(configured_boot == nullptr ? 0
+                                                                    : configured_boot->address),
+             static_cast<unsigned long>(ota_state), pending_verification,
+             esp_ota_check_rollback_is_possible());
 
     std::uint32_t unhealthy_boots = 0;
     bool persisted = false;

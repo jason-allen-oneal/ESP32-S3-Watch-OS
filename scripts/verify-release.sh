@@ -24,6 +24,7 @@ artifacts=(
   "build/partition_table/partition-table.bin"
   "build/ota_data_initial.bin"
   "build/nightglass.bin"
+  "build/assets.bin"
 )
 
 for artifact in "${artifacts[@]}"; do
@@ -51,7 +52,18 @@ if (( app_size > app_limit )); then
   exit 1
 fi
 
+python3 "${project_dir}/scripts/validate-runtime-assets.py" \
+  "${project_dir}/runtime_assets" >/dev/null
+assets_size="$(stat -c '%s' "${project_dir}/build/assets.bin")"
+assets_limit=$((0x1360000))
+if (( assets_size != assets_limit )); then
+  echo "Runtime asset image must exactly fill its reviewed LittleFS partition" >&2
+  echo "assets_size=${assets_size} expected=${assets_limit}" >&2
+  exit 1
+fi
+
 printf 'Nightglass release gate passed\n'
 printf 'commit %s\n' "$(git -C "${project_dir}" rev-parse HEAD)"
 printf 'app_size %s/%s bytes\n' "${app_size}" "${app_limit}"
+printf 'assets_size %s/%s bytes\n' "${assets_size}" "${assets_limit}"
 printf '%s\n' "${second_hashes}"

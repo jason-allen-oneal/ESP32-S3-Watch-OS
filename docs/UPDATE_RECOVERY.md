@@ -6,6 +6,11 @@ signature algorithm. The production-default build therefore refuses every OTA
 image before erasing the inactive slot: no `SignatureVerifier` is installed and
 `CONFIG_NIGHTGLASS_OTA_ALLOW_UNSIGNED_DEVELOPMENT` is disabled.
 
+USB release status and the reason raw `esptool`/`otatool` deployment is blocked
+are documented in [USB_RELEASE.md](USB_RELEASE.md). In particular, the pinned
+host `otatool.py` does not create the `ESP_OTA_IMG_NEW` state required by the
+rollback bootloader.
+
 ## Install contract
 
 `UpdateService` accepts a fixed-size `UpdateManifest`, its detached signature,
@@ -51,6 +56,10 @@ firmware policy. `--signature` also requires `--signature-algorithm` and copies
 the detached signature, but this packaging step does not claim or prove that
 the watch has a compatible verifier. No private or public production key is
 stored in this repository.
+
+The deterministic release gate also hashes and validates `build/assets.bin`.
+That LittleFS image is a separate artifact and is never implicitly written by
+an application update.
 
 ## Boot health and rollback
 

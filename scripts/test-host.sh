@@ -17,6 +17,7 @@ clock_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-clock-policy-test.XXXX
 trap 'rm -f "${gyro_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${clock_policy_binary}"' EXIT
 
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
+python3 -B "${project_dir}/tests/ota_state_inspector_test.py"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \

@@ -41,7 +41,10 @@ CONFIG_NIGHTGLASS_OTA_ENABLED=y
 # The repository does not contain a firmware-signing public key/verifier.
 # Unsigned OTA remains fail-closed unless a developer explicitly changes this.
 CONFIG_NIGHTGLASS_OTA_ALLOW_UNSIGNED_DEVELOPMENT=n
-CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+# Production watches must not retain arbitrary task stacks, notification text,
+# or companion state in a persistent flash coredump. Recovery diagnostics use
+# bounded health/status records instead.
+CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y
 
 # Nightglass companion radio: BLE-only NimBLE peripheral with bonded LE Secure
 # Connections. Application characteristics additionally require encryption.
@@ -67,8 +70,6 @@ CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
 CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
 CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y
 CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
-CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
-
 CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
 CONFIG_LV_USE_CLIB_SPRINTF=y
