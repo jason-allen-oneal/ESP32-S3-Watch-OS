@@ -72,6 +72,7 @@ class NightglassConnectionService : Service() {
     private val reconnectHandler = Handler(Looper.getMainLooper())
     private var reconnectAttempt = 0
     private var explicitDisconnect = false
+    private var pendingBondAddress: String? = null
     private var connectionStatus = "Searching for Nightglass"
     private val reconnect = Runnable { if (!explicitDisconnect && gatt == null) reconnectBondedOrScan() }
     private val weatherExecutor = Executors.newSingleThreadExecutor()
@@ -92,7 +93,22 @@ class NightglassConnectionService : Service() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED || !hasConnectPermissions()) return
             val device = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java) else @Suppress("DEPRECATION") intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-            if (device != null && device.address == gatt?.device?.address &&
+            if (device == null) return
+            if (device.address == pendingBondAddress) {
+                when (device.bondState) {
+                    BluetoothDevice.BOND_BONDED -> {
+                        pendingBondAddress = null
+                        connect(device)
+                    }
+                    BluetoothDevice.BOND_NONE -> {
+                        pendingBondAddress = null
+                        update("Pairing cancelled; retrying")
+                        scheduleReconnect()
+                    }
+                }
+                return
+            }
+            if (device.address == gatt?.device?.address &&
                 device.bondState == BluetoothDevice.BOND_BONDED) gatt?.requestMtu(247)
         }
     }
@@ -117,6 +133,7 @@ class NightglassConnectionService : Service() {
         runCatching { getSystemService(ConnectivityManager::class.java)
             .unregisterNetworkCallback(networkCallback) }
         stopScan()
+        pendingBondAddress = null
         reconnectHandler.removeCallbacks(weatherRefresh)
         phoneIntegrations.stop()
         weatherExecutor.shutdownNow()
@@ -203,7 +220,17 @@ class NightglassConnectionService : Service() {
             val advertisedName = result.scanRecord?.deviceName ?: runCatching { result.device.name }.getOrNull()
             if (advertisedServices.none { it.uuid == NightglassProtocol.SERVICE } && advertisedName != "Nightglass") return
             stopScan()
-            connect(result.device)
+            if (result.device.bondState == BluetoothDevice.BOND_BONDED) {
+                connect(result.device)
+            } else {
+                pendingBondAddress = result.device.address
+                update("Pairing required; accept the system prompt")
+                if (!result.device.createBond()) {
+                    pendingBondAddress = null
+                    update("Could not start pairing; retrying")
+                    scheduleReconnect()
+                }
+            }
         }
         override fun onScanFailed(errorCode: Int) {
             scanning = false
