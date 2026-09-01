@@ -346,6 +346,15 @@ bool peer_identity_matches(const CompanionPeerIdentity &expected,
            expected.address == candidate.address;
 }
 
+bool repeat_pairing_reset_allowed(const CompanionPeerIdentity &pinned_peer,
+                                  bool authenticated_reset_armed) noexcept {
+    // The first firmware carrying application-level peer pinning may inherit a
+    // NimBLE bond created by an older release. With no application pin there
+    // is no trusted peer to authorize a reset, so permit deleting only that
+    // stale bond; the replacement still requires a fresh displayed passkey.
+    return !valid_peer_identity(pinned_peer) || authenticated_reset_armed;
+}
+
 bool authorization_matches(std::uint16_t expected_connection_handle,
                            std::uint32_t expected_generation,
                            const CompanionPeerIdentity &expected_peer,

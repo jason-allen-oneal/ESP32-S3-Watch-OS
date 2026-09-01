@@ -107,6 +107,9 @@ int main() {
     assert(!authorization_matches(7, 11, pinned, 7, 12, same));
     assert(!authorization_matches(7, 11, pinned, 7, 11, wrong));
     assert(!authorization_matches(7, 0, pinned, 7, 0, same));
+    assert(repeat_pairing_reset_allowed(CompanionPeerIdentity{}, false));
+    assert(repeat_pairing_reset_allowed(pinned, true));
+    assert(!repeat_pairing_reset_allowed(pinned, false));
 
     const std::array<std::uint8_t, 18> proxy{
         1, 0x23, 0x03, 0,

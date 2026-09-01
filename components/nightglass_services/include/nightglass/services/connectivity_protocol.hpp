@@ -167,6 +167,8 @@ struct EncodedReply {
 [[nodiscard]] bool valid_peer_identity(const CompanionPeerIdentity &identity) noexcept;
 [[nodiscard]] bool peer_identity_matches(const CompanionPeerIdentity &expected,
                                          const CompanionPeerIdentity &candidate) noexcept;
+[[nodiscard]] bool repeat_pairing_reset_allowed(
+    const CompanionPeerIdentity &pinned_peer, bool authenticated_reset_armed) noexcept;
 [[nodiscard]] bool authorization_matches(std::uint16_t expected_connection_handle,
                                          std::uint32_t expected_generation,
                                          const CompanionPeerIdentity &expected_peer,

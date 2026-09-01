@@ -695,7 +695,9 @@ int gap_event(ble_gap_event *event, void *) {
                 return BLE_GAP_REPEAT_PAIRING_IGNORE;
             }
             const auto candidate = peer_identity(descriptor.peer_id_addr);
-            if (!consume_one_shot_repair(candidate)) {
+            const auto expected = pinned_peer_snapshot();
+            const bool authenticated_reset = consume_one_shot_repair(candidate);
+            if (!repeat_pairing_reset_allowed(expected, authenticated_reset)) {
                 ESP_LOGW(kTag, "Rejected repeat pairing without reset authorization");
                 return BLE_GAP_REPEAT_PAIRING_IGNORE;
             }
@@ -704,7 +706,11 @@ int gap_event(ble_gap_event *event, void *) {
                 ESP_LOGE(kTag, "Unable to remove stale companion bond: %d", delete_result);
                 return BLE_GAP_REPEAT_PAIRING_IGNORE;
             }
-            ESP_LOGI(kTag, "Consumed reset authorization; retrying secure pairing");
+            if (valid_peer_identity(expected)) {
+                ESP_LOGI(kTag, "Consumed reset authorization; retrying secure pairing");
+            } else {
+                ESP_LOGI(kTag, "Removed pre-pinning legacy bond; requiring fresh passkey");
+            }
             return BLE_GAP_REPEAT_PAIRING_RETRY;
         }
         case BLE_GAP_EVENT_ADV_COMPLETE:
