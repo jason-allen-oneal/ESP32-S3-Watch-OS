@@ -12,6 +12,7 @@
 #include "driver/usb_serial_jtag.h"
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -19,6 +20,7 @@
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -687,8 +689,9 @@ nightglass::core::Status NetworkWeatherService::start() {
     ++current.sequence;
     portEXIT_CRITICAL(&state_mux);
 
-    if (xTaskCreatePinnedToCore(worker, "nightglass_network", 8192, nullptr, 4,
-                                &worker_task, 0) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(
+            worker, "nightglass_network", 8192, nullptr, 4, &worker_task, 0,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         worker_task = nullptr;
         vSemaphoreDelete(credential_mutex);
         credential_mutex = nullptr;
