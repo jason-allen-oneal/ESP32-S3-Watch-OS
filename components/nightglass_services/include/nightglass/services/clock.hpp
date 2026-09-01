@@ -29,6 +29,16 @@ struct AlarmSettings {
     std::array<char, 13> label{"Wake up"};
 };
 
+enum class AlarmAdjustment : std::uint8_t {
+    hour_forward,
+    hour_backward,
+    minute_forward,
+    minute_backward,
+    toggle_enabled,
+    cycle_repeat,
+    cycle_label,
+};
+
 inline constexpr std::size_t kAlarmCapacity = 4;
 inline constexpr std::uint8_t kEveryDayMask = 0x7f;
 inline constexpr std::uint8_t kWeekdayMask = 0x3e;
@@ -47,6 +57,67 @@ constexpr bool valid_alarm_settings(const AlarmSettings &alarm) noexcept {
         return false;
     }
     return true;
+}
+
+constexpr bool alarm_label_is(const AlarmSettings &alarm, const char *label) noexcept {
+    std::size_t index = 0;
+    for (; index < alarm.label.size() && label[index] != '\0'; ++index) {
+        if (alarm.label[index] != label[index]) return false;
+    }
+    return index < alarm.label.size() && alarm.label[index] == '\0' && label[index] == '\0';
+}
+
+constexpr void set_alarm_label(AlarmSettings &alarm, const char *label) noexcept {
+    alarm.label.fill('\0');
+    for (std::size_t index = 0;
+         index + 1 < alarm.label.size() && label[index] != '\0'; ++index) {
+        alarm.label[index] = label[index];
+    }
+}
+
+// Apply mutations to the worker-owned alarm state. UI taps enqueue these
+// operations rather than resending an asynchronously stale absolute snapshot.
+constexpr AlarmSettings adjusted_alarm(AlarmSettings alarm,
+                                        AlarmAdjustment adjustment) noexcept {
+    switch (adjustment) {
+        case AlarmAdjustment::hour_forward:
+            alarm.hour = static_cast<std::uint8_t>((alarm.hour + 1U) % 24U);
+            break;
+        case AlarmAdjustment::hour_backward:
+            alarm.hour = static_cast<std::uint8_t>((alarm.hour + 23U) % 24U);
+            break;
+        case AlarmAdjustment::minute_forward:
+            alarm.minute = static_cast<std::uint8_t>((alarm.minute + 5U) % 60U);
+            break;
+        case AlarmAdjustment::minute_backward:
+            alarm.minute = static_cast<std::uint8_t>((alarm.minute + 55U) % 60U);
+            break;
+        case AlarmAdjustment::toggle_enabled:
+            alarm.enabled = !alarm.enabled;
+            break;
+        case AlarmAdjustment::cycle_repeat:
+            alarm.repeat_days = alarm.repeat_days == kEveryDayMask
+                                    ? kWeekdayMask
+                                    : alarm.repeat_days == kWeekdayMask
+                                          ? kWeekendMask : kEveryDayMask;
+            break;
+        case AlarmAdjustment::cycle_label:
+            if (alarm_label_is(alarm, "Wake up")) set_alarm_label(alarm, "Work");
+            else if (alarm_label_is(alarm, "Work")) set_alarm_label(alarm, "Medication");
+            else if (alarm_label_is(alarm, "Medication")) set_alarm_label(alarm, "Exercise");
+            else set_alarm_label(alarm, "Wake up");
+            break;
+    }
+    return alarm;
+}
+
+constexpr bool restored_snooze_valid(std::int64_t deadline_utc,
+                                     std::int64_t now_utc,
+                                     std::uint8_t alarm_index,
+                                     bool alarm_enabled,
+                                     std::int64_t max_future_seconds = 60 * 60) noexcept {
+    return alarm_index < kAlarmCapacity && alarm_enabled && deadline_utc > now_utc &&
+           max_future_seconds > 0 && deadline_utc - now_utc <= max_future_seconds;
 }
 
 constexpr bool valid_quiet_hours(const QuietHoursSettings &quiet) noexcept {
@@ -150,6 +221,7 @@ public:
     bool update_clock_settings(const ClockSettings &settings);
     bool update_alarm(const AlarmSettings &alarm);
     bool update_alarm(std::size_t index, const AlarmSettings &alarm);
+    bool adjust_alarm(std::size_t index, AlarmAdjustment adjustment);
     bool update_quiet_hours(const QuietHoursSettings &settings);
     bool snooze_alarm(std::uint16_t minutes = 10);
     bool set_timer_duration(std::uint32_t seconds);

@@ -46,6 +46,7 @@ private:
     static void notification_list_callback(lv_event_t *event);
     static void notification_reply_send_callback(lv_event_t *event);
     static void notification_action_callback(lv_event_t *event);
+    static void notification_privacy_callback(lv_event_t *event);
     static void connectivity_toggle_callback(lv_event_t *event);
     static void media_callback(lv_event_t *event);
     static void alarm_callback(lv_event_t *event);
@@ -178,7 +179,10 @@ private:
     lv_obj_t *media_state_{nullptr};
     lv_obj_t *media_title_{nullptr};
     lv_obj_t *media_artist_{nullptr};
+    lv_obj_t *media_progress_{nullptr};
+    lv_obj_t *media_time_{nullptr};
     lv_obj_t *notification_status_{nullptr};
+    lv_obj_t *notification_privacy_{nullptr};
 
     struct NotificationActionContext {
         Shell *shell{nullptr};

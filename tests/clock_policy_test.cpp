@@ -17,6 +17,25 @@ int main() {
     alarm.label.back() = 'x';
     assert(!valid_alarm_settings(alarm));
 
+    alarm = {};
+    alarm.hour = 23;
+    alarm.minute = 55;
+    alarm = adjusted_alarm(alarm, AlarmAdjustment::hour_forward);
+    alarm = adjusted_alarm(alarm, AlarmAdjustment::hour_forward);
+    assert(alarm.hour == 1);  // Sequential rapid taps cannot collapse.
+    alarm = adjusted_alarm(alarm, AlarmAdjustment::minute_forward);
+    alarm = adjusted_alarm(alarm, AlarmAdjustment::minute_forward);
+    assert(alarm.minute == 5);
+    alarm = adjusted_alarm(alarm, AlarmAdjustment::cycle_repeat);
+    assert(alarm.repeat_days == kWeekdayMask);
+    alarm = adjusted_alarm(alarm, AlarmAdjustment::cycle_label);
+    assert(alarm_label_is(alarm, "Work"));
+    assert(restored_snooze_valid(1600, 1000, 0, true));
+    assert(!restored_snooze_valid(1000, 1000, 0, true));
+    assert(!restored_snooze_valid(5000, 1000, 0, true));
+    assert(!restored_snooze_valid(1600, 1000, kNoAlarmIndex, true));
+    assert(!restored_snooze_valid(1600, 1000, 0, false));
+
     QuietHoursSettings quiet{true, 22 * 60, 7 * 60};
     assert(valid_quiet_hours(quiet));
     assert(quiet_hours_active(quiet, 23 * 60));

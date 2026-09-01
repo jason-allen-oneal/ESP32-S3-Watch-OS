@@ -31,6 +31,7 @@ constexpr std::uint32_t kMaxTimerSeconds = 24 * 60 * 60;
 enum class CommandType : std::uint8_t {
     clock_settings,
     alarm_settings,
+    alarm_adjustment,
     quiet_hours,
     alarm_snooze,
     timer_duration,
@@ -47,6 +48,7 @@ struct Command {
     AlarmSettings alarm{};
     QuietHoursSettings quiet{};
     std::uint8_t index{0};
+    AlarmAdjustment adjustment{};
     std::uint32_t value{0};
 };
 
@@ -62,6 +64,7 @@ std::uint64_t stopwatch_base_ms = 0;
 std::array<std::int64_t, kAlarmCapacity> last_alarm_days{};
 std::int64_t snooze_deadline_utc = 0;
 std::uint8_t snoozed_alarm_index = kNoAlarmIndex;
+bool restored_snooze_needs_validation = false;
 
 bool valid_settings(const ClockSettings &settings) {
     return settings.utc_offset_minutes >= -12 * 60 && settings.utc_offset_minutes <= 14 * 60 &&
@@ -198,6 +201,7 @@ void load_state() {
                               ? loaded_snooze_index : kNoAlarmIndex;
     loaded.alarm_snoozed = snooze_deadline_utc > 0 &&
                            snoozed_alarm_index != kNoAlarmIndex;
+    restored_snooze_needs_validation = loaded.alarm_snoozed;
     current = loaded;
 }
 
@@ -247,6 +251,29 @@ void handle_command(const Command &command, std::int64_t now_us) {
                 persist = true;
             }
             break;
+        case CommandType::alarm_adjustment:
+            if (command.index < current.alarms.size()) {
+                auto adjusted = adjusted_alarm(current.alarms[command.index],
+                                               command.adjustment);
+                if (valid_alarm(adjusted)) {
+                    current.alarms[command.index] = adjusted;
+                    current.alarm = current.alarms[0];
+                    if (current.ringing_alarm_index == command.index) {
+                        current.alarm_ringing = false;
+                        current.ringing_alarm_index = kNoAlarmIndex;
+                        cancel_alarm_audio = true;
+                    }
+                    if (!adjusted.enabled && snoozed_alarm_index == command.index) {
+                        current.alarm_snoozed = false;
+                        snooze_deadline_utc = 0;
+                        snoozed_alarm_index = kNoAlarmIndex;
+                        restored_snooze_needs_validation = false;
+                        cancel_alarm_audio = true;
+                    }
+                    persist = true;
+                }
+            }
+            break;
         case CommandType::quiet_hours:
             if (valid_quiet_hours(command.quiet)) {
                 current.quiet_hours = command.quiet;
@@ -261,6 +288,7 @@ void handle_command(const Command &command, std::int64_t now_us) {
                                       static_cast<std::int64_t>(command.value) * 60;
                 current.snooze_minutes = static_cast<std::uint16_t>(command.value);
                 current.alarm_snoozed = true;
+                restored_snooze_needs_validation = false;
                 current.alarm_ringing = false;
                 current.ringing_alarm_index = kNoAlarmIndex;
                 cancel_alarm_audio = true;
@@ -334,6 +362,7 @@ void handle_command(const Command &command, std::int64_t now_us) {
             current.alarm_snoozed = false;
             snooze_deadline_utc = 0;
             snoozed_alarm_index = kNoAlarmIndex;
+            restored_snooze_needs_validation = false;
             current.timer_ringing = false;
             cancel_alarm_audio = true;
             cancel_timer_audio = true;
@@ -382,6 +411,21 @@ void worker(void *) {
         }
 
         if (current.time_valid) {
+            if (restored_snooze_needs_validation) {
+                const bool snooze_valid =
+                    snoozed_alarm_index < current.alarms.size() &&
+                    restored_snooze_valid(
+                        snooze_deadline_utc, current.utc_epoch_seconds,
+                        snoozed_alarm_index,
+                        current.alarms[snoozed_alarm_index].enabled);
+                restored_snooze_needs_validation = false;
+                if (!snooze_valid) {
+                    current.alarm_snoozed = false;
+                    snooze_deadline_utc = 0;
+                    snoozed_alarm_index = kNoAlarmIndex;
+                    persist_after_tick = true;
+                }
+            }
             const auto minute_of_day = static_cast<std::uint16_t>(
                 current.local_time.hour * 60U + current.local_time.minute);
             current.quiet_hours_active =
@@ -445,6 +489,7 @@ void worker(void *) {
         const bool alarm_ringing = current.alarm_ringing;
         const bool timer_ringing = current.timer_ringing;
         const bool scheduled_dnd = current.quiet_hours_active;
+        const bool persistence_ok = current.persistence_ok;
         ++current.sequence;
         portEXIT_CRITICAL(&snapshot_mux);
 
@@ -464,6 +509,11 @@ void worker(void *) {
                 alarm_ringing ? SoundCue::alarm : SoundCue::timer);
             if (audio_status.is_ok()) {
                 next_alert_audio_us = now_us + kAlertAudioRepeatUs;
+                if (persistence_ok) {
+                    nightglass::core::health_registry().set(
+                        "clock", nightglass::core::HealthState::ok,
+                        "Clock alert active; audio cue queued");
+                }
             } else {
                 next_alert_audio_us = now_us + kAlertAudioRetryUs;
                 nightglass::core::health_registry().set(
@@ -578,6 +628,14 @@ bool ClockService::update_alarm(std::size_t index, const AlarmSettings &alarm) {
     command.alarm = alarm;
     command.index = static_cast<std::uint8_t>(index);
     return index < kAlarmCapacity && valid_alarm(alarm) && submit(command);
+}
+
+bool ClockService::adjust_alarm(std::size_t index, AlarmAdjustment adjustment) {
+    Command command{};
+    command.type = CommandType::alarm_adjustment;
+    command.index = static_cast<std::uint8_t>(index);
+    command.adjustment = adjustment;
+    return index < kAlarmCapacity && submit(command);
 }
 
 bool ClockService::update_quiet_hours(const QuietHoursSettings &settings) {
