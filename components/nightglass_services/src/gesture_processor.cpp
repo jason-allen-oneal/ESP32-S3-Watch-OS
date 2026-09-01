@@ -11,8 +11,9 @@ constexpr std::int64_t kRaiseCooldownUs = 2'500'000;
 constexpr std::int64_t kTwistCooldownUs = 1'500'000;
 constexpr std::int64_t kShakeCooldownUs = 3'000'000;
 constexpr std::int64_t kFlickCooldownUs = 1'200'000;
-constexpr float kRaiseArmZ = 0.35F;
-constexpr float kRaiseFaceUpZ = 0.70F;
+// QMI8658 Z is negative when the fitted display faces upward.
+constexpr float kRaiseArmZ = -0.35F;
+constexpr float kRaiseFaceUpZ = -0.70F;
 constexpr float kRaiseMotionDps = 35.0F;
 constexpr float kRaiseMaximumDps = 220.0F;
 constexpr float kRaiseSettleDps = 35.0F;
@@ -82,7 +83,7 @@ GestureProcessorOutput GestureProcessor::process(const GestureSample &sample) no
         raise_confirm_samples_ = 0;
         raise_rotation_seen_ = false;
     } else if (!raise_armed_) {
-        if (sample.accel_z_g <= kRaiseArmZ && gravity_band(accel_magnitude, 0.75F, 1.25F)) {
+        if (sample.accel_z_g >= kRaiseArmZ && gravity_band(accel_magnitude, 0.75F, 1.25F)) {
             if (++raise_arm_samples_ >= 8) {
                 raise_armed_ = true;
                 raise_armed_at_us_ = sample.sampled_at_us;
@@ -105,11 +106,11 @@ GestureProcessorOutput GestureProcessor::process(const GestureSample &sample) no
         } else if (!raise_rotation_seen_ && pitch_roll < kRaiseMotionDps) {
             raise_rotation_samples_ = 0;
         }
-        if (raise_rotation_seen_ && sample.accel_z_g >= kRaiseFaceUpZ &&
+        if (raise_rotation_seen_ && sample.accel_z_g <= kRaiseFaceUpZ &&
             gravity_band(accel_magnitude, 0.75F, 1.25F) &&
             gyro_magnitude < kRaiseSettleDps) {
             ++raise_confirm_samples_;
-        } else if (sample.accel_z_g < kRaiseFaceUpZ - 0.12F ||
+        } else if (sample.accel_z_g > kRaiseFaceUpZ + 0.12F ||
                    gyro_magnitude >= kRaiseSettleDps) {
             raise_confirm_samples_ = 0;
         }
@@ -213,7 +214,7 @@ GestureProcessorOutput GestureProcessor::process(const GestureSample &sample) no
         return emit(GestureKind::shake, acceleration_delta, sample.sampled_at_us);
     }
     if (raise_armed_ && raise_confirm_samples_ >= 3) {
-        return emit(GestureKind::raise, sample.accel_z_g, sample.sampled_at_us);
+        return emit(GestureKind::raise, -sample.accel_z_g, sample.sampled_at_us);
     }
     if (rotation_active_ && settle_samples_ >= 3) {
         const auto total = sample.sampled_at_us - rotation_started_us_;

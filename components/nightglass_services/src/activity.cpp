@@ -50,6 +50,11 @@ portMUX_TYPE snapshot_mux = portMUX_INITIALIZER_UNLOCKED;
 ActivitySnapshot current{};
 ActivityProcessor processor;
 GestureProcessor gesture_processor;
+#if CONFIG_NIGHTGLASS_GESTURE_BOOT_TRACE
+constexpr std::int64_t kGestureTraceDurationUs = 120'000'000;
+std::int64_t gesture_trace_started_us = 0;
+bool gesture_trace_complete = false;
+#endif
 ActivityDayState day_state{};
 std::uint32_t persisted_steps = 0;
 std::int64_t last_save_us = 0;
@@ -350,6 +355,26 @@ void worker(void *) {
             last_gesture_motion_sample_us = motion.sampled_at_us;
             publish_gesture(gesture, now_us, external_power, recent_physical_input,
                             screen_inactive);
+#if CONFIG_NIGHTGLASS_GESTURE_BOOT_TRACE
+            if (motion.gyro_calibrated && !gesture_trace_complete) {
+                if (gesture_trace_started_us == 0) {
+                    gesture_trace_started_us = motion.sampled_at_us;
+                    ESP_LOGW(kTag, "GESTURE_TRACE_BEGIN duration_s=120");
+                }
+                const auto elapsed_us = motion.sampled_at_us - gesture_trace_started_us;
+                if (elapsed_us <= kGestureTraceDurationUs) {
+                    ESP_LOGI("nightglass_gesture_trace",
+                             "t=%lld ax=%.4f ay=%.4f az=%.4f gx=%.3f gy=%.3f gz=%.3f",
+                             static_cast<long long>(elapsed_us), motion.accel_x_g,
+                             motion.accel_y_g, motion.accel_z_g,
+                             motion.gyro_corrected_x_dps, motion.gyro_corrected_y_dps,
+                             motion.gyro_corrected_z_dps);
+                } else {
+                    gesture_trace_complete = true;
+                    ESP_LOGW(kTag, "GESTURE_TRACE_END");
+                }
+            }
+#endif
         }
         if (motion.valid && motion.gyro_calibrated &&
             motion.sampled_at_us > last_motion_sample_us) {

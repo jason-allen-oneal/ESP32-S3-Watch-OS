@@ -21,3 +21,16 @@ config NIGHTGLASS_AUDIO_BOOT_SELF_TEST
         This is a bench/HIL gate only and must remain disabled in production.
 
 endmenu
+
+menu "Nightglass motion diagnostics"
+
+config NIGHTGLASS_GESTURE_BOOT_TRACE
+    bool "Stream a bounded gesture calibration trace after boot"
+    default n
+    help
+        After gyro calibration completes, emit 120 seconds of timestamped
+        accelerometer and corrected-gyro samples to the serial log. Gesture
+        actions remain governed by their normal settings. This is a bench/HIL
+        calibration gate only and must remain disabled in production.
+
+endmenu

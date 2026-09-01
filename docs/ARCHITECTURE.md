@@ -76,7 +76,10 @@ a cross-core critical section and never performs I2C or GPIO work.
   cooldowns, acceleration/rotation gates, and a separate policy layer that
   suppresses actions during charging/USB, recent touch/button input, alerts,
   pairing, replies, and OTA sessions. All four actions default off until physical
-  axis and false-positive calibration passes on the fitted watch.
+  axis and false-positive calibration passes on the fitted watch. The fitted
+  QMI8658 reports display-facing gravity on negative Z; that sign is covered by
+  host fixtures. A production-disabled, 120-second serial trace gate can record
+  bounded raw calibration evidence without enabling gesture actions.
 - GPIO18 starts low. The schematic's P1/P2 motor path and its ALDO3 supply were
   electrically exercised, but this physical unit produced no mechanical
   response and Waveshare does not list an installed actuator. Haptics are

@@ -39,13 +39,13 @@ int main() {
         for (int index = 0; index < 8; ++index) {
             processor.process(sample(0.2F, 0.0F, 0.0F, 0.98F, true, false));
         }
-        processor.process(sample(0.45F, 45.0F, 0.0F, 0.85F, true, false));
-        processor.process(sample(0.55F, 45.0F, 0.0F, 0.80F, true, false));
-        auto output = processor.process(sample(0.82F, 10.0F, 0.0F, 0.52F, true, false));
+        processor.process(sample(-0.45F, 45.0F, 0.0F, 0.85F, true, false));
+        processor.process(sample(-0.55F, 45.0F, 0.0F, 0.80F, true, false));
+        auto output = processor.process(sample(-0.82F, 10.0F, 0.0F, 0.52F, true, false));
         assert(output.detected == GestureKind::none);
-        output = processor.process(sample(0.86F, 4.0F, 0.0F, 0.45F, true, false));
+        output = processor.process(sample(-0.86F, 4.0F, 0.0F, 0.45F, true, false));
         assert(output.detected == GestureKind::none);
-        output = processor.process(sample(0.88F, 3.0F, 0.0F, 0.42F, true, false));
+        output = processor.process(sample(-0.88F, 3.0F, 0.0F, 0.42F, true, false));
         assert(output.detected == GestureKind::raise);
     }
     {
@@ -126,11 +126,19 @@ int main() {
         for (int index = 0; index < 8; ++index) {
             processor.process(sample(0.2F, 0.0F, 0.0F, 0.98F, false));
         }
-        processor.process(sample(0.45F, 50.0F, 0.0F, 0.85F, false));
-        processor.process(sample(0.55F, 50.0F, 0.0F, 0.80F, false));
+        processor.process(sample(-0.45F, 50.0F, 0.0F, 0.85F, false));
+        processor.process(sample(-0.55F, 50.0F, 0.0F, 0.80F, false));
         for (int index = 0; index < 4; ++index) {
-            assert(processor.process(sample(0.85F, 4.0F, 0.0F, 0.45F, false)).detected ==
+            assert(processor.process(sample(-0.85F, 4.0F, 0.0F, 0.45F, false)).detected ==
                    GestureKind::none);
+        }
+    }
+    {
+        now_us = 0;
+        GestureProcessor processor;
+        for (int index = 0; index < 60; ++index) {
+            assert(processor.process(sample(-0.80F, 0.0F, 0.0F, 0.60F, true, false))
+                       .detected == GestureKind::none);
         }
     }
     {
