@@ -135,6 +135,10 @@ public:
     nightglass::core::Status request_microphone_sample();
     nightglass::core::Status request_test_tone();
     nightglass::core::Status request_sound(SoundCue cue);
+    // Invalidates queued and in-flight instances of the specified repeating
+    // alert cue. The audio worker observes the generation between stream
+    // chunks and forces the physical PA low through normal cleanup.
+    void cancel_sound(SoundCue cue);
     nightglass::core::Status update_settings(const AudioSettings &settings);
     void set_scheduled_dnd(bool active);
     [[nodiscard]] AudioSnapshot snapshot() const;

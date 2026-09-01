@@ -191,6 +191,7 @@ struct OperationResult {
 struct AudioCommand {
     AudioOperation operation{AudioOperation::none};
     SoundCue cue{SoundCue::test};
+    std::uint32_t generation{0};
 };
 
 AudioService instance;
@@ -206,6 +207,22 @@ SemaphoreHandle_t request_mutex{nullptr};
 std::uint16_t pending_cues{};
 std::uint8_t pending_count{};
 bool capture_pending{};
+std::uint32_t alarm_generation{1};
+std::uint32_t timer_generation{1};
+
+std::uint32_t cue_generation_locked(SoundCue cue) {
+    if (cue == SoundCue::alarm) return alarm_generation;
+    if (cue == SoundCue::timer) return timer_generation;
+    return 0;
+}
+
+bool cue_cancelled(SoundCue cue, std::uint32_t generation) {
+    if (generation == 0) return false;
+    portENTER_CRITICAL(&state_mux);
+    const bool cancelled = generation != cue_generation_locked(cue);
+    portEXIT_CRITICAL(&state_mux);
+    return cancelled;
+}
 
 AudioSettings load_audio_settings() {
     AudioSettings settings{};
@@ -618,7 +635,8 @@ void generate_sound_cue(std::int16_t *samples, SoundCue cue,
     }
 }
 
-OperationResult run_operation(AudioOperation operation, SoundCue cue) {
+OperationResult run_operation(AudioOperation operation, SoundCue cue,
+                              std::uint32_t generation) {
     OperationResult result{};
     const auto embedded = operation == AudioOperation::playback
                               ? embedded_sound(cue)
@@ -696,6 +714,15 @@ OperationResult run_operation(AudioOperation operation, SoundCue cue) {
                 std::size_t frame_offset{};
                 const auto cue_frames = result.expected_bytes / kFrameBytes;
                 while (frame_offset < cue_frames) {
+                    if (cue_cancelled(cue, generation)) {
+                        // Cancellation is a successful bounded stop, not a
+                        // hardware failure. Account only for bytes requested
+                        // before the generation changed.
+                        result.expected_bytes = result.transferred_bytes;
+                        result.status = nightglass::core::Status::Ok();
+                        transfer_ok = false;
+                        break;
+                    }
                     const auto frames_this_chunk =
                         std::min(kDiagnosticFrames, cue_frames - frame_offset);
                     const auto bytes_this_chunk = frames_this_chunk * kFrameBytes;
@@ -863,8 +890,11 @@ void audio_worker_task(void *) {
             ++state.sequence;
         }
         portEXIT_CRITICAL(&state_mux);
-        if (!locked && allowed) {
-            const auto result = run_operation(command.operation, command.cue);
+        const bool stale = command.generation != 0 &&
+                           cue_cancelled(command.cue, command.generation);
+        if (!locked && allowed && !stale) {
+            const auto result = run_operation(command.operation, command.cue,
+                                              command.generation);
             finish_operation(command.operation, result);
         }
         portENTER_CRITICAL(&state_mux);
@@ -889,8 +919,11 @@ void audio_worker_task(void *) {
         if (command.operation == AudioOperation::capture) {
             capture_pending = false;
         } else {
-            pending_cues &= static_cast<std::uint16_t>(
-                ~(1U << static_cast<unsigned>(command.cue)));
+            if (command.generation == 0 ||
+                command.generation == cue_generation_locked(command.cue)) {
+                pending_cues &= static_cast<std::uint16_t>(
+                    ~(1U << static_cast<unsigned>(command.cue)));
+            }
         }
         if (pending_count > 0) --pending_count;
         state.operation_pending = pending_count > 0;
@@ -946,7 +979,11 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
     // light-sleep path from racing a short diagnostic. The PM lock in the
     // task covers automatic light sleep while hardware is open.
     power_service().note_activity(wake_reason);
-    const AudioCommand command{operation, cue};
+    std::uint32_t generation = 0;
+    portENTER_CRITICAL(&state_mux);
+    generation = cue_generation_locked(cue);
+    portEXIT_CRITICAL(&state_mux);
+    const AudioCommand command{operation, cue, generation};
     const bool urgent = critical || cue == SoundCue::call;
     const auto queued = urgent ? xQueueSendToFront(audio_queue, &command, 0)
                                : xQueueSendToBack(audio_queue, &command, 0);
@@ -1027,6 +1064,8 @@ nightglass::core::Status AudioService::start(i2c_master_bus_handle_t bus_handle)
     pending_cues = 0;
     pending_count = 0;
     capture_pending = false;
+    alarm_generation = 1;
+    timer_generation = 1;
     request_mutex = xSemaphoreCreateMutexStatic(&request_mutex_state);
     audio_queue = xQueueCreateStatic(kAudioQueueDepth, sizeof(AudioCommand),
                                      audio_queue_storage.data(), &audio_queue_state);
@@ -1088,6 +1127,21 @@ nightglass::core::Status AudioService::request_sound(SoundCue cue) {
         wake_reason = nightglass::core::WakeReason::touch;
     }
     return request(AudioOperation::playback, cue, wake_reason);
+#endif
+}
+
+void AudioService::cancel_sound(SoundCue cue) {
+#if NIGHTGLASS_AUDIO_RUNTIME
+    if (cue != SoundCue::alarm && cue != SoundCue::timer) return;
+    portENTER_CRITICAL(&state_mux);
+    auto &generation = cue == SoundCue::alarm ? alarm_generation : timer_generation;
+    if (++generation == 0) generation = 1;
+    pending_cues &= static_cast<std::uint16_t>(
+        ~(1U << static_cast<unsigned>(cue)));
+    ++state.sequence;
+    portEXIT_CRITICAL(&state_mux);
+#else
+    (void)cue;
 #endif
 }
 

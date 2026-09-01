@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 #include "nightglass/core/status.hpp"
@@ -66,6 +67,24 @@ constexpr bool alarm_runs_on_weekday(const AlarmSettings &alarm,
     return weekday < 7 && (alarm.repeat_days & (1U << weekday)) != 0;
 }
 
+// Accept a bounded late observation so a 100 ms worker, RTC refresh, or a
+// brief light-sleep interval cannot miss an alarm merely because second 0/1
+// was not sampled. last_fired_day preserves the once-per-local-day contract.
+constexpr bool alarm_due_in_window(const AlarmSettings &alarm,
+                                   std::uint8_t weekday,
+                                   std::int64_t local_epoch_seconds,
+                                   std::int64_t last_fired_day,
+                                   std::uint32_t late_window_seconds = 5 * 60) noexcept {
+    if (!alarm.enabled || !alarm_runs_on_weekday(alarm, weekday) ||
+        local_epoch_seconds < 0 || late_window_seconds == 0) return false;
+    const auto day = local_epoch_seconds / 86400;
+    if (day == last_fired_day) return false;
+    const auto target = day * 86400 + static_cast<std::int64_t>(alarm.hour) * 3600 +
+                        static_cast<std::int64_t>(alarm.minute) * 60;
+    return local_epoch_seconds >= target &&
+           local_epoch_seconds - target < static_cast<std::int64_t>(late_window_seconds);
+}
+
 struct ClockSnapshot {
     std::uint32_t sequence{0};
     bool time_valid{false};
@@ -89,6 +108,35 @@ struct ClockSnapshot {
     bool stopwatch_running{false};
     bool persistence_ok{true};
 };
+
+constexpr std::uint8_t next_alarm_index(
+    const std::array<AlarmSettings, kAlarmCapacity> &alarms,
+    std::int64_t local_epoch_seconds, std::uint8_t weekday) noexcept {
+    if (local_epoch_seconds < 0 || weekday >= 7) return kNoAlarmIndex;
+    const auto day_start = (local_epoch_seconds / 86400) * 86400;
+    std::int64_t best = std::numeric_limits<std::int64_t>::max();
+    std::uint8_t selected = kNoAlarmIndex;
+    for (std::size_t index = 0; index < alarms.size(); ++index) {
+        const auto &alarm = alarms[index];
+        if (!alarm.enabled) continue;
+        for (std::uint8_t offset = 0; offset <= 7; ++offset) {
+            if (!alarm_runs_on_weekday(alarm,
+                                       static_cast<std::uint8_t>((weekday + offset) % 7))) {
+                continue;
+            }
+            const auto target = day_start + static_cast<std::int64_t>(offset) * 86400 +
+                                static_cast<std::int64_t>(alarm.hour) * 3600 +
+                                static_cast<std::int64_t>(alarm.minute) * 60;
+            if (target < local_epoch_seconds) continue;
+            if (target < best) {
+                best = target;
+                selected = static_cast<std::uint8_t>(index);
+            }
+            break;
+        }
+    }
+    return selected;
+}
 
 static_assert(std::is_trivially_copyable_v<ClockSnapshot>);
 

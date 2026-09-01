@@ -426,6 +426,9 @@ void Shell::stop() {
     overlay_layer_ = nullptr;
     alert_card_ = nullptr;
     displayed_alert_kind_ = 0;
+    displayed_alert_alarm_index_ = nightglass::services::kNoAlarmIndex;
+    quick_settings_open_ = false;
+    home_aod_active_ = false;
     clear_route_objects();
     navigation_ = {};
 }
@@ -442,7 +445,10 @@ void Shell::input_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     const auto before = nightglass::services::power_service().snapshot();
     nightglass::services::power_service().note_activity(nightglass::core::WakeReason::touch);
-    if ((before.state == nightglass::core::PowerState::screen_blank || before.wake_touch_pending) &&
+    if ((before.state == nightglass::core::PowerState::dim ||
+         before.state == nightglass::core::PowerState::ambient ||
+         before.state == nightglass::core::PowerState::screen_blank ||
+         before.wake_touch_pending) &&
         self->touch_input_) {
         // The first contact on a black screen is wake-only. LVGL sends indev
         // events before object events, so this prevents click-through and then
@@ -578,8 +584,9 @@ void Shell::time_format_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto settings = nightglass::services::clock_service().snapshot().settings;
     settings.use_24_hour = !settings.use_24_hour;
-    nightglass::services::clock_service().update_clock_settings(settings);
-    self->refresh_clock_settings();
+    if (!nightglass::services::clock_service().update_clock_settings(settings)) {
+        lv_label_set_text(self->clock_preview_, "CLOCK QUEUE FULL");
+    }
 }
 
 void Shell::utc_offset_callback(lv_event_t *event) {
@@ -587,40 +594,63 @@ void Shell::utc_offset_callback(lv_event_t *event) {
     auto settings = nightglass::services::clock_service().snapshot().settings;
     settings.utc_offset_minutes = static_cast<std::int16_t>(settings.utc_offset_minutes + 30);
     if (settings.utc_offset_minutes > 14 * 60) settings.utc_offset_minutes = -12 * 60;
-    nightglass::services::clock_service().update_clock_settings(settings);
-    self->refresh_clock_settings();
+    if (!nightglass::services::clock_service().update_clock_settings(settings)) {
+        lv_label_set_text(self->clock_preview_, "CLOCK QUEUE FULL");
+    }
 }
 
 void Shell::dst_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto settings = nightglass::services::clock_service().snapshot().settings;
     settings.daylight_saving = !settings.daylight_saving;
-    nightglass::services::clock_service().update_clock_settings(settings);
-    self->refresh_clock_settings();
+    if (!nightglass::services::clock_service().update_clock_settings(settings)) {
+        lv_label_set_text(self->clock_preview_, "CLOCK QUEUE FULL");
+    }
 }
 
 void Shell::alarm_hour_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
     alarm.hour = static_cast<std::uint8_t>((alarm.hour + 1) % 24);
-    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
-    self->refresh_alarm();
+    if (!nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
+}
+
+void Shell::alarm_hour_back_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
+    alarm.hour = static_cast<std::uint8_t>((alarm.hour + 23) % 24);
+    if (!nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
 }
 
 void Shell::alarm_minute_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
     alarm.minute = static_cast<std::uint8_t>((alarm.minute + 5) % 60);
-    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
-    self->refresh_alarm();
+    if (!nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
+}
+
+void Shell::alarm_minute_back_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
+    alarm.minute = static_cast<std::uint8_t>((alarm.minute + 55) % 60);
+    if (!nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
 }
 
 void Shell::alarm_enabled_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto alarm = nightglass::services::clock_service().snapshot().alarms[self->alarm_slot_index_];
     alarm.enabled = !alarm.enabled;
-    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
-    self->refresh_alarm();
+    if (!nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
 }
 
 void Shell::alarm_slot_callback(lv_event_t *event) {
@@ -638,8 +668,9 @@ void Shell::alarm_repeat_callback(lv_event_t *event) {
                             : alarm.repeat_days == nightglass::services::kWeekdayMask
                                   ? nightglass::services::kWeekendMask
                                   : nightglass::services::kEveryDayMask;
-    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
-    self->refresh_alarm();
+    if (!nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
 }
 
 void Shell::alarm_label_callback(lv_event_t *event) {
@@ -652,13 +683,14 @@ void Shell::alarm_label_callback(lv_event_t *event) {
     }
     alarm.label.fill('\0');
     std::strncpy(alarm.label.data(), labels[selected % labels.size()], alarm.label.size() - 1);
-    nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm);
-    self->refresh_alarm();
+    if (!nightglass::services::clock_service().update_alarm(self->alarm_slot_index_, alarm)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
 }
 
 void Shell::alarm_snooze_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    nightglass::services::clock_service().snooze_alarm(10);
+    if (!nightglass::services::clock_service().snooze_alarm(10)) return;
     self->refresh_system_overlay();
 }
 
@@ -666,24 +698,27 @@ void Shell::quiet_toggle_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto quiet = nightglass::services::clock_service().snapshot().quiet_hours;
     quiet.enabled = !quiet.enabled;
-    nightglass::services::clock_service().update_quiet_hours(quiet);
-    self->refresh_alarm();
+    if (!nightglass::services::clock_service().update_quiet_hours(quiet)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
 }
 
 void Shell::quiet_start_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto quiet = nightglass::services::clock_service().snapshot().quiet_hours;
     quiet.start_minute = static_cast<std::uint16_t>((quiet.start_minute + 30) % (24 * 60));
-    nightglass::services::clock_service().update_quiet_hours(quiet);
-    self->refresh_alarm();
+    if (!nightglass::services::clock_service().update_quiet_hours(quiet)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
 }
 
 void Shell::quiet_end_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto quiet = nightglass::services::clock_service().snapshot().quiet_hours;
     quiet.end_minute = static_cast<std::uint16_t>((quiet.end_minute + 30) % (24 * 60));
-    nightglass::services::clock_service().update_quiet_hours(quiet);
-    self->refresh_alarm();
+    if (!nightglass::services::clock_service().update_quiet_hours(quiet)) {
+        set_state(self->alarm_state_, "QUEUE FULL", kRed);
+    }
 }
 
 void Shell::quick_settings_callback(lv_event_t *event) {
@@ -704,7 +739,11 @@ void Shell::quick_brightness_callback(lv_event_t *event) {
     constexpr std::uint8_t values[]{20, 30, 50, 75, 100};
     settings.active_brightness = next_value(settings.active_brightness, values);
     if (settings.dim_brightness >= settings.active_brightness) settings.dim_brightness = 8;
-    nightglass::services::power_service().update_settings(settings);
+    const auto status = nightglass::services::power_service().update_settings(settings);
+    if (!status.is_ok()) {
+        set_button_text(self->quick_brightness_, "BRIGHTNESS  SAVE FAILED");
+        return;
+    }
     self->refresh_quick_settings();
 }
 
@@ -712,7 +751,11 @@ void Shell::quick_mute_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto settings = nightglass::services::audio_service().snapshot().settings;
     settings.muted = !settings.muted;
-    (void)nightglass::services::audio_service().update_settings(settings);
+    const auto status = nightglass::services::audio_service().update_settings(settings);
+    if (!status.is_ok()) {
+        set_button_text(self->quick_mute_, "WATCH SOUND  SAVE FAILED");
+        return;
+    }
     self->refresh_quick_settings();
 }
 
@@ -720,7 +763,11 @@ void Shell::quick_dnd_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto settings = nightglass::services::audio_service().snapshot().settings;
     settings.do_not_disturb = !settings.do_not_disturb;
-    (void)nightglass::services::audio_service().update_settings(settings);
+    const auto status = nightglass::services::audio_service().update_settings(settings);
+    if (!status.is_ok()) {
+        set_button_text(self->quick_dnd_, "DND  SAVE FAILED");
+        return;
+    }
     self->refresh_quick_settings();
 }
 
@@ -728,41 +775,72 @@ void Shell::quick_bluetooth_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     auto settings = nightglass::services::connectivity_service().snapshot().settings;
     settings.enabled = !settings.enabled;
-    (void)nightglass::services::connectivity_service().update_settings(settings);
+    const auto status = nightglass::services::connectivity_service().update_settings(settings);
+    if (!status.is_ok()) {
+        set_button_text(self->quick_bluetooth_, "BLUETOOTH  SAVE FAILED");
+        return;
+    }
     self->refresh_quick_settings();
+}
+
+void Shell::phone_command_callback(lv_event_t *event) {
+    const auto command = static_cast<nightglass::services::PhoneCommand>(
+        reinterpret_cast<std::uintptr_t>(lv_event_get_user_data(event)));
+    if (!nightglass::services::connectivity_service().send_phone(command) &&
+        instance.connectivity_state_) {
+        set_state(instance.connectivity_state_, "COMMAND FAILED", kRed);
+    }
+}
+
+void Shell::call_command_callback(lv_event_t *event) {
+    auto command = static_cast<nightglass::services::CallCommand>(
+        reinterpret_cast<std::uintptr_t>(lv_event_get_user_data(event)));
+    if (command == nightglass::services::CallCommand::mute &&
+        nightglass::services::connectivity_service().snapshot().call.muted) {
+        command = nightglass::services::CallCommand::unmute;
+    }
+    if (!nightglass::services::connectivity_service().send_call(command) &&
+        instance.connectivity_state_) {
+        set_state(instance.connectivity_state_, "COMMAND FAILED", kRed);
+    }
 }
 
 void Shell::countdown_duration_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     const auto snapshot = nightglass::services::clock_service().snapshot();
     constexpr std::uint32_t values[]{60, 300, 600, 900, 1800, 3600};
-    nightglass::services::clock_service().set_timer_duration(
-        next_value(snapshot.timer_configured_seconds, values));
-    self->refresh_countdown();
+    if (!nightglass::services::clock_service().set_timer_duration(
+            next_value(snapshot.timer_configured_seconds, values))) {
+        lv_label_set_text(self->countdown_time_, "QUEUE FULL");
+    }
 }
 
 void Shell::countdown_toggle_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    nightglass::services::clock_service().toggle_timer();
-    self->refresh_countdown();
+    if (!nightglass::services::clock_service().toggle_timer()) {
+        lv_label_set_text(self->countdown_time_, "QUEUE FULL");
+    }
 }
 
 void Shell::countdown_reset_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    nightglass::services::clock_service().reset_timer();
-    self->refresh_countdown();
+    if (!nightglass::services::clock_service().reset_timer()) {
+        lv_label_set_text(self->countdown_time_, "QUEUE FULL");
+    }
 }
 
 void Shell::stopwatch_toggle_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    nightglass::services::clock_service().toggle_stopwatch();
-    self->refresh_stopwatch();
+    if (!nightglass::services::clock_service().toggle_stopwatch()) {
+        lv_label_set_text(self->stopwatch_time_, "QUEUE FULL");
+    }
 }
 
 void Shell::stopwatch_reset_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    nightglass::services::clock_service().reset_stopwatch();
-    self->refresh_stopwatch();
+    if (!nightglass::services::clock_service().reset_stopwatch()) {
+        lv_label_set_text(self->stopwatch_time_, "QUEUE FULL");
+    }
 }
 
 void Shell::audio_callback(lv_event_t *event) {
@@ -837,8 +915,9 @@ void Shell::audio_dnd_callback(lv_event_t *event) {
 
 void Shell::dismiss_alert_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    nightglass::services::clock_service().dismiss_alerts();
-    self->refresh_system_overlay();
+    if (nightglass::services::clock_service().dismiss_alerts()) {
+        self->refresh_system_overlay();
+    }
 }
 
 void Shell::diagnostics_callback(lv_event_t *event) {
@@ -1164,7 +1243,8 @@ void Shell::render_aod_home() {
     lv_obj_set_pos(home_time_, 82, 178);
     home_date_ = label(content_host_, "---- -- --", &lv_font_montserrat_16, kAodSecondary);
     lv_obj_set_pos(home_date_, 145, 244);
-    home_time_state_ = label(content_host_, "AOD", &lv_font_montserrat_14, kAodSecondary);
+    home_time_state_ = label(content_host_, "DIM AMBIENT", &lv_font_montserrat_14,
+                             kAodSecondary);
     lv_obj_set_pos(home_time_state_, 186, 278);
     home_battery_ = label(content_host_, "--%", &lv_font_montserrat_14, kAodSecondary);
     lv_obj_set_pos(home_battery_, 182, 318);
@@ -1468,7 +1548,8 @@ void Shell::render_weather() {
 
 void Shell::render_connectivity() {
     add_header(content_host_, "PHONE", back_callback, this);
-    auto *card = make_route_card(content_host_, 112, 145);
+    auto *scroller = make_scroller(content_host_);
+    auto *card = make_route_card(scroller, 0, 132);
     connectivity_state_ = label(card, "BLUETOOTH", &lv_font_montserrat_20, kGreen);
     lv_obj_set_pos(connectivity_state_, 0, 4);
     connectivity_detail_ = label(card, "Starting companion service", &lv_font_montserrat_16,
@@ -1476,10 +1557,39 @@ void Shell::render_connectivity() {
     lv_obj_set_pos(connectivity_detail_, 0, 44);
     lv_obj_set_width(connectivity_detail_, kSafeContentWidth - 32);
     lv_label_set_long_mode(connectivity_detail_, LV_LABEL_LONG_MODE_WRAP);
-    connectivity_toggle_ = make_button(content_host_, kSafeInset, 274, kSafeContentWidth, 58,
+    connectivity_toggle_ = make_button(scroller, 0, 144, kSafeContentWidth - 16, 54,
                                        "", kSurface, kPrimary,
                                        connectivity_toggle_callback, this);
-    make_button(content_host_, kSafeInset, 356, kSafeContentWidth, 58, "NOTIFICATIONS",
+    phone_battery_ = label(scroller, "PHONE BATTERY --", &lv_font_montserrat_16, kSecondary);
+    lv_obj_set_pos(phone_battery_, 8, 214);
+    phone_call_ = label(scroller, "NO ACTIVE CALL", &lv_font_montserrat_16, kSecondary);
+    lv_obj_set_pos(phone_call_, 8, 246);
+    lv_obj_set_width(phone_call_, kSafeContentWidth - 32);
+    make_button(scroller, 0, 280, 116, 50, "ANSWER", kSurface, kPrimary,
+                call_command_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::CallCommand::answer)));
+    make_button(scroller, 124, 280, 116, 50, "REJECT", kSurface, kAmber,
+                call_command_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::CallCommand::reject)));
+    make_button(scroller, 248, 280, 116, 50, "MUTE", kSurface, kPrimary,
+                call_command_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::CallCommand::mute)));
+    auto *agenda_heading = label(scroller, "AGENDA", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(agenda_heading, 8, 346);
+    for (std::size_t index = 0; index < agenda_items_.size(); ++index) {
+        agenda_items_[index] = label(scroller, "No upcoming event", &lv_font_montserrat_16,
+                                     kPrimary);
+        lv_obj_set_pos(agenda_items_[index], 8, 374 + static_cast<int>(index) * 42);
+        lv_obj_set_width(agenda_items_[index], kSafeContentWidth - 32);
+        lv_label_set_long_mode(agenda_items_[index], LV_LABEL_LONG_MODE_DOTS);
+    }
+    make_button(scroller, 0, 510, 174, 52, "FIND PHONE", kSurface, kPrimary,
+                phone_command_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::PhoneCommand::ring_start)));
+    make_button(scroller, 190, 510, 174, 52, "CAMERA", kSurface, kPrimary,
+                phone_command_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::PhoneCommand::camera)));
+    make_button(scroller, 0, 576, kSafeContentWidth - 16, 54, "NOTIFICATIONS",
                 kSurface, kPrimary, notifications_callback, this);
     configure_refresh_timer(1000);
     refresh_connectivity();
@@ -1753,6 +1863,8 @@ void Shell::render_alarm() {
     lv_obj_set_pos(card, 0, 0);
     lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
     lv_obj_set_style_border_color(card, lv_color_hex(chrome_palette().border), 0);
+    lv_obj_set_style_pad_all(card, 16, 0);
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
     auto *heading = label(card, "PERSISTENT ALARM", &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(heading, 0, 0);
     alarm_time_ = label(card, "07:00", &lv_font_montserrat_48, kPrimary);
@@ -1763,9 +1875,13 @@ void Shell::render_alarm() {
                               kPrimary, alarm_slot_callback, this);
     alarm_label_ = make_button(scroller, 0, 220, kSafeContentWidth - 16, 54, "", kSurface,
                                kPrimary, alarm_label_callback, this);
-    make_button(scroller, 0, 284, 174, 54, "HOUR +", kSurface, kPrimary,
+    make_button(scroller, 0, 284, 86, 54, "HOUR -", kSurface, kPrimary,
+                alarm_hour_back_callback, this);
+    make_button(scroller, 94, 284, 86, 54, "HOUR +", kSurface, kPrimary,
                 alarm_hour_callback, this);
-    make_button(scroller, 190, 284, 174, 54, "MIN +5", kSurface, kPrimary,
+    make_button(scroller, 190, 284, 86, 54, "MIN -", kSurface, kPrimary,
+                alarm_minute_back_callback, this);
+    make_button(scroller, 284, 284, 80, 54, "MIN +", kSurface, kPrimary,
                 alarm_minute_callback, this);
     alarm_repeat_ = make_button(scroller, 0, 348, kSafeContentWidth - 16, 54, "", kSurface,
                                 kPrimary, alarm_repeat_callback, this);
@@ -2075,6 +2191,41 @@ void Shell::refresh_connectivity() {
     lv_label_set_text(connectivity_detail_, text);
     set_button_text(connectivity_toggle_, snapshot.settings.enabled ? "BLUETOOTH  ON"
                                                                     : "BLUETOOTH  OFF");
+    if (phone_battery_) {
+        if (snapshot.phone_battery.valid) {
+            std::snprintf(text, sizeof(text), "PHONE BATTERY  %u%%%s%s",
+                          snapshot.phone_battery.percent,
+                          snapshot.phone_battery.charging ? " | CHARGING" : "",
+                          snapshot.phone_battery.power_save ? " | SAVER" : "");
+        } else {
+            std::snprintf(text, sizeof(text), "PHONE BATTERY  --");
+        }
+        lv_label_set_text(phone_battery_, text);
+    }
+    if (phone_call_) {
+        std::snprintf(text, sizeof(text), "%s%s%s",
+                      snapshot.call.ringing ? "INCOMING | "
+                      : snapshot.call.active ? "IN CALL | " : "NO ACTIVE CALL",
+                      snapshot.call.ringing || snapshot.call.active
+                          ? snapshot.call.label.data() : "",
+                      snapshot.call.muted ? " | MUTED" : "");
+        lv_label_set_text(phone_call_, text);
+    }
+    for (std::size_t index = 0; index < agenda_items_.size(); ++index) {
+        if (!agenda_items_[index]) continue;
+        const auto &entry = snapshot.agenda.events[index];
+        if (index < snapshot.agenda.count && entry.valid) {
+            std::snprintf(text, sizeof(text), "%s%s%s", entry.all_day ? "ALL DAY | " : "",
+                          entry.title.data(), entry.location[0] ? " @ " : "");
+            if (entry.location[0]) {
+                const auto used = std::strlen(text);
+                std::snprintf(text + used, sizeof(text) - used, "%s", entry.location.data());
+            }
+            lv_label_set_text(agenda_items_[index], text);
+        } else {
+            lv_label_set_text(agenda_items_[index], index == 0 ? "No upcoming events" : "");
+        }
+    }
 }
 
 void Shell::refresh_media() {
@@ -2307,8 +2458,14 @@ void Shell::refresh_home() {
     }
 
     if (home_alarm_) {
-        const auto &alarm = clock.alarm;
-        if (alarm.enabled) {
+        const auto next = clock.time_valid
+                              ? nightglass::services::next_alarm_index(
+                                    clock.alarms, nightglass::services::civil_to_epoch(
+                                                      clock.local_time),
+                                    clock.local_time.weekday)
+                              : nightglass::services::kNoAlarmIndex;
+        if (next < clock.alarms.size()) {
+            const auto &alarm = clock.alarms[next];
             std::snprintf(buffer, sizeof(buffer), full_background ? "%02u:%02u\nON" : "%02u:%02u",
                           alarm.hour, alarm.minute);
         } else {
@@ -2340,6 +2497,9 @@ void Shell::refresh_home() {
         const int shift_y = clock.time_valid ? (clock.local_time.minute % 2) * 4 - 2 : 0;
         lv_obj_set_pos(home_time_, 82 + shift_x, 178 + shift_y);
         lv_obj_set_pos(home_date_, 145 - shift_x, 244 - shift_y);
+        lv_obj_set_pos(home_time_state_, 186 + shift_y, 278 - shift_x);
+        lv_obj_set_pos(home_battery_, 182 - shift_x, 318 + shift_y);
+        lv_obj_set_pos(home_motion_, 145 + shift_x, 350 - shift_y);
         lv_obj_set_style_text_color(home_time_, lv_color_hex(kAodPrimary), 0);
         lv_obj_set_style_text_color(home_date_, lv_color_hex(kAodSecondary), 0);
         lv_obj_set_style_text_color(home_time_state_, lv_color_hex(kAodSecondary), 0);
@@ -2581,6 +2741,7 @@ void Shell::refresh_system_overlay() {
         lv_obj_add_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
         alert_card_ = nullptr;
         displayed_alert_kind_ = 0;
+        displayed_alert_alarm_index_ = nightglass::services::kNoAlarmIndex;
     }
     const auto kind = nightglass::services::clock_service().active_alert();
     const auto encoded = static_cast<std::uint8_t>(kind);
@@ -2590,10 +2751,17 @@ void Shell::refresh_system_overlay() {
             lv_obj_add_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
             alert_card_ = nullptr;
             displayed_alert_kind_ = 0;
+            displayed_alert_alarm_index_ = nightglass::services::kNoAlarmIndex;
         }
         return;
     }
-    if (alert_card_ && displayed_alert_kind_ == encoded) return;
+    const auto clock = nightglass::services::clock_service().snapshot();
+    const auto alarm_index = kind == nightglass::services::AlertKind::alarm ||
+                                     kind == nightglass::services::AlertKind::both
+                                 ? clock.ringing_alarm_index
+                                 : nightglass::services::kNoAlarmIndex;
+    if (alert_card_ && displayed_alert_kind_ == encoded &&
+        displayed_alert_alarm_index_ == alarm_index) return;
 
     lv_obj_clean(overlay_layer_);
     lv_obj_set_style_bg_color(overlay_layer_, lv_color_hex(kVoid), 0);
@@ -2616,7 +2784,6 @@ void Shell::refresh_system_overlay() {
                                                                            : "ALARMS DUE";
     auto *heading = label(alert_card_, title, &lv_font_montserrat_32, kPrimary);
     lv_obj_align(heading, LV_ALIGN_TOP_MID, 0, 18);
-    const auto clock = nightglass::services::clock_service().snapshot();
     const char *alarm_label = clock.ringing_alarm_index < clock.alarms.size()
                                   ? clock.alarms[clock.ringing_alarm_index].label.data()
                                   : "Visual + audio alert";
@@ -2637,6 +2804,7 @@ void Shell::refresh_system_overlay() {
                     kCyan, kVoid, dismiss_alert_callback, this);
     }
     displayed_alert_kind_ = encoded;
+    displayed_alert_alarm_index_ = alarm_index;
 }
 
 void Shell::refresh_diagnostics() {
@@ -2805,6 +2973,9 @@ void Shell::clear_route_objects() {
     connectivity_state_ = nullptr;
     connectivity_detail_ = nullptr;
     connectivity_toggle_ = nullptr;
+    phone_battery_ = nullptr;
+    phone_call_ = nullptr;
+    agenda_items_.fill(nullptr);
     media_state_ = nullptr;
     media_title_ = nullptr;
     media_artist_ = nullptr;

@@ -1,10 +1,12 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 #include "lvgl.h"
 #include "nightglass/core/navigation.hpp"
 #include "nightglass/core/status.hpp"
+#include "nightglass/services/connectivity_protocol.hpp"
 #include "nightglass/services/weather_logic.hpp"
 
 namespace nightglass::ui {
@@ -58,7 +60,9 @@ private:
     static void utc_offset_callback(lv_event_t *event);
     static void dst_callback(lv_event_t *event);
     static void alarm_hour_callback(lv_event_t *event);
+    static void alarm_hour_back_callback(lv_event_t *event);
     static void alarm_minute_callback(lv_event_t *event);
+    static void alarm_minute_back_callback(lv_event_t *event);
     static void alarm_enabled_callback(lv_event_t *event);
     static void alarm_slot_callback(lv_event_t *event);
     static void alarm_repeat_callback(lv_event_t *event);
@@ -73,6 +77,8 @@ private:
     static void quick_mute_callback(lv_event_t *event);
     static void quick_dnd_callback(lv_event_t *event);
     static void quick_bluetooth_callback(lv_event_t *event);
+    static void phone_command_callback(lv_event_t *event);
+    static void call_command_callback(lv_event_t *event);
     static void countdown_duration_callback(lv_event_t *event);
     static void countdown_toggle_callback(lv_event_t *event);
     static void countdown_reset_callback(lv_event_t *event);
@@ -166,6 +172,9 @@ private:
     lv_obj_t *connectivity_state_{nullptr};
     lv_obj_t *connectivity_detail_{nullptr};
     lv_obj_t *connectivity_toggle_{nullptr};
+    lv_obj_t *phone_battery_{nullptr};
+    lv_obj_t *phone_call_{nullptr};
+    std::array<lv_obj_t *, nightglass::services::kAgendaCapacity> agenda_items_{};
     lv_obj_t *media_state_{nullptr};
     lv_obj_t *media_title_{nullptr};
     lv_obj_t *media_artist_{nullptr};
@@ -207,6 +216,7 @@ private:
     lv_obj_t *audio_dnd_{nullptr};
     lv_obj_t *alert_card_{nullptr};
     std::uint8_t displayed_alert_kind_{0};
+    std::uint8_t displayed_alert_alarm_index_{0xff};
     bool quick_settings_open_{false};
     lv_obj_t *quick_brightness_{nullptr};
     lv_obj_t *quick_mute_{nullptr};

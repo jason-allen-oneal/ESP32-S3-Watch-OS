@@ -124,8 +124,10 @@ void load_state() {
         std::strncpy(loaded.alarms[index].label.data(), labels[index],
                      loaded.alarms[index].label.size() - 1);
     }
+    bool persistence_ok = true;
     nvs_handle_t handle{};
-    if (nvs_open(kNvsNamespace, NVS_READONLY, &handle) == ESP_OK) {
+    const auto open_status = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
+    if (open_status == ESP_OK) {
         std::uint8_t value8{};
         std::uint32_t value32{};
         std::int16_t value16{};
@@ -133,9 +135,13 @@ void load_state() {
         if (nvs_get_u8(handle, "dst", &value8) == ESP_OK) loaded.settings.daylight_saving = value8;
         if (nvs_get_i16(handle, "offset", &value16) == ESP_OK) loaded.settings.utc_offset_minutes = value16;
         std::size_t alarm_size = sizeof(loaded.alarms);
-        const bool alarms_loaded = nvs_get_blob(handle, "alarms", loaded.alarms.data(),
-                                                &alarm_size) == ESP_OK &&
+        const auto alarms_status = nvs_get_blob(handle, "alarms", loaded.alarms.data(),
+                                                &alarm_size);
+        const bool alarms_loaded = alarms_status == ESP_OK &&
                                    alarm_size == sizeof(loaded.alarms);
+        if (alarms_status != ESP_OK && alarms_status != ESP_ERR_NVS_NOT_FOUND) {
+            persistence_ok = false;
+        }
         if (!alarms_loaded) {
             if (nvs_get_u8(handle, "alarm_en", &value8) == ESP_OK)
                 loaded.alarms[0].enabled = value8;
@@ -157,6 +163,8 @@ void load_state() {
         if (nvs_get_u8(handle, "timer_run", &value8) == ESP_OK) loaded.timer_running = value8;
         nvs_get_i64(handle, "timer_due", &loaded_deadline);
         nvs_close(handle);
+    } else if (open_status != ESP_ERR_NVS_NOT_FOUND) {
+        persistence_ok = false;
     }
     if (!valid_settings(loaded.settings)) loaded.settings = {};
     for (auto &alarm : loaded.alarms) {
@@ -173,7 +181,7 @@ void load_state() {
         loaded.timer_remaining_seconds = loaded.timer_configured_seconds;
     }
     if (loaded.timer_running && loaded_deadline <= 0) loaded.timer_running = false;
-    loaded.persistence_ok = true;
+    loaded.persistence_ok = persistence_ok;
     timer_deadline_utc = loaded_deadline;
     // The RTC service may not have delivered its first sample yet. Preserve a
     // restored running countdown on the monotonic clock until UTC becomes
@@ -211,6 +219,8 @@ void mark_persistence(bool ok) {
 
 void handle_command(const Command &command, std::int64_t now_us) {
     bool persist = false;
+    bool cancel_alarm_audio = false;
+    bool cancel_timer_audio = false;
     portENTER_CRITICAL(&snapshot_mux);
     switch (command.type) {
         case CommandType::clock_settings:
@@ -226,6 +236,13 @@ void handle_command(const Command &command, std::int64_t now_us) {
                 if (current.ringing_alarm_index == command.index) {
                     current.alarm_ringing = false;
                     current.ringing_alarm_index = kNoAlarmIndex;
+                    cancel_alarm_audio = true;
+                }
+                if (!command.alarm.enabled && snoozed_alarm_index == command.index) {
+                    current.alarm_snoozed = false;
+                    snooze_deadline_utc = 0;
+                    snoozed_alarm_index = kNoAlarmIndex;
+                    cancel_alarm_audio = true;
                 }
                 persist = true;
             }
@@ -246,6 +263,7 @@ void handle_command(const Command &command, std::int64_t now_us) {
                 current.alarm_snoozed = true;
                 current.alarm_ringing = false;
                 current.ringing_alarm_index = kNoAlarmIndex;
+                cancel_alarm_audio = true;
                 persist = true;
             }
             break;
@@ -255,6 +273,7 @@ void handle_command(const Command &command, std::int64_t now_us) {
                 current.timer_remaining_seconds = command.value;
                 current.timer_running = false;
                 current.timer_ringing = false;
+                cancel_timer_audio = true;
                 timer_deadline_utc = 0;
                 timer_deadline_mono_us = 0;
                 persist = true;
@@ -271,6 +290,7 @@ void handle_command(const Command &command, std::int64_t now_us) {
                 }
                 current.timer_running = true;
                 current.timer_ringing = false;
+                cancel_timer_audio = true;
                 if (current.time_valid) {
                     timer_deadline_utc = current.utc_epoch_seconds + current.timer_remaining_seconds;
                     timer_deadline_mono_us = 0;
@@ -285,6 +305,7 @@ void handle_command(const Command &command, std::int64_t now_us) {
         case CommandType::timer_reset:
             current.timer_running = false;
             current.timer_ringing = false;
+            cancel_timer_audio = true;
             current.timer_remaining_seconds = current.timer_configured_seconds;
             timer_deadline_utc = 0;
             timer_deadline_mono_us = 0;
@@ -314,11 +335,15 @@ void handle_command(const Command &command, std::int64_t now_us) {
             snooze_deadline_utc = 0;
             snoozed_alarm_index = kNoAlarmIndex;
             current.timer_ringing = false;
+            cancel_alarm_audio = true;
+            cancel_timer_audio = true;
             persist = true;
             break;
     }
     ++current.sequence;
     portEXIT_CRITICAL(&snapshot_mux);
+    if (cancel_alarm_audio) audio_service().cancel_sound(SoundCue::alarm);
+    if (cancel_timer_audio) audio_service().cancel_sound(SoundCue::timer);
     if (persist) mark_persistence(save_state());
 }
 
@@ -365,10 +390,8 @@ void worker(void *) {
             const auto day = local_epoch / 86400;
             for (std::size_t index = 0; index < current.alarms.size(); ++index) {
                 const auto &alarm = current.alarms[index];
-                if (alarm.enabled && alarm_runs_on_weekday(alarm, current.local_time.weekday) &&
-                    current.local_time.hour == alarm.hour &&
-                    current.local_time.minute == alarm.minute &&
-                    current.local_time.second <= 1 && day != last_alarm_days[index]) {
+                if (alarm_due_in_window(alarm, current.local_time.weekday, local_epoch,
+                                        last_alarm_days[index])) {
                     current.alarm_ringing = true;
                     current.ringing_alarm_index = static_cast<std::uint8_t>(index);
                     last_alarm_days[index] = day;
