@@ -33,6 +33,10 @@ class OpenClawSetupCodeTest {
                 """{"url":"wss://voice.example.test","bootstrapToken":"abcdefghijklmnop","expiresAtMs":5}"""), 5)
         }
         assertThrows(IllegalArgumentException::class.java) { OpenClawSetupCode.decode("not-json") }
+        assertThrows(IllegalArgumentException::class.java) {
+            OpenClawSetupCode.decode(code(
+                """{"url":"wss://voice.example.test/?token=forbidden","bootstrapToken":"abcdefghijklmnop"}"""))
+        }
     }
 
     @Test fun validatesTlsFingerprintAndExactVoiceScopes() {

@@ -63,4 +63,22 @@ int main() {
     auto invalid_status = status;
     invalid_status[6] = 0xff;
     assert(!parse_voice_frame(invalid_status, frame));
+
+    const std::array<std::uint8_t, 7> health{1, 0x49, 9, 0, 0, 0, 2};
+    assert(parse_voice_frame(health, frame));
+    assert(frame.kind == VoiceFrameKind::health &&
+           frame.session_id == 9 && frame.health == VoiceHealthState::healthy);
+    auto invalid_health = health;
+    invalid_health[6] = 3;
+    assert(!parse_voice_frame(invalid_health, frame));
+    auto zero_health_sequence = health;
+    zero_health_sequence[2] = 0;
+    assert(!parse_voice_frame(zero_health_sequence, frame));
+
+    assert(voice_health_sequence_is_newer(2, 1));
+    assert(!voice_health_sequence_is_newer(1, 1));
+    assert(!voice_health_sequence_is_newer(1, 2));
+    assert(voice_health_sequence_is_newer(1, 0xffff'ffffU));
+    assert(voice_health_is_stale(kVoiceHealthStaleUs + 2, 1));
+    assert(!voice_health_is_stale(kVoiceHealthStaleUs, 1));
 }

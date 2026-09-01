@@ -28,6 +28,13 @@ enum class VoiceFrameKind : std::uint8_t {
     response_data = 0x46,
     response_end = 0x47,
     response_status = 0x48,
+    health = 0x49,
+};
+
+enum class VoiceHealthState : std::uint8_t {
+    unavailable = 0,
+    degraded = 1,
+    healthy = 2,
 };
 
 enum class VoiceStatus : std::uint8_t {
@@ -52,8 +59,24 @@ struct VoiceFrame {
     std::uint16_t sequence{0};
     std::uint8_t credits{0};
     VoiceStatus status{VoiceStatus::invalid};
+    VoiceHealthState health{VoiceHealthState::unavailable};
     std::span<const std::uint8_t> payload{};
 };
+
+inline constexpr std::int64_t kVoiceHealthStaleUs = 150'000'000;
+
+constexpr bool voice_health_sequence_is_newer(std::uint32_t candidate,
+                                              std::uint32_t previous) noexcept {
+    if (candidate == 0 || candidate == previous) return false;
+    if (previous == 0) return true;
+    return static_cast<std::uint32_t>(candidate - previous) < 0x8000'0000U;
+}
+
+constexpr bool voice_health_is_stale(std::int64_t now_us,
+                                     std::int64_t updated_us) noexcept {
+    return updated_us <= 0 || now_us < updated_us ||
+           now_us - updated_us > kVoiceHealthStaleUs;
+}
 
 struct EncodedVoiceFrame {
     std::array<std::uint8_t, kVoiceMaximumFrameBytes> bytes{};

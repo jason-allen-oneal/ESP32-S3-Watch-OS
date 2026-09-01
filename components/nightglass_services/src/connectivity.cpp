@@ -506,7 +506,7 @@ int gatt_access(std::uint16_t conn_handle, std::uint16_t attr_handle,
     }
     const auto opcode = length >= 2 ? frame[1] : std::uint8_t{};
     if (opcode >= static_cast<std::uint8_t>(VoiceFrameKind::request_ack) &&
-        opcode <= static_cast<std::uint8_t>(VoiceFrameKind::response_status)) {
+        opcode <= static_cast<std::uint8_t>(VoiceFrameKind::health)) {
         VoiceFrame voice_frame{};
         const bool parsed = parse_voice_frame(std::span(frame.data(), length), voice_frame);
         const bool applied = parsed && authorization_still_valid(authorization) &&

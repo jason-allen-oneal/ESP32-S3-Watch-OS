@@ -40,6 +40,9 @@ struct VoiceSnapshot {
     std::uint32_t capture_rms{0};
     std::uint16_t response_bytes{0};
     VoiceStatus status{VoiceStatus::ok};
+    VoiceHealthState health{VoiceHealthState::unavailable};
+    std::uint32_t health_sequence{0};
+    std::uint32_t health_age_seconds{0};
     VoiceSettings settings{};
     std::array<char, kVoiceMaximumResponseBytes + 1> response{};
 };

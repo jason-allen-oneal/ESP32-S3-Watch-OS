@@ -198,6 +198,25 @@ void draw_steps_icon(lv_obj_t *parent, std::uint32_t color) {
     weather_shape(parent, 41, 0, 5, 5, color, 3);
 }
 
+void draw_openclaw_icon(lv_obj_t *parent, std::uint32_t color) {
+    if (!parent) return;
+    lv_obj_clean(parent);
+
+    // A compact lobster/claw mark built from native LVGL geometry. This keeps
+    // the watch face independent of font glyph coverage and bitmap assets.
+    weather_shape(parent, 38, 18, 12, 30, color, 6);  // body
+    weather_shape(parent, 34, 12, 20, 13, color, 7);  // head
+    weather_shape(parent, 24, 24, 16, 6, color, 3);   // left arm
+    weather_shape(parent, 48, 24, 16, 6, color, 3);   // right arm
+    weather_shape(parent, 9, 8, 17, 17, color, 9);    // left claw
+    weather_shape(parent, 17, 18, 11, 12, color, 6);
+    weather_shape(parent, 62, 8, 17, 17, color, 9);   // right claw
+    weather_shape(parent, 60, 18, 11, 12, color, 6);
+    weather_shape(parent, 33, 4, 3, 12, color, 2);    // antennae
+    weather_shape(parent, 52, 4, 3, 12, color, 2);
+    weather_shape(parent, 33, 43, 22, 4, color, 2);   // tail bar
+}
+
 lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int width, int height,
                       const char *text, std::uint32_t background,
                       std::uint32_t foreground, lv_event_cb_t callback,
@@ -1260,6 +1279,8 @@ void Shell::face_action_callback(lv_event_t *event) {
             self->navigate(NavigationAction::open_diagnostics); break;
         case FaceAction::open_clock_settings:
             self->navigate(NavigationAction::open_clock_settings); break;
+        case FaceAction::open_openclaw:
+            self->navigate(NavigationAction::open_openclaw); break;
     }
 }
 
@@ -1462,7 +1483,8 @@ void Shell::render_pack_home() {
     for (std::uint8_t index = 0; index < pack.text_slot_count; ++index) {
         const auto &slot = pack.text_slots[index];
         if (slot.field == nightglass::services::FaceField::weather_icon ||
-            slot.field == nightglass::services::FaceField::steps_icon) {
+            slot.field == nightglass::services::FaceField::steps_icon ||
+            slot.field == nightglass::services::FaceField::connectivity) {
             auto *obj = lv_obj_create(content_host_);
             lv_obj_remove_style_all(obj);
             lv_obj_set_pos(obj, slot.bounds.x, slot.bounds.y);
@@ -1471,9 +1493,13 @@ void Shell::render_pack_home() {
             lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
             if (slot.field == nightglass::services::FaceField::weather_icon) {
                 home_weather_icon_ = obj;
-            } else {
+            } else if (slot.field == nightglass::services::FaceField::steps_icon) {
                 home_steps_icon_ = obj;
                 draw_steps_icon(obj, face_color(pack.palette, slot.color));
+            } else {
+                home_connectivity_ = obj;
+                home_openclaw_icon_color_ = kAmber;
+                draw_openclaw_icon(obj, home_openclaw_icon_color_);
             }
             continue;
         }
@@ -2381,7 +2407,33 @@ void Shell::refresh_openclaw() {
         case nightglass::services::VoiceTurnState::failed:
         case nightglass::services::VoiceTurnState::unavailable:
             state = "UNAVAILABLE"; color = kRed;
-            std::snprintf(detail, sizeof(detail), "Phone or OpenClaw voice link unavailable");
+            switch (snapshot.status) {
+                case nightglass::services::VoiceStatus::disconnected:
+                    std::snprintf(detail, sizeof(detail), "Secure phone link unavailable");
+                    break;
+                case nightglass::services::VoiceStatus::busy:
+                    std::snprintf(detail, sizeof(detail), "Microphone or voice service busy");
+                    break;
+                case nightglass::services::VoiceStatus::invalid:
+                    std::snprintf(detail, sizeof(detail), "Voice transport rejected invalid data");
+                    break;
+                case nightglass::services::VoiceStatus::timeout:
+                    std::snprintf(detail, sizeof(detail), "Voice upload or response timed out");
+                    break;
+                case nightglass::services::VoiceStatus::gateway_unavailable:
+                    std::snprintf(detail, sizeof(detail), "OpenClaw Gateway unavailable");
+                    break;
+                case nightglass::services::VoiceStatus::scope_rejected:
+                    std::snprintf(detail, sizeof(detail), "OpenClaw authorization rejected");
+                    break;
+                case nightglass::services::VoiceStatus::processing_failed:
+                    std::snprintf(detail, sizeof(detail), "Voice capture or processing failed");
+                    break;
+                case nightglass::services::VoiceStatus::cancelled:
+                case nightglass::services::VoiceStatus::ok:
+                    std::snprintf(detail, sizeof(detail), "Phone or OpenClaw voice link unavailable");
+                    break;
+            }
             break;
         case nightglass::services::VoiceTurnState::idle:
             std::snprintf(detail, sizeof(detail),
@@ -2787,15 +2839,16 @@ void Shell::refresh_home() {
                   connectivity.notification_count ? pack.palette.accent : pack.palette.secondary);
     }
     if (home_connectivity_) {
-        const bool connected = connectivity.state ==
-                               nightglass::services::CompanionLinkState::connected_encrypted;
-        const char *link = connected ? "LINK\nON"
-                           : connectivity.state ==
-                                 nightglass::services::CompanionLinkState::advertising
-                               ? "PAIR"
-                               : connectivity.settings.enabled ? "LINK\nWAIT" : "OFF";
-        set_state(home_connectivity_, link,
-                  connected ? pack.palette.accent : pack.palette.secondary);
+        const auto voice = nightglass::services::voice_service().snapshot();
+        const auto color = voice.health == nightglass::services::VoiceHealthState::healthy
+                               ? kGreen
+                           : voice.health == nightglass::services::VoiceHealthState::degraded
+                               ? kAmber
+                               : kRed;
+        if (color != home_openclaw_icon_color_) {
+            draw_openclaw_icon(home_connectivity_, color);
+            home_openclaw_icon_color_ = color;
+        }
     }
 
     const auto &motion = snapshot.motion;
@@ -3411,6 +3464,7 @@ void Shell::clear_route_objects() {
     home_alarm_ = nullptr;
     home_timer_ = nullptr;
     home_connectivity_ = nullptr;
+    home_openclaw_icon_color_ = 0;
     home_distance_ = nullptr;
     home_weather_ = nullptr;
     home_weather_icon_ = nullptr;

@@ -266,7 +266,10 @@ class OpenClawVoiceGateway(
         }
     }
 
-    private class RpcSocket(
+    internal class GatewayConnectRejectedException(message: String) :
+        IllegalStateException(message)
+
+    internal class RpcSocket(
         private val credential: OpenClawVoiceCredential,
         private val store: OpenClawVoiceStore,
         private val role: String,
@@ -341,8 +344,13 @@ class OpenClawVoiceGateway(
                     } else {
                         val message = (root["error"] as? JsonObject)?.get("message")
                             ?.jsonPrimitive?.content ?: "OpenClaw request failed"
-                        waiter.completeExceptionally(IllegalStateException(message))
-                        if (id == CONNECT_ID) connected.completeExceptionally(IllegalStateException(message))
+                        val failure = if (id == CONNECT_ID) {
+                            GatewayConnectRejectedException(message)
+                        } else {
+                            IllegalStateException(message)
+                        }
+                        waiter.completeExceptionally(failure)
+                        if (id == CONNECT_ID) connected.completeExceptionally(failure)
                     }
                 }
             }

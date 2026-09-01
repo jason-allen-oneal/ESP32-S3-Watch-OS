@@ -43,9 +43,7 @@ constexpr FaceTextSlot kRevenantTextSlots[]{
      FaceTextAlign::center, FaceColorRole::accent, "ALARM"},
     {FaceField::alarm, {38, 417, 88, 38}, FaceTextStyle::body_16,
      FaceTextAlign::center, FaceColorRole::primary, nullptr},
-    {FaceField::fixed_text, {284, 395, 88, 18}, FaceTextStyle::caption_14,
-     FaceTextAlign::center, FaceColorRole::accent, "PHONE"},
-    {FaceField::connectivity, {284, 417, 88, 38}, FaceTextStyle::body_16,
+    {FaceField::connectivity, {284, 397, 88, 58}, FaceTextStyle::body_16,
      FaceTextAlign::center, FaceColorRole::primary, nullptr},
     {FaceField::fixed_text, {167, 455, 76, 18}, FaceTextStyle::caption_14,
      FaceTextAlign::center, FaceColorRole::accent, "APPS"},
@@ -58,7 +56,7 @@ constexpr FaceActionSlot kRevenantActions[]{
     {FaceAction::open_notifications, {252, 190, 130, 64}},
     {FaceAction::open_clock_settings, {28, 260, 354, 112}},
     {FaceAction::open_alarm, {28, 388, 112, 74}},
-    {FaceAction::open_connectivity, {270, 388, 112, 74}},
+    {FaceAction::open_openclaw, {270, 388, 112, 74}},
     {FaceAction::open_apps, {155, 426, 100, 48}},
 };
 

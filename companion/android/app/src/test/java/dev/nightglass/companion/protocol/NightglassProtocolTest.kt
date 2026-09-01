@@ -183,6 +183,10 @@ class NightglassProtocolTest {
         assertEquals(13, NightglassProtocol.voiceResponseData(
             7u, 8u, 0, byteArrayOf('x'.code.toByte())).size)
         assertEquals(7, NightglassProtocol.voiceStatus(7u, 6).size)
+        assertArrayEquals(byteArrayOf(1, 0x49, 0x12, 0x34, 0x56, 0x78, 2),
+            NightglassProtocol.voiceHealth(0x78563412u, 2))
+        assertEquals(1u, NightglassProtocol.nextNonzeroSequence32(UInt.MAX_VALUE))
+        assertEquals(2u, NightglassProtocol.nextNonzeroSequence32(1u))
     }
 
     @Test fun voiceFramesAcceptFiveMinuteBoundaryOnly() {

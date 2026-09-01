@@ -18,6 +18,8 @@ object NightglassProtocol {
 
     fun voiceDurationAllowed(seconds: Int): Boolean =
         seconds == 30 || seconds == 60 || seconds == 120 || seconds == 300
+    fun nextNonzeroSequence32(current: UInt): UInt =
+        if (current == UInt.MAX_VALUE) 1u else current + 1u
     private const val CONNECTED_ENCRYPTED = 3
 
     data class WatchStatus(val state: Int, val notificationCount: Int,
@@ -298,6 +300,11 @@ object NightglassProtocol {
         require(session != 0u && status in 0..8)
         return ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN)
             .put(VERSION).put(0x48).putInt(session.toInt()).put(status.toByte()).array()
+    }
+    fun voiceHealth(sequence: UInt, state: Int): ByteArray {
+        require(sequence != 0u && state in 0..2)
+        return ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x49).putInt(sequence.toInt()).put(state.toByte()).array()
     }
     fun replyResult(sequence: Int, status: Int, id: UInt, nonce: UInt): ByteArray {
         require(sequence in 1..0xff && status in 0..5 && id != 0u && nonce != 0u)

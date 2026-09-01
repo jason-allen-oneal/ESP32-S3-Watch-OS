@@ -10,6 +10,7 @@ import android.media.AudioManager
 import android.net.Uri
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.*
 import android.util.Log
 import android.view.KeyEvent
@@ -22,6 +23,9 @@ import dev.nightglass.companion.phone.PhoneIntegrationManager
 import dev.nightglass.companion.weather.PhoneWeatherProxy
 import dev.nightglass.companion.update.OtaTransferManager
 import dev.nightglass.companion.voice.OpenClawVoiceGateway
+import dev.nightglass.companion.voice.OpenClawHealth
+import dev.nightglass.companion.voice.OpenClawHealthPolicy
+import dev.nightglass.companion.voice.OpenClawHealthProbe
 import dev.nightglass.companion.voice.VoiceResponseQueue
 import dev.nightglass.companion.voice.VoiceTransferReceiver
 import dev.nightglass.companion.voice.VoiceTurnOwner
@@ -85,6 +89,7 @@ class NightglassConnectionService : Service() {
     private var connectionStatus = "Searching for Nightglass"
     private val reconnect = Runnable { if (!explicitDisconnect && gatt == null) reconnectBondedOrScan() }
     private val weatherExecutor = Executors.newSingleThreadExecutor()
+    private val voiceHealthExecutor = Executors.newSingleThreadExecutor()
     private val otaExecutor = Executors.newSingleThreadScheduledExecutor()
     private val otaTransfers by lazy {
         OtaTransferManager(contentResolver, otaExecutor, { negotiatedPayload },
@@ -93,6 +98,13 @@ class NightglassConnectionService : Service() {
     private val openClawVoice by lazy {
         OpenClawVoiceGateway(this) { detail -> update(detail) }
     }
+    private val openClawHealthProbe by lazy { OpenClawHealthProbe(this) }
+    private var voiceHealthProbeInFlight = false
+    private var voiceHealthProbeGeneration = 0
+    private var voiceHealthFailures = 0
+    private var voiceHealthSequence = 0u
+    private var lastVoiceHealth = OpenClawHealth.DEGRADED
+    private val voiceHealthRefresh = Runnable { refreshOpenClawHealth() }
     private val voiceReceiver by lazy {
         VoiceTransferReceiver(::writeVoiceControl, { session, audio ->
             val owner = VoiceTurnOwner(session, linkGeneration, ++voiceTurnGeneration)
@@ -125,7 +137,11 @@ class NightglassConnectionService : Service() {
     private var weatherFetchInFlight = false
     private val weatherRefresh = Runnable { fetchPhoneWeather() }
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) { scheduleWeatherRefresh(0) }
+        override fun onAvailable(network: Network) {
+            scheduleWeatherRefresh(0)
+            scheduleOpenClawHealth(0)
+        }
+        override fun onLost(network: Network) { scheduleOpenClawHealth(0) }
     }
 
     private val bondReceiver = object : BroadcastReceiver() {
@@ -174,10 +190,14 @@ class NightglassConnectionService : Service() {
         stopScan()
         pendingBondAddress = null
         reconnectHandler.removeCallbacks(weatherRefresh)
+        reconnectHandler.removeCallbacks(voiceHealthRefresh)
+        voiceHealthProbeGeneration++
         phoneIntegrations.stop()
         voiceReceiver.linkLost()
         openClawVoice.close()
+        openClawHealthProbe.close()
         weatherExecutor.shutdownNow()
+        voiceHealthExecutor.shutdownNow()
         otaExecutor.shutdownNow()
         closeGatt()
         super.onDestroy()
@@ -631,6 +651,8 @@ class NightglassConnectionService : Service() {
         phoneIntegrations.refreshAll()
         otaTransfers.resumeLink()
         scheduleWeatherRefresh(0)
+        publishOpenClawHealth(OpenClawHealth.DEGRADED)
+        scheduleOpenClawHealth(0)
     }
     private fun stopScan() { if (scanning && hasConnectPermissions()) adapter.bluetoothLeScanner?.stopScan(scanCallback); scanning = false }
     private fun scheduleReconnect() {
@@ -641,6 +663,11 @@ class NightglassConnectionService : Service() {
         reconnectHandler.postDelayed(reconnect, delay)
     }
     private fun resetLinkState() {
+        reconnectHandler.removeCallbacks(voiceHealthRefresh)
+        voiceHealthProbeGeneration++
+        voiceHealthProbeInFlight = false
+        voiceHealthFailures = 0
+        lastVoiceHealth = OpenClawHealth.DEGRADED
         otaTransfers.linkLost()
         linkGeneration++
         val owner = activeVoiceOwner
@@ -663,7 +690,7 @@ class NightglassConnectionService : Service() {
             otaWrites.clear()
             writes.removeIf { frame ->
                 val opcode = frame.getOrNull(1)?.toInt()?.and(0xff) ?: -1
-                val remove = opcode == 0x24 || opcode in 0x44..0x48
+                val remove = opcode == 0x24 || opcode in 0x44..0x49
                 if (remove) frame.fill(0)
                 remove
             }
@@ -697,6 +724,59 @@ class NightglassConnectionService : Service() {
         val config = PhoneWeatherProxy.load(this) ?: return
         val delay = delayMs ?: config.refreshMinutes * 60_000L
         reconnectHandler.postDelayed(weatherRefresh, delay)
+    }
+
+    private fun scheduleOpenClawHealth(delayMs: Long = 60_000L) {
+        if (destroyed || !linkReady) return
+        reconnectHandler.removeCallbacks(voiceHealthRefresh)
+        reconnectHandler.postDelayed(voiceHealthRefresh, delayMs)
+    }
+
+    private fun phoneInternetAvailable(): Boolean {
+        val manager = getSystemService(ConnectivityManager::class.java)
+        val network = manager.activeNetwork ?: return false
+        val capabilities = manager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    private fun refreshOpenClawHealth() {
+        if (!linkReady || destroyed || voiceHealthProbeInFlight) return
+        if (activeVoiceOwner != null || otaTransfers.active()) {
+            // Do not refresh a cached result without a new authenticated
+            // handshake. The watch will age the last result to degraded if a
+            // long voice turn or OTA prevents probing for 150 seconds.
+            scheduleOpenClawHealth()
+            return
+        }
+        val internet = phoneInternetAvailable()
+        val probeGeneration = ++voiceHealthProbeGeneration
+        val probeLinkGeneration = linkGeneration
+        voiceHealthProbeInFlight = true
+        voiceHealthExecutor.execute {
+            val result = openClawHealthProbe.check(internet)
+            reconnectHandler.post {
+                if (probeGeneration != voiceHealthProbeGeneration ||
+                    probeLinkGeneration != linkGeneration) return@post
+                voiceHealthProbeInFlight = false
+                if (destroyed || !linkReady) return@post
+                val decision = OpenClawHealthPolicy.decide(
+                    result, internet, voiceHealthFailures)
+                voiceHealthFailures = decision.consecutiveFailures
+                publishOpenClawHealth(decision.state)
+                scheduleOpenClawHealth()
+            }
+        }
+    }
+
+    private fun publishOpenClawHealth(state: OpenClawHealth) {
+        if (!linkReady) return
+        voiceHealthSequence = NightglassProtocol.nextNonzeroSequence32(voiceHealthSequence)
+        lastVoiceHealth = state
+        if (writeVoiceControl(NightglassProtocol.voiceHealth(
+                voiceHealthSequence, state.wireValue))) {
+            Log.i(TAG, "OpenClaw health queued: state=${state.name}")
+        }
     }
 
     private fun fetchPhoneWeather() {

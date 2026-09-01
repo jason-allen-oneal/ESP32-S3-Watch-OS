@@ -111,6 +111,12 @@ bool parse_voice_frame(std::span<const std::uint8_t> frame,
                static_cast<std::uint8_t>(message.status) <=
                static_cast<std::uint8_t>(VoiceStatus::processing_failed);
     }
+    if (kind == VoiceFrameKind::health) {
+        if (!valid_common(frame, message, 7) || frame.size() != 7) return false;
+        message.health = static_cast<VoiceHealthState>(frame[6]);
+        return message.health >= VoiceHealthState::unavailable &&
+               message.health <= VoiceHealthState::healthy;
+    }
     return false;
 }
 

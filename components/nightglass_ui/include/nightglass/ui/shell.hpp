@@ -269,6 +269,7 @@ private:
     lv_obj_t *home_alarm_{nullptr};
     lv_obj_t *home_timer_{nullptr};
     lv_obj_t *home_connectivity_{nullptr};
+    std::uint32_t home_openclaw_icon_color_{0};
     lv_obj_t *home_distance_{nullptr};
     lv_obj_t *home_weather_{nullptr};
     lv_obj_t *home_weather_icon_{nullptr};

@@ -29,6 +29,8 @@ class OtaTransferManager(
     private val confirmation = OtaConfirmationTracker()
     private var lastPercent = -1
 
+    @Synchronized fun active(): Boolean = selected != null || processing || aborting
+
     @Synchronized fun start(uris: List<android.net.Uri>) {
         if (processing || selected != null) {
             emit(true, false, maxOf(lastPercent, 0), "An update is already active")

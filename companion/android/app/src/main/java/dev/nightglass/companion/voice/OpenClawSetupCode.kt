@@ -43,7 +43,8 @@ object OpenClawSetupCode {
     private fun validateUrl(value: String) {
         require(value.length in 8..2048)
         val uri = URI(value)
-        require(uri.userInfo == null && uri.fragment == null && !uri.host.isNullOrBlank())
+        require(uri.userInfo == null && uri.fragment == null && uri.rawQuery == null &&
+            !uri.host.isNullOrBlank())
         if (uri.scheme.equals("wss", ignoreCase = true)) return
         require(uri.scheme.equals("ws", ignoreCase = true))
         require(uri.host.equals("127.0.0.1") || uri.host.equals("localhost", ignoreCase = true) || uri.host == "::1")

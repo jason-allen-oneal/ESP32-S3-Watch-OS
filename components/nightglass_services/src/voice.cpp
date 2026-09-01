@@ -116,6 +116,7 @@ std::uint16_t response_received{};
 std::int64_t recording_started_us{};
 std::int64_t upload_deadline_us{};
 std::int64_t processing_deadline_us{};
+std::int64_t health_updated_us{};
 VoiceLifecycle lifecycle{};
 struct CaptureContext {
     std::uint32_t generation{0};
@@ -226,6 +227,8 @@ void publish_failure(VoiceStatus status) {
     current.recorded_ms = 0;
     ++current.sequence;
     portEXIT_CRITICAL(&voice_lock);
+    ESP_LOGW(kTag, "Voice state failed: status=%u",
+             static_cast<unsigned>(status));
 }
 
 bool upload_expired() {
@@ -438,7 +441,17 @@ void capture_complete(void *context, const VoiceCaptureResult &result) {
     upload_deadline_us = esp_timer_get_time() +
                          static_cast<std::int64_t>(
                              upload_deadline_ms(result.encoded_bytes)) * 1000;
+    const auto logged_session = current.session_id;
+    const auto logged_ms = current.recorded_ms;
+    const auto logged_bytes = current.encoded_bytes;
+    const auto logged_rms = current.capture_rms;
     portEXIT_CRITICAL(&voice_lock);
+    ESP_LOGI(kTag, "Voice capture closed: session=%lu ms=%lu bytes=%lu rms=%lu ready=%u",
+             static_cast<unsigned long>(logged_session),
+             static_cast<unsigned long>(logged_ms),
+             static_cast<unsigned long>(logged_bytes),
+             static_cast<unsigned long>(logged_rms),
+             ready ? 1U : 0U);
     if (voice_worker != nullptr) xTaskNotifyGive(voice_worker);
 }
 
@@ -447,6 +460,9 @@ void capture_complete(void *context, const VoiceCaptureResult &result) {
 nightglass::core::Status VoiceService::start() {
     current = {};
     current.state = VoiceTurnState::idle;
+    current.health = VoiceHealthState::unavailable;
+    current.health_sequence = 0;
+    health_updated_us = 0;
     current.settings = load_voice_settings();
     lifecycle = {};
     update_blocked.store(false, std::memory_order_release);
@@ -472,6 +488,7 @@ nightglass::core::Status VoiceService::begin_capture() {
     if (link.state != CompanionLinkState::connected_encrypted ||
         !link.encrypted || !link.bonded || !link.peer_identity_pinned ||
         connectivity_service().maximum_outbound_frame() < 64) {
+        publish_failure(VoiceStatus::disconnected);
         return {nightglass::core::StatusCode::unavailable,
                 "secure phone link unavailable"};
     }
@@ -480,6 +497,10 @@ nightglass::core::Status VoiceService::begin_capture() {
     const auto generation = update_active ? 0U : voice_reserve_begin(lifecycle);
     portEXIT_CRITICAL(&voice_lock);
     if (generation == 0) {
+        // Preserve a turn already recording/uploading/processing. Repeated
+        // press events must not replace the real turn state with a synthetic
+        // busy error. An OTA block is quiescent and should remain visible.
+        if (update_active) publish_failure(VoiceStatus::busy);
         return update_active
                    ? nightglass::core::Status{nightglass::core::StatusCode::unavailable,
                                               "firmware update is active"}
@@ -491,6 +512,7 @@ nightglass::core::Status VoiceService::begin_capture() {
         portENTER_CRITICAL(&voice_lock);
         voice_begin_failed(lifecycle, generation);
         portEXIT_CRITICAL(&voice_lock);
+        publish_failure(VoiceStatus::processing_failed);
         return {nightglass::core::StatusCode::invalid_state,
                 "voice buffer ownership unresolved"};
     }
@@ -504,6 +526,7 @@ nightglass::core::Status VoiceService::begin_capture() {
         portENTER_CRITICAL(&voice_lock);
         voice_begin_failed(lifecycle, generation);
         portEXIT_CRITICAL(&voice_lock);
+        publish_failure(VoiceStatus::processing_failed);
         return {nightglass::core::StatusCode::no_memory,
                 "voice page store unavailable"};
     }
@@ -538,6 +561,9 @@ nightglass::core::Status VoiceService::begin_capture() {
         return {nightglass::core::StatusCode::invalid_state,
                 "voice capture ownership unavailable"};
     }
+    ESP_LOGI(kTag, "Voice capture started: session=%lu limit_s=%u",
+             static_cast<unsigned long>(session),
+             static_cast<unsigned>(settings.maximum_duration_seconds));
     const auto status = audio_service().request_voice_capture(
         request_capacity, append_capture_page, capture_complete, &capture_context);
     if (!status.is_ok()) {
@@ -589,7 +615,16 @@ void VoiceService::cancel() {
     wipe_response();
 }
 
-void VoiceService::link_lost() { cancel(); }
+void VoiceService::link_lost() {
+    cancel();
+    portENTER_CRITICAL(&voice_lock);
+    current.health = VoiceHealthState::unavailable;
+    current.health_sequence = 0;
+    health_updated_us = 0;
+    ++current.sequence;
+    portEXIT_CRITICAL(&voice_lock);
+    ESP_LOGW(kTag, "OpenClaw health unavailable: phone link lost");
+}
 
 bool VoiceService::prepare_for_update(std::uint32_t timeout_ms) {
     update_blocked.store(true, std::memory_order_release);
@@ -641,6 +676,24 @@ nightglass::core::Status VoiceService::update_settings(
 }
 
 bool VoiceService::accept_frame(const VoiceFrame &frame) {
+    if (frame.kind == VoiceFrameKind::health) {
+        portENTER_CRITICAL(&voice_lock);
+        const bool newer = voice_health_sequence_is_newer(
+            frame.session_id, current.health_sequence);
+        if (newer) {
+            current.health_sequence = frame.session_id;
+            current.health = frame.health;
+            health_updated_us = esp_timer_get_time();
+            ++current.sequence;
+        }
+        portEXIT_CRITICAL(&voice_lock);
+        if (newer) {
+            ESP_LOGI(kTag, "OpenClaw health updated: state=%u sequence=%lu",
+                     static_cast<unsigned>(frame.health),
+                     static_cast<unsigned long>(frame.session_id));
+        }
+        return newer;
+    }
     const bool response_payload = frame.kind == VoiceFrameKind::response_begin ||
                                   frame.kind == VoiceFrameKind::response_data ||
                                   frame.kind == VoiceFrameKind::response_end;
@@ -731,12 +784,22 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
     portEXIT_CRITICAL(&voice_lock);
     if (clear_response) secure_wipe(current.response.data(), current.response.size());
     if (response_payload) xSemaphoreGive(response_mutex);
+    if (accepted && frame.kind == VoiceFrameKind::response_end) {
+        ESP_LOGI(kTag, "Voice response complete: session=%lu bytes=%lu",
+                 static_cast<unsigned long>(frame.session_id),
+                 static_cast<unsigned long>(frame.total_bytes));
+    } else if (accepted && frame.kind == VoiceFrameKind::response_status) {
+        ESP_LOGW(kTag, "Voice response failed: session=%lu status=%u",
+                 static_cast<unsigned long>(frame.session_id),
+                 static_cast<unsigned>(frame.status));
+    }
     if (accepted && voice_worker != nullptr) xTaskNotifyGive(voice_worker);
     return accepted;
 }
 
 VoiceSnapshot VoiceService::snapshot() const {
     VoiceSnapshot snapshot{};
+    std::int64_t sampled_health_updated_us{};
     portENTER_CRITICAL(&voice_lock);
     snapshot.sequence = current.sequence;
     snapshot.state = current.state;
@@ -746,6 +809,9 @@ VoiceSnapshot VoiceService::snapshot() const {
     snapshot.capture_rms = current.capture_rms;
     snapshot.response_bytes = current.response_bytes;
     snapshot.status = current.status;
+    snapshot.health = current.health;
+    snapshot.health_sequence = current.health_sequence;
+    sampled_health_updated_us = health_updated_us;
     snapshot.settings = current.settings;
     if (snapshot.state == VoiceTurnState::recording && recording_started_us > 0) {
         const auto elapsed = esp_timer_get_time() - recording_started_us;
@@ -754,6 +820,24 @@ VoiceSnapshot VoiceService::snapshot() const {
                                     kVoiceMaximumDurationSeconds * 1000));
     }
     portEXIT_CRITICAL(&voice_lock);
+    const auto link = connectivity_service().snapshot();
+    const auto now_us = esp_timer_get_time();
+    if (link.state != CompanionLinkState::connected_encrypted || !link.encrypted ||
+        !link.bonded || !link.peer_identity_pinned) {
+        snapshot.health = VoiceHealthState::unavailable;
+        snapshot.health_age_seconds = 0;
+    } else if (snapshot.health_sequence == 0 ||
+               voice_health_is_stale(now_us, sampled_health_updated_us)) {
+        snapshot.health = VoiceHealthState::degraded;
+        snapshot.health_age_seconds = sampled_health_updated_us > 0 &&
+                                              now_us >= sampled_health_updated_us
+                                          ? static_cast<std::uint32_t>(
+                                                (now_us - sampled_health_updated_us) / 1'000'000)
+                                          : 0;
+    } else {
+        snapshot.health_age_seconds = static_cast<std::uint32_t>(
+            std::max<std::int64_t>(0, now_us - sampled_health_updated_us) / 1'000'000);
+    }
     if (snapshot.response_bytes > 0 && response_mutex != nullptr &&
         xSemaphoreTake(response_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         std::memcpy(snapshot.response.data(), current.response.data(),

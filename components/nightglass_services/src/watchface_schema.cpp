@@ -105,7 +105,7 @@ bool valid_chrome(const FaceChrome &chrome) {
 }
 
 bool valid_action(FaceAction action) {
-    return action >= FaceAction::open_apps && action <= FaceAction::open_clock_settings;
+    return action >= FaceAction::open_apps && action <= FaceAction::open_openclaw;
 }
 
 bool overlaps(const FaceRect &left, const FaceRect &right) {

@@ -77,6 +77,7 @@ enum class FaceAction : std::uint8_t {
     open_countdown,
     open_diagnostics,
     open_clock_settings,
+    open_openclaw,
 };
 
 struct FaceRect {
