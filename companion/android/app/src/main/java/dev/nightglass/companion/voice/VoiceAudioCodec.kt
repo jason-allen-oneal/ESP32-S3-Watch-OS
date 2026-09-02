@@ -1,10 +1,8 @@
 package dev.nightglass.companion.voice
 
 object VoiceAudioCodec {
-    // Five seconds of mu-law expands to 240,000 raw PCM bytes and 320,000
-    // base64 characters, safely below Gateway's 512 KiB append limit.
-    const val MAX_MULAW_CHUNK_BYTES = 40_000
-    const val MAX_PCM_CHUNK_BYTES = MAX_MULAW_CHUNK_BYTES * 6
+    const val MAX_MULAW_WAV_BYTES = 2_400_000
+    const val WAV_HEADER_BYTES = 44
 
     fun decodeMulaw(sample: Byte): Short {
         val encoded = sample.toInt().inv() and 0xff
@@ -16,28 +14,50 @@ object VoiceAudioCodec {
             .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
     }
 
-    // Gateway Talk currently consumes 24 kHz PCM16. Each 8 kHz mu-law sample
-    // expands to three identical PCM samples. This bounded zero-order hold is
-    // sufficient for telephone-band speech and introduces no persistent file.
-    fun mulaw8kToPcm24k(input: ByteArray): ByteArray {
-        require(input.size <= MAX_MULAW_CHUNK_BYTES)
-        return mulaw8kChunkToPcm24k(input, 0, input.size)
-    }
-
-    /** Decode at most five seconds without allocating whole-turn PCM. */
-    fun mulaw8kChunkToPcm24k(input: ByteArray, offset: Int, length: Int): ByteArray {
-        require(offset >= 0 && length in 1..MAX_MULAW_CHUNK_BYTES &&
-            offset <= input.size - length)
-        val output = ByteArray(length * 6)
-        var out = 0
-        for (index in offset until offset + length) {
-            val value = input[index]
-            val sample = decodeMulaw(value).toInt()
-            repeat(3) {
-                output[out++] = (sample and 0xff).toByte()
-                output[out++] = ((sample ushr 8) and 0xff).toByte()
-            }
+    /**
+     * Wrap one complete bounded watch turn as standard 8 kHz mono PCM16 WAV.
+     * Keeping the source rate avoids tripling the attachment before the
+     * Gateway host's whisper.cpp input stage.
+     */
+    fun mulaw8kToWav(input: ByteArray): ByteArray {
+        require(input.size in 1..MAX_MULAW_WAV_BYTES)
+        val dataBytes = Math.multiplyExact(input.size, 2)
+        val output = ByteArray(Math.addExact(WAV_HEADER_BYTES, dataBytes))
+        output.writeAscii(0, "RIFF")
+        output.writeLe32(4, 36 + dataBytes)
+        output.writeAscii(8, "WAVE")
+        output.writeAscii(12, "fmt ")
+        output.writeLe32(16, 16)
+        output.writeLe16(20, 1)
+        output.writeLe16(22, 1)
+        output.writeLe32(24, 8_000)
+        output.writeLe32(28, 16_000)
+        output.writeLe16(32, 2)
+        output.writeLe16(34, 16)
+        output.writeAscii(36, "data")
+        output.writeLe32(40, dataBytes)
+        var out = WAV_HEADER_BYTES
+        input.forEach { encoded ->
+            val sample = decodeMulaw(encoded).toInt()
+            output[out++] = (sample and 0xff).toByte()
+            output[out++] = ((sample ushr 8) and 0xff).toByte()
         }
         return output
+    }
+
+    private fun ByteArray.writeAscii(offset: Int, value: String) {
+        value.forEachIndexed { index, char -> this[offset + index] = char.code.toByte() }
+    }
+
+    private fun ByteArray.writeLe16(offset: Int, value: Int) {
+        this[offset] = (value and 0xff).toByte()
+        this[offset + 1] = ((value ushr 8) and 0xff).toByte()
+    }
+
+    private fun ByteArray.writeLe32(offset: Int, value: Int) {
+        this[offset] = (value and 0xff).toByte()
+        this[offset + 1] = ((value ushr 8) and 0xff).toByte()
+        this[offset + 2] = ((value ushr 16) and 0xff).toByte()
+        this[offset + 3] = ((value ushr 24) and 0xff).toByte()
     }
 }

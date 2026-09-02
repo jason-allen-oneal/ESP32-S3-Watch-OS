@@ -7,6 +7,7 @@ import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -33,6 +34,7 @@ data class OpenClawVoiceCredential(
     val deviceId: String,
     val publicKeyRaw: ByteArray,
     val privateKeyPkcs8: ByteArray,
+    val sessionKey: String?,
 ) {
     fun wipe() {
         publicKeyRaw.fill(0)
@@ -53,6 +55,7 @@ class OpenClawVoiceStore(context: Context) {
             operatorToken = null,
             scopes = emptySet(),
             tlsFingerprint = setup.tlsFingerprint,
+            sessionKey = null,
         )
         save(value)
         if (identity !== existing) identity.wipe()
@@ -67,13 +70,31 @@ class OpenClawVoiceStore(context: Context) {
     ): Boolean = synchronized(STORE_LOCK) {
         require(token.length in 16..4096)
         val normalized = scopes.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-        require(scopesAreExactlyRequired(normalized))
+        require(scopesAreAllowedHandoff(normalized))
         val current = load() ?: error("OpenClaw voice is not provisioned")
         if (!sameProvisioning(current, expected)) {
             current.wipe()
             return@synchronized false
         }
         val updated = current.copy(bootstrapToken = null, operatorToken = token, scopes = normalized)
+        save(updated)
+        current.wipe()
+        updated.wipe()
+        true
+    }
+
+    fun replaceSessionKey(
+        expected: OpenClawVoiceCredential,
+        expectedSessionKey: String?,
+        sessionKey: String,
+    ): Boolean = synchronized(STORE_LOCK) {
+        require(isNightglassSessionKey(sessionKey))
+        val current = load() ?: error("OpenClaw voice is not provisioned")
+        if (!canReplaceSessionKey(current, expected, expectedSessionKey)) {
+            current.wipe()
+            return@synchronized false
+        }
+        val updated = current.copy(sessionKey = sessionKey)
         save(updated)
         current.wipe()
         updated.wipe()
@@ -88,7 +109,9 @@ class OpenClawVoiceStore(context: Context) {
             val publicKey = Base64.getDecoder().decode(root.getValue("publicKey").jsonPrimitive.content)
             val privateKey = Base64.getDecoder().decode(root.getValue("privateKey").jsonPrimitive.content)
             val deviceId = root.getValue("deviceId").jsonPrimitive.content
+            val sessionKey = root["sessionKey"]?.jsonPrimitive?.content.orEmpty()
             require(publicKey.size == 32 && privateKey.size in 32..128 && deviceId == sha256(publicKey))
+            require(sessionKey.isEmpty() || isNightglassSessionKey(sessionKey))
             OpenClawVoiceCredential(
                 url = root.getValue("url").jsonPrimitive.content,
                 bootstrapToken = root["bootstrapToken"]?.jsonPrimitive?.content?.takeIf { it.isNotEmpty() },
@@ -98,6 +121,7 @@ class OpenClawVoiceStore(context: Context) {
                 deviceId = deviceId,
                 publicKeyRaw = publicKey,
                 privateKeyPkcs8 = privateKey,
+                sessionKey = sessionKey.takeIf { it.isNotEmpty() },
             )
         } catch (_: Throwable) {
             null
@@ -126,7 +150,7 @@ class OpenClawVoiceStore(context: Context) {
         val privateKey = PrivateKeyInfoFactory.createPrivateKeyInfo(
             pair.private as Ed25519PrivateKeyParameters).encoded
         return OpenClawVoiceCredential(setup.url, setup.bootstrapToken, null, emptySet(),
-            setup.tlsFingerprint, sha256(publicKey), publicKey, privateKey)
+            setup.tlsFingerprint, sha256(publicKey), publicKey, privateKey, null)
     }
 
     private fun save(value: OpenClawVoiceCredential) {
@@ -139,6 +163,7 @@ class OpenClawVoiceStore(context: Context) {
             put("deviceId", value.deviceId)
             put("publicKey", Base64.getEncoder().encodeToString(value.publicKeyRaw))
             put("privateKey", Base64.getEncoder().encodeToString(value.privateKeyPkcs8))
+            put("sessionKey", value.sessionKey.orEmpty())
         }.toString().toByteArray(Charsets.UTF_8)
         val encrypted = encrypt(clear)
         clear.fill(0)
@@ -173,18 +198,44 @@ class OpenClawVoiceStore(context: Context) {
     }
 
     companion object {
-        val REQUIRED_SCOPES = setOf("operator.read", "operator.talk")
+        // Stock --voice-node pairing starts at read+talk. The companion then
+        // uses OpenClaw's approval-bound live upgrade to add operator.write;
+        // the Gateway requires upgrades to retain existing scopes and also
+        // normalizes write to include read. Keep both profiles exact so admin,
+        // approvals, pairing, questions, and secret scopes can never slip in.
+        val BOOTSTRAP_SCOPES = setOf("operator.read", "operator.talk")
+        val REQUIRED_SCOPES = setOf("operator.read", "operator.talk", "operator.write")
+        const val SESSION_KEY_PREFIX = "agent:main:dashboard:"
+        fun isNightglassSessionKey(key: String): Boolean {
+            if (!key.startsWith(SESSION_KEY_PREFIX)) return false
+            val suffix = key.removePrefix(SESSION_KEY_PREFIX)
+            return runCatching { UUID.fromString(suffix).toString() == suffix }.getOrDefault(false)
+        }
         fun scopesAreExactlyRequired(scopes: Collection<String>): Boolean =
             scopes.map { it.trim() }.filter { it.isNotEmpty() }.toSet() == REQUIRED_SCOPES
+        fun scopesAreAllowedHandoff(scopes: Collection<String>): Boolean {
+            val normalized = scopes.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+            return normalized == BOOTSTRAP_SCOPES || normalized == REQUIRED_SCOPES
+        }
         internal fun sameProvisioning(
             current: OpenClawVoiceCredential,
             expected: OpenClawVoiceCredential,
         ): Boolean =
             current.url == expected.url &&
                 current.bootstrapToken == expected.bootstrapToken &&
+                current.operatorToken == expected.operatorToken &&
+                current.scopes == expected.scopes &&
                 current.tlsFingerprint == expected.tlsFingerprint &&
                 current.deviceId == expected.deviceId &&
-                current.publicKeyRaw.contentEquals(expected.publicKeyRaw)
+                current.publicKeyRaw.contentEquals(expected.publicKeyRaw) &&
+                current.sessionKey == expected.sessionKey
+
+        internal fun canReplaceSessionKey(
+            current: OpenClawVoiceCredential,
+            expected: OpenClawVoiceCredential,
+            expectedSessionKey: String?,
+        ): Boolean = sameProvisioning(current, expected) &&
+            current.sessionKey == expectedSessionKey
 
         private val STORE_LOCK = Any()
         private const val KEY = "credential"

@@ -1,7 +1,6 @@
 package dev.nightglass.companion.voice
 
 import dev.nightglass.companion.protocol.NightglassProtocol
-import java.util.Base64
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -39,25 +38,41 @@ class VoiceTransferReceiverTest {
         assertFalse(receiver.active())
     }
 
-    @Test fun codecExpandsEightKhzToTwentyFourKhz() {
-        val pcm = VoiceAudioCodec.mulaw8kToPcm24k(byteArrayOf(0xff.toByte(), 0x80.toByte()))
-        assertEquals(12, pcm.size)
-        assertArrayEquals(ByteArray(6), pcm.copyOfRange(0, 6))
-        assertArrayEquals(byteArrayOf(0x7c, 0x7d, 0x7c, 0x7d, 0x7c, 0x7d),
-            pcm.copyOfRange(6, 12))
+    @Test fun codecBuildsStandardEightKhzMonoPcm16Wav() {
+        val wav = VoiceAudioCodec.mulaw8kToWav(
+            byteArrayOf(0xff.toByte(), 0x80.toByte()))
+        assertEquals(48, wav.size)
+        assertEquals("RIFF", wav.copyOfRange(0, 4).toString(Charsets.US_ASCII))
+        assertEquals(40, le32(wav, 4))
+        assertEquals("WAVE", wav.copyOfRange(8, 12).toString(Charsets.US_ASCII))
+        assertEquals("fmt ", wav.copyOfRange(12, 16).toString(Charsets.US_ASCII))
+        assertEquals(16, le32(wav, 16))
+        assertEquals(1, le16(wav, 20))
+        assertEquals(1, le16(wav, 22))
+        assertEquals(8_000, le32(wav, 24))
+        assertEquals(16_000, le32(wav, 28))
+        assertEquals(2, le16(wav, 32))
+        assertEquals(16, le16(wav, 34))
+        assertEquals("data", wav.copyOfRange(36, 40).toString(Charsets.US_ASCII))
+        assertEquals(4, le32(wav, 40))
+        assertArrayEquals(byteArrayOf(0, 0, 0x7c, 0x7d), wav.copyOfRange(44, 48))
     }
 
-    @Test fun codecDecodesBoundedChunksWithoutWholeTurnPcm() {
-        val maximum = VoiceAudioCodec.MAX_MULAW_CHUNK_BYTES
-        val encoded = ByteArray(maximum + 2) { 0xff.toByte() }
-        val pcm = VoiceAudioCodec.mulaw8kChunkToPcm24k(encoded, 1, maximum)
-        assertEquals(VoiceAudioCodec.MAX_PCM_CHUNK_BYTES, pcm.size)
-        assertTrue(pcm.all { it == 0.toByte() })
-        assertTrue(Base64.getEncoder().encodeToString(pcm).length < 512 * 1024)
+    @Test fun codecEnforcesTheFiveMinuteAttachmentBound() {
+        val maximum = VoiceAudioCodec.MAX_MULAW_WAV_BYTES
+        assertEquals(NightglassProtocol.MAX_VOICE_ENCODED_BYTES, maximum)
+        val encoded = ByteArray(maximum) { 0xff.toByte() }
+        val wav = VoiceAudioCodec.mulaw8kToWav(encoded)
+        assertEquals(VoiceAudioCodec.WAV_HEADER_BYTES + maximum * 2, wav.size)
+        assertEquals(maximum * 2, le32(wav, 40))
+        assertTrue(wav.copyOfRange(44, 76).all { it == 0.toByte() })
         assertThrows(IllegalArgumentException::class.java) {
-            VoiceAudioCodec.mulaw8kChunkToPcm24k(encoded, 0, maximum + 1)
+            VoiceAudioCodec.mulaw8kToWav(ByteArray(0))
         }
-        pcm.fill(0)
+        assertThrows(IllegalArgumentException::class.java) {
+            VoiceAudioCodec.mulaw8kToWav(ByteArray(maximum + 1))
+        }
+        wav.fill(0)
         encoded.fill(0)
     }
 
@@ -110,4 +125,11 @@ class VoiceTransferReceiverTest {
         assertFalse(receiver.accept(NightglassProtocol.VoiceRequest.Cancel(12u, 1)))
         assertEquals(listOf(12u), cancelled)
     }
+
+    private fun le16(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xff) or
+            ((bytes[offset + 1].toInt() and 0xff) shl 8)
+
+    private fun le32(bytes: ByteArray, offset: Int): Int =
+        le16(bytes, offset) or (le16(bytes, offset + 2) shl 16)
 }

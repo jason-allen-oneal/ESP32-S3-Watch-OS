@@ -3,6 +3,7 @@ managed_components/
 sdkconfig
 sdkconfig.old
 .cache/
+.kotlin/
 .firecrawl/
 *.bin
 *.elf

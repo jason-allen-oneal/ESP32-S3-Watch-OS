@@ -39,7 +39,7 @@ object OpenClawHealthPolicy {
     }
 }
 
-/** Authenticated Gateway capability check. It opens no Talk/AI session. */
+/** Authenticated Gateway capability check. It opens no agent turn. */
 class OpenClawHealthProbe(context: Context) {
     private val store = OpenClawVoiceStore(context.applicationContext)
 
@@ -99,7 +99,7 @@ class OpenClawHealthProbe(context: Context) {
             }
 
             val configured = credential.operatorToken != null &&
-                OpenClawVoiceStore.scopesAreExactlyRequired(credential.scopes)
+                OpenClawVoiceStore.scopesAreAllowedHandoff(credential.scopes)
             if (!configured) return OpenClawProbeResult(true, reachable = false, fatal = true)
             val token = credential.operatorToken
                 ?: return OpenClawProbeResult(true, reachable = false, fatal = true)
@@ -109,7 +109,7 @@ class OpenClawHealthProbe(context: Context) {
                     credential,
                     store,
                     "operator",
-                    OpenClawVoiceStore.REQUIRED_SCOPES.sorted(),
+                    credential.scopes.sorted(),
                     token,
                     false,
                 )
@@ -118,12 +118,24 @@ class OpenClawHealthProbe(context: Context) {
                     "operator")
                 val scopes = hello["auth"]?.jsonObject?.get("scopes")?.jsonArray
                     ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
-                require(OpenClawVoiceStore.scopesAreExactlyRequired(scopes))
                 val methods = hello["features"]?.jsonObject?.get("methods")?.jsonArray
                     ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
-                require("talk.session.create" in methods &&
-                    "talk.session.appendAudio" in methods)
-                OpenClawProbeResult(true, reachable = true, fatal = false)
+                when {
+                    OpenClawVoiceStore.scopesAreExactlyRequired(scopes) -> {
+                        require("sessions.create" in methods && "chat.send" in methods &&
+                            "chat.abort" in methods)
+                        OpenClawProbeResult(true, reachable = true, fatal = false)
+                    }
+                    scopes == OpenClawVoiceStore.BOOTSTRAP_SCOPES -> {
+                        require("device.scopes.requestUpgrade" in methods &&
+                            "device.scopes.waitUpgrade" in methods)
+                        // Valid voice-node pairing, but write approval is still
+                        // pending. Keep the watch yellow instead of claiming it
+                        // is ready or aging the state into a red transport error.
+                        OpenClawProbeResult(false, reachable = false, fatal = false)
+                    }
+                    else -> throw SecurityException("Unexpected OpenClaw scope profile")
+                }
             } catch (error: OpenClawVoiceGateway.GatewayConnectRejectedException) {
                 logFailure("operator_rejected", error)
                 OpenClawProbeResult(true, reachable = false, fatal = true)

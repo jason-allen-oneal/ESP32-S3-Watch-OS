@@ -40,6 +40,10 @@ class NightglassConnectionService : Service() {
         const val ACTION_WRITE = "dev.nightglass.WRITE"
         const val ACTION_REFRESH_WEATHER = "dev.nightglass.REFRESH_WEATHER"
         const val ACTION_REFRESH_OPENCLAW_HEALTH = "dev.nightglass.REFRESH_OPENCLAW_HEALTH"
+        const val ACTION_NEW_OPENCLAW_CONVERSATION =
+            "dev.nightglass.NEW_OPENCLAW_CONVERSATION"
+        const val ACTION_OPENCLAW_CONVERSATION_RESULT =
+            "dev.nightglass.OPENCLAW_CONVERSATION_RESULT"
         const val ACTION_FORGET_PIN = "dev.nightglass.FORGET_PIN"
         const val ACTION_FORGET_RESULT = "dev.nightglass.FORGET_RESULT"
         const val ACTION_START_OTA = "dev.nightglass.START_OTA"
@@ -53,6 +57,8 @@ class NightglassConnectionService : Service() {
         const val EXTRA_OTA_COMPLETE = "ota_complete"
         const val EXTRA_OTA_PERCENT = "ota_percent"
         const val EXTRA_OTA_DETAIL = "ota_detail"
+        const val EXTRA_OPENCLAW_CONVERSATION_SUCCESS = "openclaw_conversation_success"
+        const val EXTRA_OPENCLAW_CONVERSATION_DETAIL = "openclaw_conversation_detail"
         const val CHANNEL = "nightglass_connection"
         private const val PREFS = "nightglass_link"
         private const val PINNED_ADDRESS = "pinned_address"
@@ -225,6 +231,31 @@ class NightglassConnectionService : Service() {
                 explicitDisconnect = false
                 scheduleOpenClawHealth(0)
                 if (gatt == null) reconnectBondedOrScan()
+            }
+            ACTION_NEW_OPENCLAW_CONVERSATION -> {
+                val accepted = openClawVoice.newConversation { result ->
+                    reconnectHandler.post {
+                        val success = result.isSuccess
+                        val detail = if (success) {
+                            "New Nightglass watch conversation started"
+                        } else {
+                            "Could not start a new watch conversation"
+                        }
+                        update(detail)
+                        sendBroadcast(Intent(ACTION_OPENCLAW_CONVERSATION_RESULT)
+                            .setPackage(packageName)
+                            .putExtra(EXTRA_OPENCLAW_CONVERSATION_SUCCESS, success)
+                            .putExtra(EXTRA_OPENCLAW_CONVERSATION_DETAIL, detail))
+                        scheduleOpenClawHealth(0)
+                    }
+                }
+                if (!accepted) {
+                    val detail = "Finish the active voice turn before starting a new conversation"
+                    sendBroadcast(Intent(ACTION_OPENCLAW_CONVERSATION_RESULT)
+                        .setPackage(packageName)
+                        .putExtra(EXTRA_OPENCLAW_CONVERSATION_SUCCESS, false)
+                        .putExtra(EXTRA_OPENCLAW_CONVERSATION_DETAIL, detail))
+                }
             }
             ACTION_START_OTA -> {
                 explicitDisconnect = false

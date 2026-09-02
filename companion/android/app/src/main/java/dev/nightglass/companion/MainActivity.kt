@@ -25,6 +25,7 @@ class MainActivity : AppCompatActivity() {
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants -> if (grants.values.all { it }) connect() }
     private var resetReceiverRegistered = false
     private var otaReceiverRegistered = false
+    private var voiceConversationReceiverRegistered = false
     private lateinit var otaStatus: TextView
     private val packagePicker = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()) { uris ->
@@ -51,6 +52,16 @@ class MainActivity : AppCompatActivity() {
             otaStatus.text = if (intent.getBooleanExtra(
                     NightglassConnectionService.EXTRA_OTA_ACTIVE, false))
                 "$detail — $percent%" else detail
+        }
+    }
+    private val voiceConversationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action !=
+                NightglassConnectionService.ACTION_OPENCLAW_CONVERSATION_RESULT) return
+            val detail = intent.getStringExtra(
+                NightglassConnectionService.EXTRA_OPENCLAW_CONVERSATION_DETAIL)
+                ?: "OpenClaw conversation state unavailable"
+            Toast.makeText(this@MainActivity, detail, Toast.LENGTH_LONG).show()
         }
     }
     override fun onCreate(state: Bundle?) {
@@ -98,11 +109,20 @@ class MainActivity : AppCompatActivity() {
             text = "OpenClaw voice"; textSize = 20f; setPadding(0, pad, 0, 0)
         })
         root.addView(TextView(this).apply {
-            text = "Scan an OpenClaw voice-node setup QR. The constrained identity is encrypted by Android Keystore; audio is held only in memory and is never recorded by the phone microphone."
+            text = "Scan an OpenClaw --voice-node setup QR. The first voice turn requests the stock approval-bound operator.write upgrade. The constrained identity is encrypted by Android Keystore; audio is held only in memory and is never recorded by the phone microphone."
         })
         root.addView(Button(this).apply {
             text = "Scan OpenClaw voice setup QR"
             setOnClickListener { scanOpenClawVoiceSetup() }
+        })
+        root.addView(Button(this).apply {
+            text = "Start new watch conversation"
+            setOnClickListener {
+                ContextCompat.startForegroundService(this@MainActivity,
+                    Intent(this@MainActivity, NightglassConnectionService::class.java)
+                        .setAction(
+                            NightglassConnectionService.ACTION_NEW_OPENCLAW_CONVERSATION))
+            }
         })
         root.addView(Button(this).apply {
             text = "Clear OpenClaw voice authorization"
@@ -189,6 +209,13 @@ class MainActivity : AppCompatActivity() {
                 ContextCompat.RECEIVER_NOT_EXPORTED)
             otaReceiverRegistered = true
         }
+        if (!voiceConversationReceiverRegistered) {
+            ContextCompat.registerReceiver(this, voiceConversationReceiver,
+                IntentFilter(
+                    NightglassConnectionService.ACTION_OPENCLAW_CONVERSATION_RESULT),
+                ContextCompat.RECEIVER_NOT_EXPORTED)
+            voiceConversationReceiverRegistered = true
+        }
     }
     override fun onStop() {
         if (resetReceiverRegistered) {
@@ -198,6 +225,10 @@ class MainActivity : AppCompatActivity() {
         if (otaReceiverRegistered) {
             unregisterReceiver(otaProgressReceiver)
             otaReceiverRegistered = false
+        }
+        if (voiceConversationReceiverRegistered) {
+            unregisterReceiver(voiceConversationReceiver)
+            voiceConversationReceiverRegistered = false
         }
         super.onStop()
     }

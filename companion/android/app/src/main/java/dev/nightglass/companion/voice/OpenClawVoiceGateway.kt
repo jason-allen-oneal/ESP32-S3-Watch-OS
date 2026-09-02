@@ -1,7 +1,6 @@
 package dev.nightglass.companion.voice
 
 import android.content.Context
-import android.os.SystemClock
 import dev.nightglass.companion.protocol.NightglassProtocol
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
@@ -19,6 +18,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -39,9 +39,15 @@ class OpenClawVoiceGateway(
     private val executor = Executors.newSingleThreadExecutor()
     private val activeLock = Any()
     @Volatile private var active: ActiveTurn? = null
+    private val resetting = AtomicBoolean(false)
 
     companion object {
-        internal const val CLIENT_ID = "openclaw-voice-relay"
+        // Stock Gateway protocol id. A project-specific id would require an
+        // OpenClaw core change and is intentionally forbidden for this client.
+        internal const val CLIENT_ID = "openclaw-android"
+        internal const val AGENT_ID = "main"
+        internal const val SESSION_LABEL = "Nightglass Watch"
+        internal const val MAX_STREAMED_REPLY_CHARS = 1_600
 
         internal data class OperatorHandoff(
             val token: String,
@@ -57,6 +63,64 @@ class OpenClawVoiceGateway(
             return (capturedSeconds + 60L).coerceIn(60L, 360L)
         }
 
+        internal fun sessionCreateParams(
+            sessionKey: String,
+            idempotencyKey: String,
+        ): JsonObject {
+            require(OpenClawVoiceStore.isNightglassSessionKey(sessionKey))
+            require(idempotencyKey.isNotBlank())
+            return buildJsonObject {
+                put("key", sessionKey)
+                put("agentId", AGENT_ID)
+                put("displayName", SESSION_LABEL)
+                put("permissionMode", "read-only")
+                put("idempotencyKey", idempotencyKey)
+            }
+        }
+
+        internal fun chatSendParams(
+            sessionKey: String,
+            runId: String,
+            wav: ByteArray,
+            encodedBytes: Int,
+        ): JsonObject {
+            require(OpenClawVoiceStore.isNightglassSessionKey(sessionKey))
+            require(runId.isNotBlank())
+            require(acceptsEncodedBytes(encodedBytes))
+            require(wav.size == VoiceAudioCodec.WAV_HEADER_BYTES + encodedBytes * 2)
+            return buildJsonObject {
+                put("sessionKey", sessionKey)
+                put("agentId", AGENT_ID)
+                put("message", "Use only the Gateway-provided [Audio] Transcript for " +
+                    "this Nightglass request. If it is absent, empty, or a failure " +
+                    "placeholder, reply exactly: Voice transcription failed. " +
+                    "Otherwise answer in plain text under 1600 characters.")
+                put("deliver", false)
+                put("timeoutMs", responseTimeoutSeconds(encodedBytes) * 1_000L)
+                put("expectedPermissionMode", "read-only")
+                put("expectedToolOverrides", JsonNull)
+                put("idempotencyKey", runId)
+                put("attachments", JsonArray(listOf(buildJsonObject {
+                    put("type", "audio")
+                    put("mimeType", "audio/wav")
+                    put("fileName", "nightglass-turn.wav")
+                    put("content", Base64.getEncoder().encodeToString(wav))
+                    put("sizeBytes", wav.size)
+                    put("durationMs", encodedBytes / 8)
+                })))
+            }
+        }
+
+        internal fun chatAbortParams(sessionKey: String, runId: String): JsonObject {
+            require(OpenClawVoiceStore.isNightglassSessionKey(sessionKey))
+            require(runId.isNotBlank())
+            return buildJsonObject {
+                put("sessionKey", sessionKey)
+                put("agentId", AGENT_ID)
+                put("runId", runId)
+            }
+        }
+
         internal fun parseOperatorHandoff(hello: JsonObject): OperatorHandoff {
             val handoff = hello["auth"]?.jsonObject?.get("deviceTokens")?.jsonArray
                 ?.mapNotNull { it as? JsonObject }
@@ -65,7 +129,20 @@ class OpenClawVoiceGateway(
             val scopes = handoff["scopes"]?.jsonArray
                 ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
             val token = handoff["deviceToken"]?.jsonPrimitive?.content.orEmpty()
-            require(OpenClawVoiceStore.scopesAreExactlyRequired(scopes) && token.isNotBlank())
+            require(OpenClawVoiceStore.scopesAreAllowedHandoff(scopes) && token.length in 16..4096)
+            return OperatorHandoff(token, scopes)
+        }
+
+        internal fun parseApprovedScopeUpgrade(
+            result: JsonObject,
+            expectedRequestId: String,
+        ): OperatorHandoff {
+            require(result["status"]?.jsonPrimitive?.content == "approved")
+            require(result["requestId"]?.jsonPrimitive?.content == expectedRequestId)
+            val scopes = result["scopes"]?.jsonArray
+                ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+            val token = result["deviceToken"]?.jsonPrimitive?.content.orEmpty()
+            require(OpenClawVoiceStore.scopesAreExactlyRequired(scopes) && token.length in 16..4096)
             return OperatorHandoff(token, scopes)
         }
     }
@@ -73,15 +150,17 @@ class OpenClawVoiceGateway(
     private class ActiveTurn(val owner: VoiceTurnOwner) {
         val cancelled = AtomicBoolean(false)
         val socket = AtomicReference<RpcSocket?>(null)
-        val relaySession = AtomicReference<String?>(null)
-        val eventFence = VoiceEventFence(owner)
+        val runId = AtomicReference<String?>(null)
+        val sessionKey = AtomicReference<String?>(null)
+        val runMayExist = AtomicBoolean(false)
+        val assistant = AtomicReference<CompletableFuture<String>?>(null)
         @Volatile var worker: FutureTask<Unit>? = null
 
         fun cancel() {
             if (!cancelled.compareAndSet(false, true)) return
-            eventFence.cancel()
-            socket.getAndSet(null)?.abort(relaySession.get())
-            worker?.cancel(true)
+            assistant.get()?.completeExceptionally(
+                CancellationException("OpenClaw voice turn cancelled"))
+            socket.get()?.cancelPendingWaits()
         }
 
         fun checkActive() {
@@ -117,7 +196,7 @@ class OpenClawVoiceGateway(
         val owned = encoded.copyOf()
         val turn = ActiveTurn(owner)
         synchronized(activeLock) {
-            if (active != null) {
+            if (active != null || resetting.get()) {
                 owned.fill(0)
                 return false
             }
@@ -139,6 +218,23 @@ class OpenClawVoiceGateway(
         return true
     }
 
+    /** Create a fresh restricted-agent session and replace the active pointer. */
+    fun newConversation(completed: (Result<Unit>) -> Unit): Boolean {
+        if (!resetting.compareAndSet(false, true)) return false
+        synchronized(activeLock) {
+            if (active != null) {
+                resetting.set(false)
+                return false
+            }
+        }
+        executor.execute {
+            val result = runCatching { createNewDedicatedSession() }
+            resetting.set(false)
+            completed(result)
+        }
+        return true
+    }
+
     fun cancel(owner: VoiceTurnOwner? = null) {
         val turn = synchronized(activeLock) {
             val current = active
@@ -150,7 +246,7 @@ class OpenClawVoiceGateway(
 
     fun close() {
         cancel()
-        executor.shutdownNow()
+        executor.shutdown()
     }
 
     private fun runTurn(turn: ActiveTurn, mulaw: ByteArray): String {
@@ -174,95 +270,53 @@ class OpenClawVoiceGateway(
                 credential.wipe()
                 credential = store.load() ?: error("OpenClaw voice authorization was not persisted")
             }
+            if (!OpenClawVoiceStore.scopesAreExactlyRequired(credential.scopes)) {
+                val upgraded = upgradeOperatorCredential(turn, credential)
+                credential.wipe()
+                credential = upgraded
+            }
 
             status("Connecting to OpenClaw")
             val assistant = CompletableFuture<String>()
+            turn.assistant.set(assistant)
+            val collector = ChatReplyCollector(assistant)
             val socket = RpcSocket(
                 credential, store, "operator", OpenClawVoiceStore.REQUIRED_SCOPES.sorted(),
                 credential.operatorToken ?: error("OpenClaw voice authorization missing"), false,
             ) { event, payload, sequence ->
-                if (event != "talk.event") return@RpcSocket
-                val session = payload["relaySessionId"]?.jsonPrimitive?.content
-                    ?: payload["sessionId"]?.jsonPrimitive?.content
-                val eventTurn = payload["turnId"]?.jsonPrimitive?.content
-                when (turn.eventFence.accept(turn.owner, session, eventTurn, sequence)) {
-                    VoiceEventFence.Decision.DROP -> return@RpcSocket
-                    VoiceEventFence.Decision.GAP -> {
-                        assistant.completeExceptionally(SecurityException(
-                            "OpenClaw event sequence gap"))
-                        return@RpcSocket
-                    }
-                    VoiceEventFence.Decision.ACCEPT -> Unit
-                }
-                when (payload["type"]?.jsonPrimitive?.content) {
-                    "transcript" -> if (
-                        payload["role"]?.jsonPrimitive?.content == "assistant" &&
-                        payload["final"]?.jsonPrimitive?.content == "true"
-                    ) {
-                        if (!eventTurn.isNullOrBlank()) {
-                            payload["text"]?.jsonPrimitive?.content?.let(assistant::complete)
-                        }
-                    }
-                    "error" -> assistant.completeExceptionally(
-                        IllegalStateException(payload["message"]?.jsonPrimitive?.content
-                            ?: "OpenClaw Talk failed"))
-                    "close" -> if (!assistant.isDone) assistant.completeExceptionally(
-                        IllegalStateException("OpenClaw Talk closed before a response"))
-                }
+                if (event == "chat") collector.accept(
+                    payload,
+                    turn.runId.get(),
+                    turn.sessionKey.get().orEmpty(),
+                )
             }
             turn.socket.set(socket)
             try {
                 val hello = socket.connect()
                 turn.checkActive()
-                require(hello["auth"]?.jsonObject?.get("role")?.jsonPrimitive?.content == "operator")
-                val scopes = hello["auth"]?.jsonObject?.get("scopes")?.jsonArray
-                    ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
-                require(OpenClawVoiceStore.scopesAreExactlyRequired(scopes))
-                val methods = hello["features"]?.jsonObject?.get("methods")?.jsonArray
-                    ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
-                require("talk.session.create" in methods && "talk.session.appendAudio" in methods)
+                verifyOperatorHello(hello)
 
-                status("Opening OpenClaw voice session")
-                val created = socket.request("talk.session.create", buildJsonObject {
-                    put("mode", "realtime")
-                    put("transport", "gateway-relay")
-                    put("brain", "agent-consult")
-                }, 20_000)
-                val session = created["relaySessionId"]?.jsonPrimitive?.content
-                    ?: created["sessionId"]?.jsonPrimitive?.content
-                    ?: error("OpenClaw did not create a relay session")
-                val audio = created["audio"]?.jsonObject
-                    ?: error("OpenClaw did not declare an audio contract")
-                require(audio["inputEncoding"]?.jsonPrimitive?.content == "pcm16" &&
-                    audio["inputSampleRateHz"]?.jsonPrimitive?.content?.toIntOrNull() == 24_000)
-                turn.relaySession.set(session)
-                turn.eventFence.bindRelay(session)
+                val sessionKey = ensureDedicatedSession(socket, credential)
+                turn.sessionKey.set(sessionKey)
                 turn.checkActive()
                 status("Sending voice to OpenClaw")
-                var encodedOffset = 0
-                while (encodedOffset < mulaw.size) {
-                    turn.checkActive()
-                    val length = minOf(VoiceAudioCodec.MAX_MULAW_CHUNK_BYTES,
-                        mulaw.size - encodedOffset)
-                    val chunk = VoiceAudioCodec.mulaw8kChunkToPcm24k(
-                        mulaw, encodedOffset, length)
-                    try {
-                        socket.request("talk.session.appendAudio", buildJsonObject {
-                            put("sessionId", session)
-                            put("audioBase64", Base64.getEncoder().encodeToString(chunk))
-                            put("timestamp", SystemClock.elapsedRealtime())
-                        }, 20_000)
-                    } finally { chunk.fill(0) }
-                    encodedOffset += length
-                }
-                val silence = ByteArray(48_000)
+                val wav = VoiceAudioCodec.mulaw8kToWav(mulaw)
                 try {
-                    socket.request("talk.session.appendAudio", buildJsonObject {
-                        put("sessionId", session)
-                        put("audioBase64", Base64.getEncoder().encodeToString(silence))
-                        put("timestamp", SystemClock.elapsedRealtime())
-                    }, 10_000)
-                } finally { silence.fill(0) }
+                    turn.checkActive()
+                    val idempotencyKey = UUID.randomUUID().toString()
+                    turn.runId.set(idempotencyKey)
+                    // The Gateway may accept the frame before the ACK reaches
+                    // the phone. From this point onward, every non-terminal
+                    // exit must issue an acknowledged, idempotent abort.
+                    turn.runMayExist.set(true)
+                    val sent = socket.request("chat.send",
+                        chatSendParams(sessionKey, idempotencyKey, wav, mulaw.size), 30_000)
+                    val returnedRunId = sent["runId"]?.jsonPrimitive?.content
+                        ?: error("OpenClaw did not acknowledge the chat run")
+                    require(returnedRunId == idempotencyKey) {
+                        "OpenClaw acknowledged an unexpected chat run"
+                    }
+                } finally { wav.fill(0) }
                 turn.checkActive()
                 status("OpenClaw is thinking")
                 val response = assistant.get(responseTimeoutSeconds(mulaw.size), TimeUnit.SECONDS)
@@ -271,14 +325,180 @@ class OpenClawVoiceGateway(
                 require(safe.isNotEmpty())
                 return safe.toString(Charsets.US_ASCII).also { safe.fill(0) }
             } finally {
-                val session = turn.relaySession.getAndSet(null)
-                if (turn.cancelled.get()) socket.abort(session) else socket.closeTalk(session)
-                turn.socket.compareAndSet(socket, null)
-                socket.close()
+                val runId = turn.runId.getAndSet(null)
+                val sessionKey = turn.sessionKey.getAndSet(null)
+                try {
+                    if (turn.runMayExist.get() && !collector.terminalReceived()) {
+                        abortAcceptedRun(credential, socket, sessionKey, runId)
+                    }
+                } finally {
+                    turn.assistant.set(null)
+                    turn.socket.compareAndSet(socket, null)
+                    socket.close()
+                }
             }
         } finally {
             credential.wipe()
         }
+    }
+
+    private fun upgradeOperatorCredential(
+        turn: ActiveTurn,
+        credential: OpenClawVoiceCredential,
+    ): OpenClawVoiceCredential {
+        require(credential.operatorToken != null &&
+            credential.scopes == OpenClawVoiceStore.BOOTSTRAP_SCOPES) {
+            "OpenClaw voice authorization has an unexpected scope profile"
+        }
+        status("Requesting Nightglass operator.write approval")
+        val socket = RpcSocket(
+            credential,
+            store,
+            "operator",
+            credential.scopes.sorted(),
+            credential.operatorToken ?: error("OpenClaw voice authorization missing"),
+            false,
+        )
+        turn.socket.set(socket)
+        try {
+            val hello = socket.connect()
+            turn.checkActive()
+            verifyBootstrapOperatorHello(hello)
+            val registration = socket.request("device.scopes.requestUpgrade", buildJsonObject {
+                put("scopes", JsonArray(OpenClawVoiceStore.REQUIRED_SCOPES.sorted()
+                    .map(::JsonPrimitive)))
+            }, 30_000)
+            val requestId = registration["requestId"]?.jsonPrimitive?.content
+                ?: error("OpenClaw did not register the scope upgrade")
+            status("Approve the Nightglass scope upgrade in OpenClaw")
+            val resolved = socket.request("device.scopes.waitUpgrade", buildJsonObject {
+                put("requestId", requestId)
+            }, 310_000)
+            turn.checkActive()
+            when (resolved["status"]?.jsonPrimitive?.content) {
+                "approved" -> Unit
+                "rejected" -> error("Nightglass scope upgrade was rejected")
+                "expired" -> error("Nightglass scope upgrade expired")
+                else -> error("OpenClaw returned an invalid scope-upgrade result")
+            }
+            val handoff = parseApprovedScopeUpgrade(resolved, requestId)
+            check(store.persistOperatorToken(credential, handoff.token, handoff.scopes)) {
+                "OpenClaw setup changed during scope approval; try again"
+            }
+            return store.load() ?: error("OpenClaw scope upgrade was not persisted")
+        } finally {
+            turn.socket.compareAndSet(socket, null)
+            socket.close()
+        }
+    }
+
+    private fun createNewDedicatedSession() {
+        var credential = store.load() ?: error("OpenClaw voice is not configured")
+        try {
+            require(credential.operatorToken != null &&
+                OpenClawVoiceStore.scopesAreExactlyRequired(credential.scopes)) {
+                "OpenClaw voice requires the approved read+talk+write scope profile"
+            }
+            val socket = RpcSocket(
+                credential, store, "operator", OpenClawVoiceStore.REQUIRED_SCOPES.sorted(),
+                credential.operatorToken ?: error("OpenClaw voice authorization missing"), false,
+            )
+            try {
+                val hello = socket.connect()
+                verifyOperatorHello(hello)
+                val sessionKey = createDedicatedSession(socket)
+                check(store.replaceSessionKey(credential, credential.sessionKey, sessionKey)) {
+                    "OpenClaw setup changed while starting a new conversation; try again"
+                }
+                status("Started a new Nightglass watch conversation")
+            } finally { socket.close() }
+        } finally { credential.wipe() }
+    }
+
+    private fun ensureDedicatedSession(
+        socket: RpcSocket,
+        credential: OpenClawVoiceCredential,
+    ): String {
+        credential.sessionKey?.let {
+            require(OpenClawVoiceStore.isNightglassSessionKey(it))
+            return it
+        }
+        val sessionKey = createDedicatedSession(socket)
+        check(store.replaceSessionKey(credential, null, sessionKey)) {
+            "OpenClaw setup changed while creating the watch session; try again"
+        }
+        return sessionKey
+    }
+
+    private fun createDedicatedSession(socket: RpcSocket): String {
+        val requestedKey = OpenClawVoiceStore.SESSION_KEY_PREFIX + UUID.randomUUID()
+        val created = socket.request("sessions.create",
+            sessionCreateParams(requestedKey, UUID.randomUUID().toString()), 30_000)
+        require(created["ok"]?.jsonPrimitive?.content == "true") {
+            "OpenClaw did not confirm watch session creation"
+        }
+        val key = created["key"]?.jsonPrimitive?.content.orEmpty()
+        require(key == requestedKey && OpenClawVoiceStore.isNightglassSessionKey(key)) {
+            "OpenClaw created an unexpected watch session"
+        }
+        return key
+    }
+
+    /**
+     * Require a Gateway acknowledgement for every run that might have been
+     * admitted. If the turn socket died after submission, retry once over a
+     * fresh authenticated connection using the same paired device identity.
+     * chat.send also carries a server-side timeout, so a total network outage
+     * cannot leave an unbounded run behind.
+     */
+    private fun abortAcceptedRun(
+        credential: OpenClawVoiceCredential,
+        turnSocket: RpcSocket,
+        sessionKey: String?,
+        runId: String?,
+    ) {
+        if (sessionKey.isNullOrBlank() || runId.isNullOrBlank()) return
+        val firstFailure = runCatching { turnSocket.abortChat(sessionKey, runId) }.exceptionOrNull()
+            ?: return
+        val cleanupSocket = RpcSocket(
+            credential, store, "operator", OpenClawVoiceStore.REQUIRED_SCOPES.sorted(),
+            credential.operatorToken ?: error("OpenClaw voice authorization missing"), false,
+        )
+        try {
+            verifyOperatorHello(cleanupSocket.connect())
+            cleanupSocket.abortChat(sessionKey, runId)
+        } catch (retryFailure: Throwable) {
+            retryFailure.addSuppressed(firstFailure)
+            throw retryFailure
+        } finally {
+            cleanupSocket.close()
+        }
+    }
+
+    private fun verifyOperatorHello(hello: JsonObject) {
+        require(hello["auth"]?.jsonObject?.get("role")?.jsonPrimitive?.content == "operator")
+        val scopes = hello["auth"]?.jsonObject?.get("scopes")?.jsonArray
+            ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+        require(OpenClawVoiceStore.scopesAreExactlyRequired(scopes)) {
+            "OpenClaw voice requires the approved read+talk+write scope profile"
+        }
+        val methods = hello["features"]?.jsonObject?.get("methods")?.jsonArray
+            ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+        require("sessions.create" in methods && "chat.send" in methods &&
+            "chat.abort" in methods)
+    }
+
+    private fun verifyBootstrapOperatorHello(hello: JsonObject) {
+        require(hello["auth"]?.jsonObject?.get("role")?.jsonPrimitive?.content == "operator")
+        val scopes = hello["auth"]?.jsonObject?.get("scopes")?.jsonArray
+            ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+        require(scopes == OpenClawVoiceStore.BOOTSTRAP_SCOPES) {
+            "OpenClaw voice bootstrap has an unexpected scope profile"
+        }
+        val methods = hello["features"]?.jsonObject?.get("methods")?.jsonArray
+            ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+        require("device.scopes.requestUpgrade" in methods &&
+            "device.scopes.waitUpgrade" in methods)
     }
 
     internal class GatewayConnectRejectedException(message: String) :
@@ -286,20 +506,21 @@ class OpenClawVoiceGateway(
 
     internal class RpcSocket(
         private val credential: OpenClawVoiceCredential,
-        private val store: OpenClawVoiceStore,
+        private val store: OpenClawVoiceStore? = null,
         private val role: String,
         private val scopes: List<String>,
         private val authToken: String,
         private val bootstrap: Boolean,
+        private val client: OkHttpClient =
+            OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build(),
+        private val signPayload: (String, OpenClawVoiceCredential) -> String =
+            { payload, value -> requireNotNull(store).sign(payload, value) },
         private val events: (String, JsonObject, Long?) -> Unit = { _, _, _ -> },
     ) : WebSocketListener() {
         private val json = Json { ignoreUnknownKeys = true }
         private val pending = ConcurrentHashMap<String, CompletableFuture<JsonObject>>()
         private val connected = CompletableFuture<JsonObject>()
         private val opened = CompletableFuture<Unit>()
-        private val client = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
-        private val eventSequenceLock = Any()
-        private var lastEventSequence: Long? = null
         @Volatile private var socket: WebSocket? = null
 
         fun connect(): JsonObject {
@@ -345,7 +566,6 @@ class OpenClawVoiceGateway(
                     val event = root["event"]?.jsonPrimitive?.content ?: return
                     val payload = root["payload"] as? JsonObject ?: JsonObject(emptyMap())
                     val sequence = root["seq"]?.jsonPrimitive?.content?.toLongOrNull()
-                    if (!acceptEventSequence(sequence)) return
                     if (event == "connect.challenge") sendConnect(payload)
                     else events(event, payload, sequence)
                 }
@@ -371,21 +591,6 @@ class OpenClawVoiceGateway(
             }
         }
 
-        private fun acceptEventSequence(sequence: Long?): Boolean {
-            if (sequence == null) return true
-            synchronized(eventSequenceLock) {
-                val previous = lastEventSequence
-                if (previous != null && sequence <= previous) return false
-                if (previous != null && sequence > previous + 1) {
-                    fail(SecurityException("OpenClaw event sequence gap"))
-                    socket?.cancel()
-                    return false
-                }
-                lastEventSequence = sequence
-                return true
-            }
-        }
-
         private fun sendConnect(challenge: JsonObject) {
             val nonce = challenge["nonce"]?.jsonPrimitive?.content?.trim().orEmpty()
             val issued = challenge["ts"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
@@ -400,7 +605,7 @@ class OpenClawVoiceGateway(
             val device = buildJsonObject {
                 put("id", credential.deviceId)
                 put("publicKey", Base64.getUrlEncoder().withoutPadding().encodeToString(credential.publicKeyRaw))
-                put("signature", store.sign(canonical, credential))
+                put("signature", signPayload(canonical, credential))
                 put("signedAt", issued)
                 put("nonce", nonce)
             }
@@ -439,36 +644,31 @@ class OpenClawVoiceGateway(
             pending.clear()
         }
 
-        fun closeTalk(session: String?) {
-            if (session.isNullOrBlank()) return
-            runCatching {
-                request("talk.session.close", buildJsonObject { put("sessionId", session) }, 8_000)
-            }
+        fun cancelPendingWaits() {
+            val error = CancellationException("OpenClaw voice turn cancelled")
+            if (!opened.isDone) opened.completeExceptionally(error)
+            if (!connected.isDone) connected.completeExceptionally(error)
+            pending.values.forEach { it.completeExceptionally(error) }
+            pending.clear()
         }
 
-        fun abort(session: String?) {
-            if (!session.isNullOrBlank()) {
-                sendWithoutReply("talk.session.cancelOutput", buildJsonObject {
-                    put("sessionId", session)
-                })
-                sendWithoutReply("talk.session.close", buildJsonObject {
-                    put("sessionId", session)
-                })
+        fun abortChat(sessionKey: String?, runId: String?) {
+            if (!sessionKey.isNullOrBlank() && !runId.isNullOrBlank()) {
+                val result = request("chat.abort", chatAbortParams(sessionKey, runId), 10_000)
+                require(result["ok"]?.jsonPrimitive?.content == "true") {
+                    "OpenClaw did not confirm chat cancellation"
+                }
+                val aborted = result["aborted"]?.jsonPrimitive?.content?.toBooleanStrictOrNull()
+                    ?: error("OpenClaw returned an invalid cancellation acknowledgement")
+                require(aborted) {
+                    "OpenClaw did not confirm that the accepted run was cancelled"
+                }
+                val runIds = result["runIds"]?.jsonArray
+                    ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+                require(runId in runIds) {
+                    "OpenClaw acknowledged cancellation for an unexpected run"
+                }
             }
-            fail(CancellationException("OpenClaw voice turn cancelled"))
-            socket?.cancel()
-            socket = null
-            client.dispatcher.executorService.shutdownNow()
-            client.connectionPool.evictAll()
-        }
-
-        private fun sendWithoutReply(method: String, params: JsonObject) {
-            socket?.send(buildJsonObject {
-                put("type", "req")
-                put("id", UUID.randomUUID().toString())
-                put("method", method)
-                put("params", params)
-            }.toString())
         }
 
         fun close() {
@@ -481,3 +681,94 @@ class OpenClawVoiceGateway(
         companion object { private const val CONNECT_ID = "nightglass-connect" }
     }
 }
+
+/** Bounded, run-correlated projection of stock Gateway chat events. */
+internal class ChatReplyCollector(
+    private val completion: CompletableFuture<String>,
+) {
+    private val streamed = StringBuilder()
+    private val seenProjections = mutableSetOf<String>()
+    private var terminal = false
+
+    @Synchronized
+    fun terminalReceived(): Boolean = terminal
+
+    @Synchronized
+    fun accept(payload: JsonObject, expectedRunId: String?, expectedSessionKey: String) {
+        if (completion.isDone || expectedRunId.isNullOrBlank()) return
+        if (payload["runId"]?.asString() != expectedRunId ||
+            payload["sessionKey"]?.asString() != expectedSessionKey) return
+        if (!seenProjections.add(payload.toString())) return
+        if (seenProjections.size > MAX_EVENT_PROJECTIONS) {
+            return fail(IllegalStateException("OpenClaw sent too many chat events"))
+        }
+
+        when (payload["state"]?.asString()) {
+            "status" -> Unit
+            "delta" -> {
+                val delta = payload["deltaText"]?.asString().orEmpty()
+                if (payload["replace"]?.asString() == "true") {
+                    streamed.setLength(0)
+                }
+                if (streamed.length + delta.length >
+                    OpenClawVoiceGateway.MAX_STREAMED_REPLY_CHARS) {
+                    return fail(IllegalStateException("OpenClaw reply exceeded the watch limit"))
+                }
+                streamed.append(delta)
+            }
+            "final" -> {
+                terminal = true
+                val finalText = if ("message" in payload) {
+                    extractAssistantText(payload["message"])
+                        ?: return fail(IllegalStateException(
+                            "OpenClaw returned an invalid final assistant response"))
+                } else {
+                    streamed.toString()
+                }
+                if (finalText.isBlank()) {
+                    fail(IllegalStateException("OpenClaw returned an empty response"))
+                } else if (finalText.length > OpenClawVoiceGateway.MAX_STREAMED_REPLY_CHARS) {
+                    fail(IllegalStateException("OpenClaw reply exceeded the watch limit"))
+                } else {
+                    completion.complete(finalText)
+                }
+            }
+            "error" -> {
+                terminal = true
+                fail(IllegalStateException(
+                    payload["errorMessage"]?.asString() ?: "OpenClaw chat failed"))
+            }
+            "aborted" -> {
+                terminal = true
+                fail(CancellationException(
+                    payload["errorMessage"]?.asString() ?: "OpenClaw chat was cancelled"))
+            }
+        }
+    }
+
+    private fun fail(error: Throwable) {
+        completion.completeExceptionally(error)
+    }
+
+    companion object {
+        private const val MAX_EVENT_PROJECTIONS = 512
+
+        internal fun extractAssistantText(element: JsonElement?): String? {
+            val message = element as? JsonObject ?: return null
+            if (message["role"]?.asString() != "assistant") return null
+            return when (val content = message["content"]) {
+                is JsonPrimitive -> content.content.takeIf { it.isNotBlank() }
+                is JsonArray -> content.mapNotNull { part ->
+                    val block = part as? JsonObject ?: return@mapNotNull null
+                    if (block["type"]?.asString() !in setOf("text", "output_text")) {
+                        return@mapNotNull null
+                    }
+                    block["text"]?.asString()?.takeIf { it.isNotBlank() }
+                }.joinToString("").takeIf { it.isNotBlank() }
+                else -> null
+            }
+        }
+    }
+}
+
+private fun JsonElement.asString(): String? = (this as? JsonPrimitive)?.content

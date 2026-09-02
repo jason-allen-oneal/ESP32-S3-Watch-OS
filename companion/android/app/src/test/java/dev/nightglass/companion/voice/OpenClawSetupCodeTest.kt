@@ -39,7 +39,7 @@ class OpenClawSetupCodeTest {
         }
     }
 
-    @Test fun validatesTlsFingerprintAndExactVoiceScopes() {
+    @Test fun validatesTlsFingerprintAndClosedVoiceScopeProfiles() {
         val fingerprint = "ab".repeat(32)
         val parsed = OpenClawSetupCode.decode(code(
             """{"url":"wss://voice.example.test","bootstrapToken":"abcdefghijklmnop","tlsFingerprint":"$fingerprint"}"""))
@@ -48,10 +48,14 @@ class OpenClawSetupCodeTest {
             OpenClawSetupCode.decode(code(
                 """{"url":"wss://voice.example.test","bootstrapToken":"abcdefghijklmnop","tlsFingerprint":"${"gg".repeat(32)}"}"""))
         }
-        assertTrue(OpenClawVoiceStore.scopesAreExactlyRequired(
+        assertTrue(OpenClawVoiceStore.scopesAreAllowedHandoff(
             listOf("operator.talk", "operator.read")))
-        assertFalse(OpenClawVoiceStore.scopesAreExactlyRequired(
+        assertTrue(OpenClawVoiceStore.scopesAreExactlyRequired(
             listOf("operator.talk", "operator.read", "operator.write")))
+        assertFalse(OpenClawVoiceStore.scopesAreExactlyRequired(
+            listOf("operator.talk", "operator.read")))
+        assertFalse(OpenClawVoiceStore.scopesAreAllowedHandoff(
+            listOf("operator.talk", "operator.read", "operator.write", "operator.admin")))
         assertFalse(OpenClawVoiceStore.scopesAreExactlyRequired(listOf("operator.talk")))
     }
 }

@@ -1,0 +1,35 @@
+// Merge these fields into the existing OpenClaw configuration. This file is a
+// reviewed activation template, not a complete replacement configuration.
+{
+  tools: {
+    media: {
+      // Preserve existing non-audio entries. Do not retain any other entry
+      // whose capabilities include "audio"; this is the only permitted STT
+      // route for Nightglass activation.
+      models: [
+        {
+          type: "cli",
+          command: "/usr/bin/whisper-cli",
+          args: [
+            "-m",
+            "/home/rev/projects/models/whisper/base.en/ggml-base.en.bin",
+            "-otxt",
+            "-of",
+            "{{OutputBase}}",
+            "-nt",
+            "{{AttachmentPath}}",
+          ],
+          capabilities: ["audio"],
+          maxBytes: 5000000,
+          timeoutSeconds: 360,
+        },
+      ],
+      audio: {
+        enabled: true,
+        preferredModel: "cli:/usr/bin/whisper-cli",
+        maxBytes: 5000000,
+        timeoutSeconds: 360,
+      },
+    },
+  },
+}

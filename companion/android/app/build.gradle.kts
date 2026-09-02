@@ -24,4 +24,5 @@ dependencies {
     implementation("org.bouncycastle:bcprov-jdk18on:1.80")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
