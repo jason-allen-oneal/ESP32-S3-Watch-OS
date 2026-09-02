@@ -26,6 +26,16 @@ class OpenClawOperatorHandoffTest {
         assertEquals(OpenClawVoiceStore.REQUIRED_SCOPES, approved.scopes)
     }
 
+    @Test fun acceptsDirectConstrainedOperatorBootstrap() {
+        val direct = Json.parseToJsonElement("""{
+          "auth":{"role":"operator","deviceToken":"abcdefghijklmnop",
+          "scopes":["operator.read","operator.talk"]}
+        }""").jsonObject
+        val bootstrap = OpenClawVoiceGateway.parseOperatorHandoff(direct)
+        assertEquals("abcdefghijklmnop", bootstrap.token)
+        assertEquals(OpenClawVoiceStore.BOOTSTRAP_SCOPES, bootstrap.scopes)
+    }
+
     @Test fun rejectsBroaderOrIncompleteHandoffs() {
         assertThrows(IllegalArgumentException::class.java) {
             OpenClawVoiceGateway.parseOperatorHandoff(

@@ -122,10 +122,16 @@ class OpenClawVoiceGateway(
         }
 
         internal fun parseOperatorHandoff(hello: JsonObject): OperatorHandoff {
-            val handoff = hello["auth"]?.jsonObject?.get("deviceTokens")?.jsonArray
-                ?.mapNotNull { it as? JsonObject }
-                ?.firstOrNull { it["role"]?.jsonPrimitive?.content == "operator" }
-                ?: error("Gateway did not issue a constrained operator handoff")
+            val auth = hello["auth"]?.jsonObject
+                ?: error("Gateway did not return bootstrap authorization")
+            val handoff = if (auth["role"]?.jsonPrimitive?.content == "operator") {
+                auth
+            } else {
+                auth["deviceTokens"]?.jsonArray
+                    ?.mapNotNull { it as? JsonObject }
+                    ?.firstOrNull { it["role"]?.jsonPrimitive?.content == "operator" }
+                    ?: error("Gateway did not issue a constrained operator handoff")
+            }
             val scopes = handoff["scopes"]?.jsonArray
                 ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
             val token = handoff["deviceToken"]?.jsonPrimitive?.content.orEmpty()
@@ -256,7 +262,14 @@ class OpenClawVoiceGateway(
             if (credential.operatorToken == null) {
                 status("Pairing constrained OpenClaw voice identity")
                 val bootstrap = credential.bootstrapToken ?: error("OpenClaw setup code expired or was consumed")
-                val socket = RpcSocket(credential, store, "node", emptyList(), bootstrap, true)
+                val socket = RpcSocket(
+                    credential,
+                    store,
+                    "operator",
+                    OpenClawVoiceStore.BOOTSTRAP_SCOPES.sorted(),
+                    bootstrap,
+                    true,
+                )
                 turn.socket.set(socket)
                 val hello = try { socket.connect() } finally {
                     turn.socket.compareAndSet(socket, null)

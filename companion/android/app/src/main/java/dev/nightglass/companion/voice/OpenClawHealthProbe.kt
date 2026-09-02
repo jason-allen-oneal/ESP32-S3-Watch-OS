@@ -68,8 +68,8 @@ class OpenClawHealthProbe(context: Context) {
                     bootstrapSocket = OpenClawVoiceGateway.RpcSocket(
                         credential,
                         store,
-                        "node",
-                        emptyList(),
+                        "operator",
+                        OpenClawVoiceStore.BOOTSTRAP_SCOPES.sorted(),
                         bootstrap,
                         true,
                     )
