@@ -44,7 +44,7 @@ class OpenClawVoiceStore(context: Context) {
     private val prefs = context.getSharedPreferences("nightglass_openclaw_voice", Context.MODE_PRIVATE)
     private val json = Json { ignoreUnknownKeys = true }
 
-    @Synchronized fun provision(setup: OpenClawSetup) {
+    fun provision(setup: OpenClawSetup) = synchronized(STORE_LOCK) {
         val existing = load()
         val identity = existing ?: generate(setup)
         val value = identity.copy(
@@ -60,21 +60,30 @@ class OpenClawVoiceStore(context: Context) {
         value.wipe()
     }
 
-    @Synchronized fun persistOperatorToken(token: String, scopes: Collection<String>) {
+    fun persistOperatorToken(
+        expected: OpenClawVoiceCredential,
+        token: String,
+        scopes: Collection<String>,
+    ): Boolean = synchronized(STORE_LOCK) {
         require(token.length in 16..4096)
         val normalized = scopes.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
         require(scopesAreExactlyRequired(normalized))
         val current = load() ?: error("OpenClaw voice is not provisioned")
+        if (!sameProvisioning(current, expected)) {
+            current.wipe()
+            return@synchronized false
+        }
         val updated = current.copy(bootstrapToken = null, operatorToken = token, scopes = normalized)
         save(updated)
         current.wipe()
         updated.wipe()
+        true
     }
 
-    @Synchronized fun load(): OpenClawVoiceCredential? {
+    fun load(): OpenClawVoiceCredential? = synchronized(STORE_LOCK) {
         val packed = prefs.getString(KEY, null) ?: return null
         val clear = runCatching { decrypt(Base64.getDecoder().decode(packed)) }.getOrNull() ?: return null
-        return try {
+        try {
             val root = json.parseToJsonElement(clear.toString(Charsets.UTF_8)).jsonObject
             val publicKey = Base64.getDecoder().decode(root.getValue("publicKey").jsonPrimitive.content)
             val privateKey = Base64.getDecoder().decode(root.getValue("privateKey").jsonPrimitive.content)
@@ -97,7 +106,7 @@ class OpenClawVoiceStore(context: Context) {
         }
     }
 
-    @Synchronized fun clear() { prefs.edit().remove(KEY).commit() }
+    fun clear() = synchronized(STORE_LOCK) { prefs.edit().remove(KEY).commit() }
 
     fun sign(payload: String, credential: OpenClawVoiceCredential): String {
         val privateKey = PrivateKeyFactory.createKey(credential.privateKeyPkcs8) as Ed25519PrivateKeyParameters
@@ -167,6 +176,17 @@ class OpenClawVoiceStore(context: Context) {
         val REQUIRED_SCOPES = setOf("operator.read", "operator.talk")
         fun scopesAreExactlyRequired(scopes: Collection<String>): Boolean =
             scopes.map { it.trim() }.filter { it.isNotEmpty() }.toSet() == REQUIRED_SCOPES
+        internal fun sameProvisioning(
+            current: OpenClawVoiceCredential,
+            expected: OpenClawVoiceCredential,
+        ): Boolean =
+            current.url == expected.url &&
+                current.bootstrapToken == expected.bootstrapToken &&
+                current.tlsFingerprint == expected.tlsFingerprint &&
+                current.deviceId == expected.deviceId &&
+                current.publicKeyRaw.contentEquals(expected.publicKeyRaw)
+
+        private val STORE_LOCK = Any()
         private const val KEY = "credential"
         private const val ALIAS = "nightglass-openclaw-voice-v1"
         private fun sha256(bytes: ByteArray) = MessageDigest.getInstance("SHA-256")

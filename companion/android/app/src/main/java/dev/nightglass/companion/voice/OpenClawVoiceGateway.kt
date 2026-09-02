@@ -41,6 +41,13 @@ class OpenClawVoiceGateway(
     @Volatile private var active: ActiveTurn? = null
 
     companion object {
+        internal const val CLIENT_ID = "openclaw-voice-relay"
+
+        internal data class OperatorHandoff(
+            val token: String,
+            val scopes: Set<String>,
+        )
+
         fun acceptsEncodedBytes(size: Int): Boolean =
             size in 1..NightglassProtocol.MAX_VOICE_ENCODED_BYTES
 
@@ -48,6 +55,18 @@ class OpenClawVoiceGateway(
             require(acceptsEncodedBytes(encodedBytes))
             val capturedSeconds = (encodedBytes + 7_999L) / 8_000L
             return (capturedSeconds + 60L).coerceIn(60L, 360L)
+        }
+
+        internal fun parseOperatorHandoff(hello: JsonObject): OperatorHandoff {
+            val handoff = hello["auth"]?.jsonObject?.get("deviceTokens")?.jsonArray
+                ?.mapNotNull { it as? JsonObject }
+                ?.firstOrNull { it["role"]?.jsonPrimitive?.content == "operator" }
+                ?: error("Gateway did not issue a constrained operator handoff")
+            val scopes = handoff["scopes"]?.jsonArray
+                ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
+            val token = handoff["deviceToken"]?.jsonPrimitive?.content.orEmpty()
+            require(OpenClawVoiceStore.scopesAreExactlyRequired(scopes) && token.isNotBlank())
+            return OperatorHandoff(token, scopes)
         }
     }
 
@@ -148,14 +167,10 @@ class OpenClawVoiceGateway(
                     socket.close()
                 }
                 turn.checkActive()
-                val handoff = hello["auth"]?.jsonObject?.get("deviceTokens")?.jsonArray
-                    ?.mapNotNull { it as? JsonObject }
-                    ?.firstOrNull { it["role"]?.jsonPrimitive?.content == "operator" }
-                    ?: error("Gateway did not issue a constrained operator handoff")
-                val scopes = handoff["scopes"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
-                val token = handoff["deviceToken"]?.jsonPrimitive?.content.orEmpty()
-                require(OpenClawVoiceStore.scopesAreExactlyRequired(scopes) && token.isNotBlank())
-                store.persistOperatorToken(token, scopes)
+                val handoff = parseOperatorHandoff(hello)
+                check(store.persistOperatorToken(credential, handoff.token, handoff.scopes)) {
+                    "OpenClaw setup changed during authorization; try again"
+                }
                 credential.wipe()
                 credential = store.load() ?: error("OpenClaw voice authorization was not persisted")
             }
@@ -379,7 +394,7 @@ class OpenClawVoiceGateway(
                 return
             }
             val canonical = listOf(
-                "v3", credential.deviceId, "openclaw-android", if (role == "node") "node" else "ui",
+                "v3", credential.deviceId, CLIENT_ID, if (role == "node") "node" else "ui",
                 role, scopes.joinToString(","), issued.toString(), authToken, nonce, "android", "android"
             ).joinToString("|")
             val device = buildJsonObject {
@@ -392,7 +407,7 @@ class OpenClawVoiceGateway(
             val params = buildJsonObject {
                 put("minProtocol", 3); put("maxProtocol", 4)
                 put("client", buildJsonObject {
-                    put("id", "openclaw-android"); put("displayName", "Nightglass Voice")
+                    put("id", CLIENT_ID); put("displayName", "Nightglass Voice")
                     put("version", "0.1.0"); put("platform", "android")
                     put("mode", if (role == "node") "node" else "ui")
                     put("deviceFamily", "Android")

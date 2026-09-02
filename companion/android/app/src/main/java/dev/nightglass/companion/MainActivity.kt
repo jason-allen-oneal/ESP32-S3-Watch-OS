@@ -158,7 +158,14 @@ class MainActivity : AppCompatActivity() {
                 }
                 try {
                     bridge.provision(setupCode)
-                } catch (_: Throwable) {
+                    android.util.Log.i("NightglassLink",
+                        "OpenClaw voice provisioning: stored")
+                    ContextCompat.startForegroundService(this,
+                        Intent(this, NightglassConnectionService::class.java)
+                            .setAction(NightglassConnectionService.ACTION_REFRESH_OPENCLAW_HEALTH))
+                } catch (error: Throwable) {
+                    android.util.Log.w("NightglassLink",
+                        "OpenClaw voice provisioning: rejected class=${error.javaClass.simpleName}")
                     Toast.makeText(this, "Invalid or expired OpenClaw voice setup QR", Toast.LENGTH_LONG).show()
                 } finally {
                     bridge.close()

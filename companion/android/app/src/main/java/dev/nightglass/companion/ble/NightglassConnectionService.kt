@@ -39,6 +39,7 @@ class NightglassConnectionService : Service() {
         const val ACTION_DISCONNECT = "dev.nightglass.DISCONNECT"
         const val ACTION_WRITE = "dev.nightglass.WRITE"
         const val ACTION_REFRESH_WEATHER = "dev.nightglass.REFRESH_WEATHER"
+        const val ACTION_REFRESH_OPENCLAW_HEALTH = "dev.nightglass.REFRESH_OPENCLAW_HEALTH"
         const val ACTION_FORGET_PIN = "dev.nightglass.FORGET_PIN"
         const val ACTION_FORGET_RESULT = "dev.nightglass.FORGET_RESULT"
         const val ACTION_START_OTA = "dev.nightglass.START_OTA"
@@ -220,6 +221,11 @@ class NightglassConnectionService : Service() {
                 scheduleWeatherRefresh(0)
                 if (gatt == null) reconnectBondedOrScan()
             }
+            ACTION_REFRESH_OPENCLAW_HEALTH -> {
+                explicitDisconnect = false
+                scheduleOpenClawHealth(0)
+                if (gatt == null) reconnectBondedOrScan()
+            }
             ACTION_START_OTA -> {
                 explicitDisconnect = false
                 val uris = intent.getStringArrayListExtra(EXTRA_OTA_URIS)
@@ -311,6 +317,7 @@ class NightglassConnectionService : Service() {
                 client.close()
                 return
             }
+            Log.i(TAG, "GATT state: status=$status state=$state generation=$linkGeneration")
             if (status == BluetoothGatt.GATT_SUCCESS && state == BluetoothProfile.STATE_CONNECTED) {
                 reconnectHandler.removeCallbacks(reconnect)
                 linkReady = false
@@ -763,6 +770,9 @@ class NightglassConnectionService : Service() {
                 val decision = OpenClawHealthPolicy.decide(
                     result, internet, voiceHealthFailures)
                 voiceHealthFailures = decision.consecutiveFailures
+                Log.i(TAG, "OpenClaw health result: configured=${result.configured} " +
+                    "internet=$internet reachable=${result.reachable} " +
+                    "fatal=${result.fatal} state=${decision.state.name}")
                 publishOpenClawHealth(decision.state)
                 scheduleOpenClawHealth()
             }
@@ -810,6 +820,18 @@ class NightglassConnectionService : Service() {
     private fun createChannel() { getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "Watch connection", NotificationManager.IMPORTANCE_LOW)) }
     private fun update(text: String) {
         connectionStatus = text
+        val statusClass = when {
+            text == "Nightglass connected" -> "connected"
+            text.startsWith("Connecting") -> "connecting"
+            text.startsWith("Connected;") -> "securing"
+            text.startsWith("Disconnected") -> "disconnected"
+            text.contains("authorization", ignoreCase = true) -> "authorization"
+            text.contains("Pairing", ignoreCase = true) -> "pairing"
+            text.contains("Bluetooth", ignoreCase = true) -> "bluetooth"
+            text.contains("not found", ignoreCase = true) -> "not_found"
+            else -> "updated"
+        }
+        Log.i(TAG, "Companion status: class=$statusClass")
         getSystemService(NotificationManager::class.java).notify(7, connectionNotification(text))
     }
     private fun reportOtaProgress(progress: OtaTransferManager.Progress) {
