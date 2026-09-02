@@ -27,6 +27,7 @@ python3 "${project_dir}/scripts/check-runtime-glyphs.py"
 python3 -B "${project_dir}/tests/ota_state_inspector_test.py"
 python3 -B "${project_dir}/tests/ota_hil_evidence_test.py"
 python3 -B "${project_dir}/tests/release_config_test.py"
+python3 -B "${project_dir}/tests/voice_stack_contract_test.py"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \

@@ -28,7 +28,15 @@ constexpr char kVoiceNvsNamespace[] = "ng_voice";
 constexpr char kVoiceSettingsKey[] = "settings";
 constexpr std::uint32_t kAckTimeoutMs = 2500;
 constexpr std::uint8_t kMaximumRetries = 2;
-constexpr std::uint32_t kWorkerStackBytes = 4096;
+// The transport worker performs CRC calculation, credit-window framing, and
+// NimBLE notification calls in one call chain. 4 KiB was proven insufficient
+// on hardware: the first post-capture upload overflowed ng_voice before the
+// request-begin frame reached the phone. Keep this PSRAM-backed stack aligned
+// with the network worker's proven 8 KiB budget.
+constexpr std::uint32_t kWorkerStackBytes = 8192;
+static_assert(kWorkerStackBytes >= 8192,
+              "voice transport stack must cover the upload/NimBLE call chain");
+constexpr UBaseType_t kWorkerMinimumStackReserveBytes = 2048;
 constexpr std::uint32_t kUploadMinimumDeadlineMs = 60000;
 constexpr std::uint32_t kUploadGraceMs = 30000;
 constexpr std::uint32_t kConservativeUploadBytesPerSecond = 2048;
@@ -380,6 +388,14 @@ void voice_worker_task(void *) {
         }
         if (!release) continue;
         const bool success = upload && upload_request();
+        const auto stack_reserve = uxTaskGetStackHighWaterMark(nullptr);
+        if (stack_reserve < kWorkerMinimumStackReserveBytes) {
+            ESP_LOGW(kTag, "Voice transport stack reserve low: bytes=%u",
+                     static_cast<unsigned>(stack_reserve));
+        } else {
+            ESP_LOGI(kTag, "Voice transport stack reserve: bytes=%u",
+                     static_cast<unsigned>(stack_reserve));
+        }
         release_request_buffer();
         portENTER_CRITICAL(&voice_lock);
         const bool transitioned = voice_worker_released(
