@@ -4,6 +4,7 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 gyro_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gyro-test.XXXXXX")"
 gesture_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gesture-test.XXXXXX")"
+gesture_calibration_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gesture-calibration-test.XXXXXX")"
 gesture_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gesture-policy-test.XXXXXX")"
 time_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-time-test.XXXXXX")"
 face_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-face-test.XXXXXX")"
@@ -12,6 +13,7 @@ voice_codec_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-voice-codec-test.XXXXXX
 voice_protocol_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-voice-protocol-test.XXXXXX")"
 voice_state_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-voice-state-test.XXXXXX")"
 update_transport_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-update-transport-test.XXXXXX")"
+usb_update_protocol_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-usb-update-protocol-test.XXXXXX")"
 activity_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-test.XXXXXX")"
 activity_units_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-units-test.XXXXXX")"
 day_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-activity-day-test.XXXXXX")"
@@ -21,13 +23,39 @@ audio_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-audio-test.XXXXXX")"
 update_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-update-test.XXXXXX")"
 verifier_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-verifier-test.XXXXXX")"
 clock_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-clock-policy-test.XXXXXX")"
-trap 'rm -f "${gyro_binary}" "${gesture_binary}" "${gesture_policy_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${voice_codec_binary}" "${voice_protocol_binary}" "${voice_state_binary}" "${update_transport_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}"' EXIT
+ft3168_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-ft3168-test.XXXXXX")"
+premium_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-premium-test.XXXXXX")"
+trap 'rm -f "${gyro_binary}" "${gesture_binary}" "${gesture_calibration_binary}" "${gesture_policy_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${voice_codec_binary}" "${voice_protocol_binary}" "${voice_state_binary}" "${update_transport_binary}" "${usb_update_protocol_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}" "${ft3168_binary}"' EXIT
 
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/premium_protocol.cpp" \
+  "${project_dir}/tests/premium_protocol_test.cpp" -o "${premium_binary}"
+"${premium_binary}"
+rm -f "${premium_binary}"
 python3 -B "${project_dir}/tests/ota_state_inspector_test.py"
 python3 -B "${project_dir}/tests/ota_hil_evidence_test.py"
 python3 -B "${project_dir}/tests/release_config_test.py"
 python3 -B "${project_dir}/tests/voice_stack_contract_test.py"
+python3 -B "${project_dir}/tests/hardware_stack_contract_test.py"
+python3 -B "${project_dir}/tests/lvgl_stack_contract_test.py"
+python3 -B "${project_dir}/tests/touch_wake_contract_test.py"
+python3 -B "${project_dir}/tests/power_ui_dispatch_test.py"
+python3 -B "${project_dir}/tests/health_gate_diagnostics_test.py"
+python3 -B "${project_dir}/tests/touch_bus_diagnostic_test.py"
+python3 -B "${project_dir}/tests/hardware_touch_quiet_test.py"
+python3 -B "${project_dir}/tests/display_power_transport_test.py"
+python3 -B "${project_dir}/tests/usb_update_protocol_test.py"
+python3 -B "${project_dir}/tests/rom_bootstrap_test.py"
+python3 -B "${project_dir}/tests/context_deck_contract_test.py"
+python3 -B "${project_dir}/tests/discord_surface_contract_test.py"
+python3 -B "${project_dir}/tests/companion_lifecycle_contract_test.py"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_bsp/include" \
+  "${project_dir}/tests/ft3168_config_test.cpp" -o "${ft3168_binary}"
+"${ft3168_binary}"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \
@@ -42,6 +70,14 @@ python3 -B "${project_dir}/tests/voice_stack_contract_test.py"
   "${project_dir}/tests/gesture_processor_test.cpp" \
   -o "${gesture_binary}"
 "${gesture_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/gesture_processor.cpp" \
+  "${project_dir}/components/nightglass_services/src/gesture_calibration.cpp" \
+  "${project_dir}/tests/gesture_calibration_test.cpp" \
+  -o "${gesture_calibration_binary}"
+"${gesture_calibration_binary}"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \
@@ -107,6 +143,14 @@ python3 -B "${project_dir}/tests/voice_stack_contract_test.py"
   "${project_dir}/tests/update_transport_protocol_test.cpp" \
   -o "${update_transport_binary}"
 "${update_transport_binary}"
+
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  -I"${project_dir}/components/nightglass_update/include" \
+  "${project_dir}/components/nightglass_services/src/usb_update_protocol.cpp" \
+  "${project_dir}/tests/usb_update_protocol_test.cpp" \
+  -o "${usb_update_protocol_binary}"
+"${usb_update_protocol_binary}"
 
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \

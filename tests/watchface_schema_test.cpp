@@ -48,6 +48,26 @@ int main() {
     auto pack = full_pack();
     assert(valid_face_pack(pack));
 
+    // Dedicated shell artwork is allowed only as bounded secondary chrome.
+    pack.chrome.route_background_asset = FaceAsset::revenant_shell_v1;
+    pack.chrome.route_background_opacity = 64;
+    assert(valid_face_pack(pack));
+    pack.chrome.route_background_opacity = 65;
+    assert(!valid_face_pack(pack));
+    pack.chrome.route_background_opacity = 0;
+    assert(!valid_face_pack(pack));
+    pack = full_pack();
+    pack.chrome.route_background_asset = static_cast<FaceAsset>(99);
+    assert(!valid_face_pack(pack));
+    pack = full_pack();
+    pack.background_asset = FaceAsset::revenant_shell_v1;
+    assert(!valid_face_pack(pack));
+    auto classic_with_art = classic;
+    classic_with_art.chrome.route_background_asset = FaceAsset::revenant_shell_v1;
+    classic_with_art.chrome.route_background_opacity = 64;
+    assert(!valid_face_pack(classic_with_art));
+
+    pack = full_pack();
     pack.complications &= ~complication_steps;
     assert(!valid_face_pack(pack));
 

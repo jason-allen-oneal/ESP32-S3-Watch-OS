@@ -97,7 +97,8 @@ bool valid_chrome(const FaceChrome &chrome) {
             return chrome.route_background_asset == FaceAsset::none &&
                    chrome.route_background_opacity == 0;
         case ChromeTheme::revenant:
-            return chrome.route_background_asset == FaceAsset::revenant_grid_v2 &&
+            return (chrome.route_background_asset == FaceAsset::revenant_grid_v2 ||
+                    chrome.route_background_asset == FaceAsset::revenant_shell_v1) &&
                    chrome.route_background_opacity > 0 &&
                    chrome.route_background_opacity <= kMaxRouteBackgroundOpacity;
     }

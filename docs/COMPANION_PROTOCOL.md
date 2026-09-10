@@ -1,5 +1,9 @@
 # Nightglass companion protocol v1
 
+The optional [premium extension](PREMIUM_PROTOCOL.md) adds appearance profiles
+and bounded richer media/conversation snapshots without changing v1 status or
+existing characteristic handles.
+
 Nightglass exposes one encrypted custom BLE GATT service. The watch remains a
 bounded display/control endpoint; phone operating-system access stays in a
 companion adapter.
@@ -31,10 +35,12 @@ companion adapter.
 - Notification and command characteristics require link encryption.
 - Notification content is never written to logs or NVS. The six-item inbox is
   RAM-only and disappears on reboot.
-- The service exposes a runtime notification privacy policy that can scrub the
-  cached app/title/body and disable replies immediately. It defaults to showing
-  details until a real PIN/privacy UI exists; therefore unlocked-watch shoulder
-  surfing and physical RAM/debug access remain residual privacy risks.
+- The service exposes a runtime notification privacy policy. Selecting
+  `always_redact` scrubs cached app/title/body details and disables replies
+  immediately; selecting `show_details` requires a fresh companion sync and
+  never resurrects text that was scrubbed. There is no PIN lock in the product
+  surface; physical RAM/debug access and a deliberately unlocked display remain
+  residual privacy risks.
 - Text fields are bounded and converted to printable ASCII for the current
   embedded font set.
 
@@ -107,7 +113,9 @@ minutes in the future, unit mismatches, and data older than its current source.
   times, title, and location. Descriptions, attendees, and accounts stay local.
 - `0x06` carries phone battery percentage and charging/power-save flags.
 - `0x07` adds media seekability and bounded position/duration. Media commands
-  6/7 seek by 15 seconds when Android advertises seek support.
+  6/7 seek by 15 seconds when Android advertises seek support; command 8 stops
+  the active session and command 9 restarts it from the beginning when seek is
+  supported.
 - `0x08` carries generic call state without number/contact identity. The exact
   frame adds a random nonzero call-session ID and a nonzero state generation;
   idle state carries zero for both. Outbound `0x14` is exactly 11 bytes and
@@ -117,8 +125,10 @@ minutes in the future, unit mismatches, and data older than its current source.
   Commands are answer, reject, explicit mute, and explicit unmute; there is no
   replay-sensitive mute toggle and no call audio over BLE. Legacy four-byte
   call commands are rejected.
-- Outbound `0x15` starts/stops a bounded 30-second phone ring or launches the
-  system camera intent.
+- Outbound `0x15` starts/stops a bounded 30-second phone ring, launches the
+  system camera intent, or opens the installed Spotify (`command=4`) or
+  Discord (`command=5`) app. Unknown command values are rejected by the
+  companion parser.
 
 These frames retain the bonded, pinned, encrypted GATT boundary and MTU bounds.
 Logs contain opcode, length, and status, not private payload content. Missing
@@ -126,3 +136,56 @@ Android calendar/telephony permission produces empty or unavailable state.
 All other watch action frames require exact lengths, known command values,
 nonzero handles/sequences, and a wrap-safe forward 8-bit sequence window on
 Android, so duplicate GATT deliveries cannot repeat their side effects.
+
+## Signed update frames
+
+Both the encrypted BLE installer and native USB installer feed the same bounded
+update state machine. Request opcodes are `0x30` begin, `0x31` sequential data,
+`0x32` finish/apply, `0x33` abort, and `0x34` status query. The watch replies
+with opcode `0x35` in an exact 22-byte frame:
+
+| Bytes | Field |
+|---:|---|
+| 0 | protocol version `1` |
+| 1 | status opcode `0x35` |
+| 2-9 | session `u64` |
+| 10 | update state |
+| 11 | signature state |
+| 12 | result code |
+| 13 | acknowledged request opcode |
+| 14-17 | expected image bytes `u32` |
+| 18-21 | received image bytes `u32` |
+
+All integers are little-endian. Byte 13 is zero on BLE for compatibility with
+deployed companions and echoes `0x30`-`0x34` on USB so the host can correlate a
+pipelined response with its request. Native USB wraps each payload in `NGU1`, a
+little-endian `u16` payload length, and IEEE CRC32; that envelope is transport
+framing, not a replacement for package signature verification.
+
+## OpenClaw voice frames
+
+Voice request frames use opcodes `0x40`-`0x43` and the existing bounded
+8 kHz mu-law capture contract. The codec byte on `0x40` keeps codec `1` in its
+low six bits and carries per-turn destination flags in the high bits: bit `7`
+is the **spoken replies** opt-in and bit `6` is **Discord voice reply**. With
+both bits clear, the existing text-only contract is unchanged. A Discord voice
+reply is capped at 60 seconds; the matching companion converts it to a
+short-lived WAV and opens Discord's user-confirmed share composer rather than
+calling a Discord API or choosing a channel. Non-default flags require the
+matching companion build. A text response uses `0x45`-
+`0x48` and remains capped at 2,048 printable bytes. When the spoken-reply
+opt-in is set,
+the phone may append an audio response with a distinct random response ID:
+
+- `0x4A`: 20-byte begin (`session`, `response_id`, total mu-law bytes, CRC32,
+  codec `1`, rate `8`), capped at 96,000 bytes.
+- `0x4B`: data with a 32-bit byte offset and up to 230 payload bytes.
+- `0x4C`: 18-byte end binding the exact byte count and CRC32.
+
+The watch accepts audio only after the matching text response completed, checks
+the CRC and exact offsets, buffers it in bounded PSRAM, and routes it through
+the existing PA-gated audio owner. It wipes the buffer on completion,
+cancellation, disconnect, malformed data, or failed playback. TTS failure,
+muted/DND audio, transport exhaustion, and unavailable hardware leave the text
+response intact; no provider credential or audio file crosses the watch
+boundary.

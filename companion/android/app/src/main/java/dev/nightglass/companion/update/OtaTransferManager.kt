@@ -26,7 +26,6 @@ class OtaTransferManager(
     private var timeout: ScheduledFuture<*>? = null
     private var ackGeneration = 0
     private var retryCount = 0
-    private val confirmation = OtaConfirmationTracker()
     private var lastPercent = -1
 
     @Synchronized fun active(): Boolean = selected != null || processing || aborting
@@ -102,13 +101,6 @@ class OtaTransferManager(
                 emit(true, false, maxOf(lastPercent, 0), "Clearing prior watch update session")
                 return sendAndAwait(NightglassProtocol.otaAbort(status.session))
             }
-            if (status.result == 9) {
-                emit(true, false, 100, "Confirm INSTALL on the watch")
-                confirmation.begin()
-                scheduleConfirmationPoll()
-                return
-            }
-            confirmation.reset()
             if (status.result != 0) return fail("Watch rejected update operation (${status.result})")
             if (aborting) {
                 if (status.state == 1) {
@@ -130,7 +122,7 @@ class OtaTransferManager(
                         return sendAndAwait(NightglassProtocol.otaAbort(pkg.session))
                     }
                     if (status.receivedBytes == pkg.manifest.imageSize) {
-                        emit(true, false, 100, "Requesting watch confirmation")
+                        emit(true, false, 100, "Applying signed update")
                         sendAndAwait(NightglassProtocol.otaFinish(pkg.session))
                     } else {
                         val data = readChunk(pkg, status.receivedBytes)
@@ -144,7 +136,7 @@ class OtaTransferManager(
                 3 -> {
                     closeImage(); selected = null
                     emit(false, true, 100,
-                        "Update validated; controlled reboot is still required")
+                        "Update validated; watch is rebooting")
                 }
                 4 -> sendAndAwait(NightglassProtocol.otaAbort(pkg.session))
                 else -> fail("Unknown watch update state")
@@ -174,28 +166,6 @@ class OtaTransferManager(
                 else if (!send(NightglassProtocol.otaStatusQuery(pkg.session)))
                     emit(true, false, maxOf(lastPercent, 0), "Waiting for secure Nightglass link")
                 else scheduleTimeout()
-            }
-        }, 10, TimeUnit.SECONDS)
-    }
-
-    @Synchronized private fun scheduleConfirmationPoll() {
-        timeout?.cancel(false)
-        val generation = ++ackGeneration
-        timeout = executor.schedule({
-            synchronized(this) {
-                val pkg = selected ?: return@synchronized
-                if (generation != ackGeneration || !confirmation.active) {
-                    return@synchronized
-                }
-                if (!confirmation.allowNextPoll()) {
-                    fail("Watch confirmation timed out")
-                } else {
-                    if (!send(NightglassProtocol.otaStatusQuery(pkg.session))) {
-                        emit(true, false, maxOf(lastPercent, 0),
-                            "Waiting for secure Nightglass link")
-                    }
-                    scheduleConfirmationPoll()
-                }
             }
         }, 10, TimeUnit.SECONDS)
     }
@@ -231,7 +201,6 @@ class OtaTransferManager(
             send(NightglassProtocol.otaAbort(pkg.session))
         }
         cancelTimeout(); closeImage(); selected = null; aborting = false; foreignSession = null
-        confirmation.reset()
         emit(false, false, 0, detail)
     }
     private fun cancelTimeout() { ++ackGeneration; timeout?.cancel(false); timeout = null }

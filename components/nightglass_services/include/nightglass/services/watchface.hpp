@@ -26,7 +26,7 @@ enum FaceComplication : std::uint16_t {
     complication_connectivity = 1U << 10,
 };
 
-enum class FaceAsset : std::uint8_t { none, revenant_grid_v2 };
+enum class FaceAsset : std::uint8_t { none, revenant_grid_v2, revenant_shell_v1 };
 
 enum class ChromeTheme : std::uint8_t { classic, revenant };
 
@@ -140,6 +140,8 @@ public:
     [[nodiscard]] const FacePack *packs() const;
     [[nodiscard]] std::size_t pack_count() const;
     bool select(std::uint8_t id);
+    // UI-thread boundary: published pack references remain stable throughout a render.
+    void refresh_profile();
 };
 
 WatchFaceService &watchface_service();

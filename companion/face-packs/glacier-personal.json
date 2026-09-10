@@ -1,0 +1,13 @@
+{
+  "format": "nightglass-personalization",
+  "version": 1,
+  "name": "Glacier",
+  "face": 2,
+  "accent": "63DDE4",
+  "complications": [1, 2, 3],
+  "deckOrder": [0, 2, 1, 3, 4],
+  "deckMask": 31,
+  "alwaysOn": false,
+  "largeText": false,
+  "reduceMotion": false
+}

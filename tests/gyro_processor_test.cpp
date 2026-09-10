@@ -37,6 +37,7 @@ int main() {
         output = processor.process(stationary(2.0F + noise, -1.0F - noise, 0.25F + noise));
     }
     assert(output.calibrated);
+    assert(processor.calibrated());
     assert(output.calibration_samples == GyroProcessor::kRequiredSamples);
     assert(near(output.bias_x_dps, 2.0F));
     assert(near(output.bias_y_dps, -1.0F));
@@ -51,6 +52,7 @@ int main() {
     assert(output.display_x_dps > GyroProcessor::kDisplayDeadbandDps);
 
     processor.reset();
+    assert(!processor.calibrated());
     warm_up(processor);
     for (int i = 0; i < GyroProcessor::kRequiredSamples - 1; ++i) {
         output = processor.process(stationary(2.0F, 0.0F, 0.0F));

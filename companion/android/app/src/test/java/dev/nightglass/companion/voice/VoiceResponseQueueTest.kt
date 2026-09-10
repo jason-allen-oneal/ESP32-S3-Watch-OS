@@ -38,6 +38,39 @@ class VoiceResponseQueueTest {
         assertEquals(0, queue.size())
     }
 
+    @Test fun spokenResponseKeepsTextAndAudioAtomicAndTerminalAtAudioEnd() {
+        val owner = VoiceTurnOwner(13u, 9, 4)
+        val audio = ByteArray(513) { (it * 7).toByte() }
+        val queue = VoiceResponseQueue()
+        assertTrue(queue.enqueueResponseWithAudio(
+            owner, 21u, 22u, "Readable text", audio, 179))
+
+        var sawAudioBegin = false
+        var sawAudioEnd = false
+        var terminal: VoiceTurnOwner? = null
+        while (queue.size() > 0) {
+            val entry = queue.beginWrite() ?: throw AssertionError("queue stalled")
+            assertTrue(entry.frame.size <= 179)
+            when (entry.frame[1].toInt() and 0xff) {
+                0x4a -> {
+                    sawAudioBegin = true
+                    assertFalse(entry.terminal)
+                }
+                0x4c -> {
+                    sawAudioEnd = true
+                    assertTrue(entry.terminal)
+                }
+                else -> assertFalse(entry.terminal)
+            }
+            terminal = queue.completeWrite() ?: terminal
+            assertTrue(entry.frame.all { it == 0.toByte() })
+        }
+        assertTrue(sawAudioBegin)
+        assertTrue(sawAudioEnd)
+        assertEquals(owner, terminal)
+        audio.fill(0)
+    }
+
     @Test fun eventFenceRejectsStaleOwnerSessionTurnAndSequence() {
         val owner = VoiceTurnOwner(5u, 6, 7)
         val fence = VoiceEventFence(owner)

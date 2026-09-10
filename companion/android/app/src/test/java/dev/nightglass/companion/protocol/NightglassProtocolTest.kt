@@ -41,7 +41,11 @@ class NightglassProtocolTest {
         assertNull(NightglassProtocol.parseAction(invalidText))
         assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x10)))
         assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x10, 0, 2)))
-        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x10, 9, 8)))
+        assertEquals(NightglassProtocol.WatchAction.Media(9, 8),
+            NightglassProtocol.parseAction(byteArrayOf(1, 0x10, 9, 8)))
+        assertEquals(NightglassProtocol.WatchAction.Media(9, 9),
+            NightglassProtocol.parseAction(byteArrayOf(1, 0x10, 9, 9)))
+        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x10, 9, 10)))
         assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x11, 3, 0, 0, 0, 0)))
     }
     @Test fun mediaAndReplyResultsAreBounded() {
@@ -91,9 +95,14 @@ class NightglassProtocolTest {
             0xfffe, 1, 0x78563412u, 2), NightglassProtocol.parseAction(call))
         assertEquals(NightglassProtocol.WatchAction.Phone(9, 3),
             NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 9, 3)))
+        assertEquals(NightglassProtocol.WatchAction.Phone(9, 4),
+            NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 9, 4)))
+        assertEquals(NightglassProtocol.WatchAction.Phone(9, 5),
+            NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 9, 5)))
         assertNull(NightglassProtocol.parseAction(call.copyOf().also { it[4] = 5 }))
         assertNull(NightglassProtocol.parseAction(call.copyOf().also { it[2] = 0; it[3] = 0 }))
         assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 9, 0)))
+        assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 9, 6)))
         assertNull(NightglassProtocol.parseAction(byteArrayOf(1, 0x15, 0, 3)))
     }
     @Test fun callCommandSequenceWindowRejectsReplayStaleAndAcceptsWrap() {
@@ -161,6 +170,8 @@ class NightglassProtocolTest {
         assertEquals(NightglassProtocol.OtaStatus(0x9abcdef000000007uL, 2, 1, 0, 4096, 230),
             NightglassProtocol.parseOtaStatus(status))
         assertNull(NightglassProtocol.parseOtaStatus(status.copyOf().also { it[13] = 1 }))
+        assertEquals(0x34, NightglassProtocol.parseOtaStatus(
+            status.copyOf().also { it[13] = 0x34 })?.acknowledgedOpcode)
         assertNull(NightglassProtocol.parseOtaStatus(status.copyOf().also { it[18] = 1; it[19] = 0x10 }))
         assertArrayEquals(byteArrayOf(1, 0x34, 7, 0, 0, 0, 0, 0, 0, 0),
             NightglassProtocol.otaStatusQuery(7uL))
@@ -171,6 +182,26 @@ class NightglassProtocolTest {
             0x66, 0x49, 0xcf.toByte(), 0xcb.toByte(), 1, 8)
         assertEquals(NightglassProtocol.VoiceRequest.Begin(7u, 9, 0xcbcf4966u),
             NightglassProtocol.parseVoiceRequest(begin))
+        assertEquals(NightglassProtocol.VoiceRequest.Begin(7u, 9, 0xcbcf4966u, true),
+            NightglassProtocol.parseVoiceRequest(begin.copyOf().also { it[14] = 0x81.toByte() }))
+        assertEquals(NightglassProtocol.VoiceRequest.Begin(
+            7u, 9, 0xcbcf4966u, discordReply = true),
+            NightglassProtocol.parseVoiceRequest(begin.copyOf().also {
+                it[14] = 0x41.toByte()
+            }))
+        assertEquals(NightglassProtocol.VoiceRequest.Begin(
+            7u, 9, 0xcbcf4966u, spokenReplies = true, discordReply = true),
+            NightglassProtocol.parseVoiceRequest(begin.copyOf().also {
+                it[14] = 0xc1.toByte()
+            }))
+        assertNull(NightglassProtocol.parseVoiceRequest(
+            begin.copyOf().also {
+                it[6] = 0x01
+                it[7] = 0x53.toByte()
+                it[8] = 0x07.toByte()
+                it[9] = 0x00
+                it[14] = 0x41.toByte()
+            }))
         val data = byteArrayOf(1, 0x41, 7, 0, 0, 0, 1, 0, 0, 0, 0, 0,
             'N'.code.toByte())
         val parsed = NightglassProtocol.parseVoiceRequest(data)
@@ -183,6 +214,10 @@ class NightglassProtocolTest {
         assertEquals(13, NightglassProtocol.voiceResponseData(
             7u, 8u, 0, byteArrayOf('x'.code.toByte())).size)
         assertEquals(7, NightglassProtocol.voiceStatus(7u, 6).size)
+        assertEquals(20, NightglassProtocol.voiceAudioResponseBegin(7u, 8u, 16, 1u).size)
+        assertEquals(15, NightglassProtocol.voiceAudioResponseData(
+            7u, 8u, 0, byteArrayOf(0x80.toByte())).size)
+        assertEquals(18, NightglassProtocol.voiceAudioResponseEnd(7u, 8u, 16, 1u).size)
         assertArrayEquals(byteArrayOf(1, 0x49, 0x12, 0x34, 0x56, 0x78, 2),
             NightglassProtocol.voiceHealth(0x78563412u, 2))
         assertEquals(1u, NightglassProtocol.nextNonzeroSequence32(UInt.MAX_VALUE))

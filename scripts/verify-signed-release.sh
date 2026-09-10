@@ -2,7 +2,12 @@
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-output="${1:-${project_dir}/build/update-package}"
+if [[ -z "${NIGHTGLASS_PROJECT_VERSION:-}" ||
+      -z "${NIGHTGLASS_SECURE_VERSION:-}" ]]; then
+  echo "Signed release requires NIGHTGLASS_PROJECT_VERSION and NIGHTGLASS_SECURE_VERSION" >&2
+  exit 2
+fi
+output="${1:-${project_dir}/build/update-package-${NIGHTGLASS_PROJECT_VERSION}}"
 
 "${project_dir}/scripts/verify-release.sh"
 "${project_dir}/scripts/sign-update.sh" \
@@ -10,4 +15,3 @@ output="${1:-${project_dir}/build/update-package}"
 python3 "${project_dir}/scripts/verify-signed-package.py" "${output}"
 sha256sum "${output}/firmware.bin" "${output}/manifest.payload" \
   "${output}/manifest.sig"
-

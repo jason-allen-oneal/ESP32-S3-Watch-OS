@@ -31,6 +31,7 @@
 #include "nightglass/core/health.hpp"
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/voice_codec.hpp"
+#include "nightglass/services/voice_protocol.hpp"
 #include "nvs.h"
 #define NIGHTGLASS_AUDIO_RUNTIME 1
 #else
@@ -200,6 +201,10 @@ struct AudioCommand {
     VoiceCaptureSink voice_sink{nullptr};
     VoiceCaptureCallback voice_callback{nullptr};
     void *voice_context{nullptr};
+    std::uint8_t *playback_data{nullptr};
+    std::size_t playback_bytes{0};
+    VoicePlaybackCallback playback_callback{nullptr};
+    void *playback_context{nullptr};
 };
 
 AudioService instance;
@@ -217,6 +222,7 @@ std::uint8_t pending_count{};
 bool capture_pending{};
 std::atomic_bool voice_stop_requested{false};
 std::atomic_bool voice_cancel_requested{false};
+std::atomic_bool voice_playback_stop_requested{false};
 std::uint32_t alarm_generation{1};
 std::uint32_t timer_generation{1};
 
@@ -662,6 +668,8 @@ OperationResult run_operation(const AudioCommand &command) {
                                 ? kDiagnosticBytes
                                 : operation == AudioOperation::voice_capture
                                       ? 0
+                                      : operation == AudioOperation::voice_playback
+                                            ? command.playback_bytes * 4U
                                 : pcm.data != nullptr
                                       ? pcm.size
                                       : sound_cue_transfer_bytes(cue);
@@ -697,7 +705,8 @@ OperationResult run_operation(const AudioCommand &command) {
     }
 
     bool opened = false;
-    if (operation == AudioOperation::playback) {
+    if (operation == AudioOperation::playback ||
+        operation == AudioOperation::voice_playback) {
         opened = open_output(resources, audio_settings.volume_percent);
         if (opened) {
             mark_operation_active(operation, cue, false, true, true,
@@ -728,19 +737,39 @@ OperationResult run_operation(const AudioCommand &command) {
                 std::size_t frame_offset{};
                 const auto cue_frames = result.expected_bytes / kFrameBytes;
                 while (frame_offset < cue_frames) {
-                    if (cue_cancelled(cue, generation)) {
+                    const bool voice_cancelled = operation == AudioOperation::voice_playback &&
+                        voice_playback_stop_requested.load(std::memory_order_acquire);
+                    if (voice_cancelled || cue_cancelled(cue, generation)) {
                         // Cancellation is a successful bounded stop, not a
                         // hardware failure. Account only for bytes requested
                         // before the generation changed.
                         result.expected_bytes = result.transferred_bytes;
                         result.status = nightglass::core::Status::Ok();
+                        result.cancelled = voice_cancelled;
                         transfer_ok = false;
                         break;
                     }
                     const auto frames_this_chunk =
                         std::min(kDiagnosticFrames, cue_frames - frame_offset);
                     const auto bytes_this_chunk = frames_this_chunk * kFrameBytes;
-                    if (pcm.data != nullptr) {
+                    if (operation == AudioOperation::voice_playback) {
+                        if (command.playback_data == nullptr || command.playback_bytes == 0 ||
+                            frame_offset % 2U != 0) {
+                            result.status = {nightglass::core::StatusCode::invalid_state,
+                                             "spoken reply buffer invalid"};
+                            transfer_ok = false;
+                            break;
+                        }
+                        const auto input_offset = frame_offset / 2U;
+                        const auto input_frames = frames_this_chunk / 2U;
+                        auto *samples = reinterpret_cast<std::int16_t *>(buffer);
+                        for (std::size_t index = 0; index < input_frames; ++index) {
+                            const auto sample = mulaw_to_pcm16(
+                                command.playback_data[input_offset + index]);
+                            samples[index * 2U] = sample;
+                            samples[index * 2U + 1U] = sample;
+                        }
+                    } else if (pcm.data != nullptr) {
                         std::memcpy(buffer, pcm.data + frame_offset * kFrameBytes,
                                     bytes_this_chunk);
                     } else {
@@ -874,7 +903,8 @@ OperationResult run_operation(const AudioCommand &command) {
 
     if (!opened && result.status.is_ok()) {
         result.status = {nightglass::core::StatusCode::io_error,
-                         operation == AudioOperation::playback
+                         operation == AudioOperation::playback ||
+                                 operation == AudioOperation::voice_playback
                              ? "ES8311 output initialization failed"
                              : "ES7210 input initialization failed"};
     }
@@ -957,8 +987,14 @@ void audio_worker_task(void *) {
         auto effective_settings = state.settings;
         effective_settings.do_not_disturb = effective_settings.do_not_disturb ||
                                              state.scheduled_dnd;
-        const bool allowed = command.operation != AudioOperation::playback ||
-                             audio_cue_allowed(command.cue, effective_settings);
+        const bool playback_command = command.operation == AudioOperation::playback ||
+                                      command.operation == AudioOperation::voice_playback;
+        const bool allowed = !playback_command ||
+                             (command.operation == AudioOperation::playback
+                                  ? audio_cue_allowed(command.cue, effective_settings)
+                                  : (!effective_settings.muted &&
+                                     effective_settings.volume_percent > 0 &&
+                                     !effective_settings.do_not_disturb));
         if (locked) {
             state.operation = command.operation;
             state.cue = command.cue;
@@ -987,6 +1023,16 @@ void audio_worker_task(void *) {
                 result.status.code, result.encoded_bytes,
                 result.capture_rms, result.cancelled};
             command.voice_callback(command.voice_context, completion);
+        }
+        if (command.operation == AudioOperation::voice_playback &&
+            command.playback_callback != nullptr) {
+            if (!ran) {
+                result.status = {nightglass::core::StatusCode::unavailable,
+                                 "spoken reply playback unavailable"};
+            }
+            const VoicePlaybackResult completion{
+                result.status.code, command.playback_bytes, result.cancelled};
+            command.playback_callback(command.playback_context, completion);
         }
         portENTER_CRITICAL(&state_mux);
         const bool safety_locked = state.hardware_failed;
@@ -1029,7 +1075,11 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
                                  std::size_t voice_capacity = 0,
                                  VoiceCaptureSink voice_sink = nullptr,
                                  VoiceCaptureCallback voice_callback = nullptr,
-                                 void *voice_context = nullptr) {
+                                 void *voice_context = nullptr,
+                                 std::uint8_t *playback_data = nullptr,
+                                 std::size_t playback_bytes = 0,
+                                 VoicePlaybackCallback playback_callback = nullptr,
+                                 void *playback_context = nullptr) {
     if (audio_bus == nullptr || audio_queue == nullptr || audio_worker == nullptr ||
         request_mutex == nullptr) {
         return {nightglass::core::StatusCode::unavailable, "audio service is not armed"};
@@ -1088,7 +1138,9 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
     generation = cue_generation_locked(cue);
     portEXIT_CRITICAL(&state_mux);
     const AudioCommand command{operation, cue, generation, voice_capacity,
-                               voice_sink, voice_callback, voice_context};
+                               voice_sink, voice_callback, voice_context,
+                               playback_data, playback_bytes, playback_callback,
+                               playback_context};
     const bool urgent = critical || cue == SoundCue::call;
     const auto queued = urgent ? xQueueSendToFront(audio_queue, &command, 0)
                                : xQueueSendToBack(audio_queue, &command, 0);
@@ -1171,6 +1223,7 @@ nightglass::core::Status AudioService::start(i2c_master_bus_handle_t bus_handle)
     capture_pending = false;
     voice_stop_requested.store(false, std::memory_order_release);
     voice_cancel_requested.store(false, std::memory_order_release);
+    voice_playback_stop_requested.store(false, std::memory_order_release);
     alarm_generation = 1;
     timer_generation = 1;
     request_mutex = xSemaphoreCreateMutexStatic(&request_mutex_state);
@@ -1237,6 +1290,36 @@ void AudioService::stop_voice_capture(bool cancel) {
     voice_stop_requested.store(true, std::memory_order_release);
 #else
     (void)cancel;
+#endif
+}
+
+nightglass::core::Status AudioService::request_voice_playback(
+    std::uint8_t *encoded, std::size_t encoded_bytes,
+    VoicePlaybackCallback callback, void *context) {
+#if !NIGHTGLASS_AUDIO_RUNTIME
+    (void)encoded;
+    (void)encoded_bytes;
+    (void)callback;
+    (void)context;
+    return {nightglass::core::StatusCode::unavailable,
+            "audio disabled by build configuration"};
+#else
+    if (encoded == nullptr || encoded_bytes == 0 ||
+        encoded_bytes > kVoiceMaximumSpokenReplyBytes || callback == nullptr) {
+        return {nightglass::core::StatusCode::invalid_state,
+                "invalid spoken reply buffer"};
+    }
+    voice_playback_stop_requested.store(false, std::memory_order_release);
+    return request(AudioOperation::voice_playback, SoundCue::test,
+                   nightglass::core::WakeReason::notification,
+                   0, nullptr, nullptr, nullptr,
+                   encoded, encoded_bytes, callback, context);
+#endif
+}
+
+void AudioService::stop_voice_playback() {
+#if NIGHTGLASS_AUDIO_RUNTIME
+    voice_playback_stop_requested.store(true, std::memory_order_release);
 #endif
 }
 

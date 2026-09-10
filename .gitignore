@@ -9,4 +9,6 @@ sdkconfig.old
 *.elf
 *.map
 *.log
+__pycache__/
+*.py[cod]
 components/nightglass_services/assets/*.wav

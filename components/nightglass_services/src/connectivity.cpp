@@ -23,6 +23,7 @@
 #include "nightglass/services/audio.hpp"
 #include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/power.hpp"
+#include "nightglass/services/premium.hpp"
 #include "nightglass/services/update_transport.hpp"
 #include "nightglass/services/voice.hpp"
 #include "nightglass/services/voice_protocol.hpp"
@@ -53,6 +54,9 @@ static const ble_uuid128_t kInboundUuid = BLE_UUID128_INIT(
 static const ble_uuid128_t kOutboundUuid = BLE_UUID128_INIT(
     0x68, 0x67, 0x69, 0x6e, 0x2d, 0x77, 0x6f, 0x72,
     0x72, 0x4f, 0x6f, 0x6b, 0x04, 0x40, 0x3b, 0x7a);
+static const ble_uuid128_t kPremiumUuid = BLE_UUID128_INIT(
+    0x68, 0x67, 0x69, 0x6e, 0x2d, 0x77, 0x6f, 0x72,
+    0x72, 0x4f, 0x6f, 0x6b, 0x05, 0x40, 0x3b, 0x7a);
 
 ConnectivityService instance;
 portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -61,6 +65,7 @@ ConnectivitySnapshot current{};
 std::atomic<std::uint16_t> connection_handle{kNoConnection};
 std::uint16_t status_handle{};
 std::uint16_t outbound_handle{};
+std::uint16_t premium_handle{};
 std::atomic_bool outbound_subscribed{false};
 std::uint8_t own_address_type{};
 std::atomic<std::uint8_t> outbound_sequence{0};
@@ -474,6 +479,11 @@ int gatt_access(std::uint16_t conn_handle, std::uint16_t attr_handle,
     if (!resolve_authorization(conn_handle, authorization)) {
         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
     }
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attr_handle == premium_handle) {
+        const std::array<std::uint8_t, 3> capabilities{1, 1, 7};
+        return os_mbuf_append(context->om, capabilities.data(), capabilities.size()) == 0
+                   ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
     if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attr_handle == status_handle) {
         const auto snapshot = instance.snapshot();
         const std::array<std::uint8_t, 6> status{
@@ -498,6 +508,7 @@ int gatt_access(std::uint16_t conn_handle, std::uint16_t attr_handle,
         UpdateTransportCommand command{};
         const bool parsed = parse_update_transport_frame(std::span(frame.data(), length),
                                                           command);
+        command.link = UpdateTransportLink::ble;
         const bool queued = parsed && authorization_still_valid(authorization) &&
                             update_transport().enqueue(command);
         secure_wipe(&command, sizeof(command));
@@ -505,8 +516,18 @@ int gatt_access(std::uint16_t conn_handle, std::uint16_t attr_handle,
         return queued ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
     const auto opcode = length >= 2 ? frame[1] : std::uint8_t{};
+    if (opcode >= 0x70 && opcode <= 0x77) {
+        // The same pinned, encrypted connection generation gates all premium data.
+        const bool applied = authorization_still_valid(authorization) &&
+            premium_service().accept(std::span(frame.data(), length));
+        secure_wipe(frame.data(), frame.size());
+        // Late content from a superseded request is intentionally ignored;
+        // it must not turn normal back/refresh navigation into a link reset.
+        return applied || (opcode >= 0x73 && opcode <= 0x77)
+                   ? 0 : BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
     if (opcode >= static_cast<std::uint8_t>(VoiceFrameKind::request_ack) &&
-        opcode <= static_cast<std::uint8_t>(VoiceFrameKind::health)) {
+        opcode <= static_cast<std::uint8_t>(VoiceFrameKind::response_audio_end)) {
         VoiceFrame voice_frame{};
         const bool parsed = parse_voice_frame(std::span(frame.data(), length), voice_frame);
         const bool applied = parsed && authorization_still_valid(authorization) &&
@@ -543,6 +564,12 @@ const ble_gatt_chr_def gatt_characteristics[]{
      .access_cb = gatt_access,
      .flags = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN,
      .val_handle = &outbound_handle},
+    // Append, never insert before the v1 attributes: bonded phones can cache
+    // their handles across an app-only firmware update.
+    {.uuid = &kPremiumUuid.u,
+     .access_cb = gatt_access,
+     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_READ_AUTHEN,
+     .val_handle = &premium_handle},
     {}};
 
 const ble_gatt_svc_def gatt_services[]{
@@ -593,8 +620,9 @@ int gap_event(ble_gap_event *event, void *) {
             return 0;
         case BLE_GAP_EVENT_DISCONNECT: {
             invalidate_authorization();
-            update_transport().link_lost();
+            update_transport().link_lost(UpdateTransportLink::ble);
             voice_service().link_lost();
+            premium_service().clear_content();
             connection_handle = kNoConnection;
             outbound_subscribed = false;
             portENTER_CRITICAL(&state_lock);
@@ -636,10 +664,10 @@ int gap_event(ble_gap_event *event, void *) {
                 }
                 if (authorized) {
                     establish_authorization(event->enc_change.conn_handle, candidate);
-                    update_transport().link_ready();
+                    update_transport().link_ready(UpdateTransportLink::ble);
                 } else {
                     invalidate_authorization();
-                    update_transport().link_lost();
+                    update_transport().link_lost(UpdateTransportLink::ble);
                 }
                 const auto pinned_after = pinned_peer_snapshot();
                 portENTER_CRITICAL(&state_lock);
@@ -759,6 +787,10 @@ void advertise() {
     ble_gap_adv_params parameters{};
     parameters.conn_mode = BLE_GAP_CONN_MODE_UND;
     parameters.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    // Legacy advertising interval units are 0.625 ms. A 500-1000 ms window
+    // remains readily discoverable without continuous 30 ms radio bursts.
+    parameters.itvl_min = 800;
+    parameters.itvl_max = 1600;
     const auto start_result = ble_gap_adv_start(own_address_type, nullptr, BLE_HS_FOREVER,
                                                 &parameters, gap_event, nullptr);
     if (start_result == 0) {
@@ -775,6 +807,9 @@ void advertise() {
 void on_reset(int reason) {
     ESP_LOGE(kTag, "NimBLE reset: %d", reason);
     invalidate_authorization();
+    update_transport().link_lost(UpdateTransportLink::ble);
+    connection_handle = kNoConnection;
+    outbound_subscribed = false;
     portENTER_CRITICAL(&state_lock);
     current.state = CompanionLinkState::failed;
     set_detail_locked("Bluetooth stack reset");
@@ -787,6 +822,9 @@ void on_sync() {
         on_reset(BLE_HS_EINVAL);
         return;
     }
+    // NimBLE persists Service Changed for subscribed bonded peers that are
+    // currently disconnected, so Android can rediscover the appended extension.
+    ble_svc_gatt_changed(status_handle > 0 ? status_handle - 1 : 1, 0xffff);
     advertise();
 }
 
@@ -825,10 +863,10 @@ nightglass::core::Status ConnectivityService::start() {
         set_detail_locked("Bluetooth disabled");
         nightglass::core::health_registry().set(
             "connectivity", nightglass::core::HealthState::degraded,
-            "Bluetooth disabled; OTA transport unavailable");
+            "Bluetooth disabled");
         nightglass::core::health_registry().set(
-            "update_transport", nightglass::core::HealthState::failed,
-            "OTA transport requires Bluetooth");
+            "ble_update", nightglass::core::HealthState::degraded,
+            "Companion OTA transport disabled; direct USB remains available");
         return nightglass::core::Status::Ok();
     }
     const auto initialized = nimble_port_init();
@@ -839,8 +877,8 @@ nightglass::core::Status ConnectivityService::start() {
             "connectivity", nightglass::core::HealthState::failed,
             "Bluetooth initialization failed");
         nightglass::core::health_registry().set(
-            "update_transport", nightglass::core::HealthState::failed,
-            "OTA transport unavailable because Bluetooth failed");
+            "ble_update", nightglass::core::HealthState::failed,
+            "Companion OTA transport unavailable because Bluetooth failed");
         return {nightglass::core::StatusCode::degraded, "Bluetooth initialization failed"};
     }
     host_started = true;
@@ -863,12 +901,13 @@ nightglass::core::Status ConnectivityService::start() {
             "connectivity", nightglass::core::HealthState::failed,
             "Bluetooth service registration failed");
         nightglass::core::health_registry().set(
-            "update_transport", nightglass::core::HealthState::failed,
-            "OTA GATT service registration failed");
+            "ble_update", nightglass::core::HealthState::failed,
+            "Companion OTA GATT service registration failed");
         return {nightglass::core::StatusCode::degraded, "Bluetooth service registration failed"};
     }
     ble_store_config_init();
-    const auto update_transport_status = update_transport().start(notify_outbound);
+    const auto update_transport_status = update_transport().start(
+        UpdateTransportLink::ble, notify_outbound);
     if (!update_transport_status.is_ok()) {
         current.state = CompanionLinkState::failed;
         set_detail_locked("Update transport unavailable");
@@ -876,7 +915,7 @@ nightglass::core::Status ConnectivityService::start() {
             "connectivity", nightglass::core::HealthState::failed,
             "Bluetooth started without OTA transport");
         nightglass::core::health_registry().set(
-            "update_transport", nightglass::core::HealthState::failed,
+            "ble_update", nightglass::core::HealthState::failed,
             update_transport_status.detail);
         return update_transport_status;
     }
@@ -885,8 +924,8 @@ nightglass::core::Status ConnectivityService::start() {
         "connectivity", nightglass::core::HealthState::ok,
         "Authenticated companion BLE service started");
     nightglass::core::health_registry().set(
-        "update_transport", nightglass::core::HealthState::ok,
-        "Signed OTA transport worker started");
+        "ble_update", nightglass::core::HealthState::ok,
+        "Signed companion OTA transport started");
     ESP_LOGI(kTag, "Companion BLE service started; notification content logging disabled");
     return nightglass::core::Status::Ok();
 }
@@ -1029,8 +1068,16 @@ std::size_t ConnectivityService::maximum_outbound_frame() const {
     return mtu > 3 ? std::min<std::size_t>(mtu - 3U, kVoiceMaximumFrameBytes) : 0;
 }
 
+bool ConnectivityService::send_premium_frame(std::span<const std::uint8_t> frame) {
+    return frame.size() >= 2 && frame.size() <= 244 && frame[0] == 1 &&
+           frame[1] >= 0x70 && frame[1] <= 0x77 &&
+           notify_outbound(frame.data(), frame.size());
+}
+
 void ConnectivityService::set_notification_privacy(NotificationPrivacyPolicy policy,
                                                     bool unlocked) {
+    if (policy != NotificationPrivacyPolicy::show_details || !unlocked)
+        premium_service().clear_content();
     portENTER_CRITICAL(&state_lock);
     current.notification_privacy = policy;
     current.notification_details_unlocked = unlocked;

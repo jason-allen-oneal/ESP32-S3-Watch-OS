@@ -15,11 +15,15 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import dev.nightglass.companion.ble.NightglassConnectionService
 import dev.nightglass.companion.protocol.NightglassProtocol
+import dev.nightglass.companion.premium.*
 import java.util.concurrent.ConcurrentHashMap
 import java.security.SecureRandom
 
 class NightglassNotificationListener : NotificationListenerService() {
     private var mediaController: MediaController? = null
+    private val premium by lazy { PremiumPhoneContent(this, { mediaController }, { id ->
+        keys[id]?.let { key -> activeNotifications.firstOrNull { it.key == key } }
+    }) }
     private val mediaCallback = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: MediaMetadata?) { relayMedia() }
         override fun onPlaybackStateChanged(state: PlaybackState?) { relayMedia() }
@@ -29,6 +33,8 @@ class NightglassNotificationListener : NotificationListenerService() {
         relayMedia()
     }
     companion object {
+        private const val DISCORD_PACKAGE = "com.discord"
+        private const val SPOTIFY_PACKAGE = "com.spotify.music"
         @Volatile private var current: NightglassNotificationListener? = null
         private val keys = ConcurrentHashMap<UInt, String>()
         private val random = SecureRandom()
@@ -46,6 +52,10 @@ class NightglassNotificationListener : NotificationListenerService() {
             service.relayMedia()
         }
         fun syncMedia() { current?.relayMedia() }
+        fun premiumDocument(request: PremiumRequest): PremiumDocument = current?.premium?.document(request)
+            ?: PremiumDocument(request.kind, "Enable Nightglass notification access on your phone.")
+        fun premiumAction(action: PremiumAction): Int = current?.premium?.perform(action) ?: 1
+        fun clearPremium() { current?.premium?.clear() }
         fun seekMedia(deltaMs: Long): Boolean {
             val service = current ?: return false
             val controller = service.mediaController ?: return false
@@ -56,6 +66,28 @@ class NightglassNotificationListener : NotificationListenerService() {
             val target = (service.currentPosition(state)).plus(deltaMs).coerceIn(0L, duration)
             return runCatching {
                 controller.transportControls.seekTo(target)
+                service.relayMedia()
+                true
+            }.getOrDefault(false)
+        }
+        fun stopMedia(): Boolean {
+            val service = current ?: return false
+            val controller = service.mediaController ?: return false
+            return runCatching {
+                controller.transportControls.stop()
+                service.relayMedia()
+                true
+            }.getOrDefault(false)
+        }
+        fun restartMedia(): Boolean {
+            val service = current ?: return false
+            val controller = service.mediaController ?: return false
+            val state = controller.playbackState ?: return false
+            if ((state.actions and PlaybackState.ACTION_SEEK_TO) == 0L) return false
+            val resume = state.state == PlaybackState.STATE_PLAYING
+            return runCatching {
+                controller.transportControls.seekTo(0L)
+                if (resume) controller.transportControls.play()
                 service.relayMedia()
                 true
             }.getOrDefault(false)
@@ -117,6 +149,7 @@ class NightglassNotificationListener : NotificationListenerService() {
         syncCurrent()
     }
     override fun onListenerDisconnected() {
+        premium.clear()
         runCatching { getSystemService(MediaSessionManager::class.java)
             .removeOnActiveSessionsChangedListener(sessionsChanged) }
         mediaController?.unregisterCallback(mediaCallback)
@@ -130,7 +163,10 @@ class NightglassNotificationListener : NotificationListenerService() {
         val sessions = runCatching {
             manager.getActiveSessions(ComponentName(this, NightglassNotificationListener::class.java))
         }.getOrDefault(emptyList())
-        val controller = sessions.firstOrNull {
+        // A dedicated Spotify surface should follow Spotify when it is active,
+        // even if another player has a stale media session registered first.
+        val controller = sessions.firstOrNull { it.packageName == SPOTIFY_PACKAGE }
+            ?: sessions.firstOrNull {
             it.playbackState?.state == PlaybackState.STATE_PLAYING
         } ?: sessions.firstOrNull()
         if (mediaController?.sessionToken != controller?.sessionToken) {
@@ -164,9 +200,28 @@ class NightglassNotificationListener : NotificationListenerService() {
         if (sbn.packageName == packageName || sbn.isOngoing || (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
         val id = idForKey(sbn.key)
         val e = sbn.notification.extras
-        val app = runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(sbn.packageName, 0)).toString() }.getOrDefault(sbn.packageName)
-        val title = e.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
-        val body = e.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString() ?: e.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+        val app = if (sbn.packageName == DISCORD_PACKAGE) "Discord" else
+            runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(sbn.packageName, 0)).toString() }
+                .getOrDefault(sbn.packageName)
+        val rawTitle = e.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+        val rawBody = e.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
+            ?.takeIf { it.isNotBlank() }
+            ?: e.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+        val discord = if (sbn.packageName == DISCORD_PACKAGE) {
+            val messages = e.getParcelableArray(Notification.EXTRA_MESSAGES)
+                ?.mapNotNull { (it as? Bundle)?.getCharSequence(Notification.EXTRA_TEXT)?.toString() }
+                ?.lastOrNull().orEmpty()
+            val lines = e.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+                ?.lastOrNull()?.toString().orEmpty()
+            DiscordNotificationFormatter.format(
+                rawTitle,
+                e.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString().orEmpty(),
+                e.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString().orEmpty(),
+                rawBody,
+                messages.ifBlank { lines })
+        } else null
+        val title = discord?.title ?: rawTitle
+        val body = discord?.body ?: rawBody
         val category = when (sbn.notification.category) { Notification.CATEGORY_MESSAGE -> 1; Notification.CATEGORY_CALL -> 2; Notification.CATEGORY_EMAIL -> 3; Notification.CATEGORY_EVENT -> 4; Notification.CATEGORY_SOCIAL -> 5; else -> 0 }
         val replyable = sbn.notification.actions?.count {
             it.remoteInputs?.count { input -> input.allowFreeFormInput } == 1 &&

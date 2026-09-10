@@ -7,6 +7,13 @@ namespace {
 constexpr std::uint64_t kMmPerMile = 1'609'344;
 constexpr std::uint16_t kMinimumStepLengthMm = 300;
 constexpr std::uint16_t kMaximumStepLengthMm = 1'500;
+
+void format_hundredths(char *buffer, std::size_t size, std::uint64_t hundredths,
+                       const char *unit) {
+    std::snprintf(buffer, size, "%llu.%02llu %s",
+                  static_cast<unsigned long long>(hundredths / 100U),
+                  static_cast<unsigned long long>(hundredths % 100U), unit);
+}
 }
 
 void format_activity_distance(char *buffer, std::size_t size,
@@ -17,7 +24,7 @@ void format_activity_distance(char *buffer, std::size_t size,
             std::snprintf(buffer, size, "%llu m",
                           static_cast<unsigned long long>((distance_mm + 500) / 1000));
         } else {
-            std::snprintf(buffer, size, "%.2f km", distance_mm / 1'000'000.0);
+            format_hundredths(buffer, size, (distance_mm + 5'000U) / 10'000U, "km");
         }
         return;
     }
@@ -25,8 +32,14 @@ void format_activity_distance(char *buffer, std::size_t size,
         std::snprintf(buffer, size, "%llu ft",
                       static_cast<unsigned long long>((distance_mm * 10 + 1'524) / 3'048));
     } else {
-        std::snprintf(buffer, size, "%.2f mi", distance_mm /
-                      static_cast<double>(kMmPerMile));
+        auto whole_miles = distance_mm / kMmPerMile;
+        const auto remainder_mm = distance_mm % kMmPerMile;
+        auto hundredths = (remainder_mm * 100U + kMmPerMile / 2U) / kMmPerMile;
+        if (hundredths == 100U) {
+            ++whole_miles;
+            hundredths = 0;
+        }
+        format_hundredths(buffer, size, whole_miles * 100U + hundredths, "mi");
     }
 }
 
@@ -34,9 +47,13 @@ void format_step_length(char *buffer, std::size_t size,
                         std::uint16_t step_length_mm, ActivityUnits units) {
     if (!buffer || size == 0) return;
     if (units == ActivityUnits::metric) {
-        std::snprintf(buffer, size, "STEP LENGTH  %.2f m", step_length_mm / 1000.0);
+        const auto hundredths = (static_cast<unsigned>(step_length_mm) + 5U) / 10U;
+        std::snprintf(buffer, size, "STEP LENGTH  %u.%02u m", hundredths / 100U,
+                      hundredths % 100U);
     } else {
-        std::snprintf(buffer, size, "STEP LENGTH  %.1f in", step_length_mm / 25.4);
+        const auto tenths = (static_cast<unsigned>(step_length_mm) * 100U + 127U) / 254U;
+        std::snprintf(buffer, size, "STEP LENGTH  %u.%01u in", tenths / 10U,
+                      tenths % 10U);
     }
 }
 

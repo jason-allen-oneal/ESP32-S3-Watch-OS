@@ -7,6 +7,8 @@ class VoiceTransferReceiver(
     private val write: (ByteArray) -> Unit,
     private val complete: (UInt, ByteArray) -> Unit,
     private val cancelled: (UInt) -> Unit = {},
+    private val spokenReplies: (UInt, Boolean) -> Unit = { _, _ -> },
+    private val discordReply: (UInt, Boolean) -> Unit = { _, _ -> },
 ) {
     private var session = 0u
     private var expectedBytes = 0
@@ -14,6 +16,8 @@ class VoiceTransferReceiver(
     private var received = 0
     private var nextSequence = 1
     private var chunksSinceAck = 0
+    private var spokenReplyRequested = false
+    private var discordReplyRequested = false
     private var buffer: ByteArray? = null
 
     @Synchronized fun accept(request: NightglassProtocol.VoiceRequest): Boolean {
@@ -34,9 +38,17 @@ class VoiceTransferReceiver(
             write(NightglassProtocol.voiceAck(request.sessionId, 0, 0, 2))
             return false
         }
+        if (request.totalBytes !in 1..NightglassProtocol.MAX_VOICE_ENCODED_BYTES ||
+            (request.discordReply &&
+                request.totalBytes > NightglassProtocol.MAX_DISCORD_VOICE_REPLY_BYTES)) {
+            write(NightglassProtocol.voiceAck(request.sessionId, 0, 0, 3))
+            return false
+        }
         session = request.sessionId
         expectedBytes = request.totalBytes
         expectedCrc = request.crc32
+        spokenReplyRequested = request.spokenReplies
+        discordReplyRequested = request.discordReply
         received = 0
         nextSequence = 1
         chunksSinceAck = 0
@@ -84,6 +96,8 @@ class VoiceTransferReceiver(
             return false
         }
         val completedSession = session
+        val completedSpokenReply = spokenReplyRequested
+        val completedDiscordReply = discordReplyRequested
         // Transfer the receiver's only reference instead of making a second
         // multi-megabyte copy. The completion owner must wipe the array after
         // submission; linkLost/reset can no longer reach it after this point.
@@ -92,6 +106,8 @@ class VoiceTransferReceiver(
         clearState()
         try {
             write(NightglassProtocol.voiceAck(completedSession, completedBytes, 0, 0))
+            spokenReplies(completedSession, completedSpokenReply)
+            discordReply(completedSession, completedDiscordReply)
             complete(completedSession, target)
         } catch (failure: Throwable) {
             target.fill(0)
@@ -122,6 +138,8 @@ class VoiceTransferReceiver(
         received = 0
         nextSequence = 1
         chunksSinceAck = 0
+        spokenReplyRequested = false
+        discordReplyRequested = false
     }
 
     companion object {

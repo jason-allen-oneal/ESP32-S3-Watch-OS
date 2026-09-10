@@ -1,6 +1,7 @@
 package dev.nightglass.companion.phone
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -11,6 +12,7 @@ import android.media.AudioManager
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.os.BatteryManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -113,8 +115,10 @@ class PhoneIntegrationManager(
         }
     }
 
+    @SuppressLint("MissingPermission")
     fun handleCall(command: Int, sessionId: UInt, generation: Int,
                    sequence: Int): Boolean {
+        if (command == 2 && Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return false
         val action = NightglassProtocol.WatchAction.Call(
             sequence, command, sessionId, generation)
         if (!has(Manifest.permission.ANSWER_PHONE_CALLS) ||
@@ -148,6 +152,8 @@ class PhoneIntegrationManager(
             1 -> startPhoneRing()
             2 -> stopPhoneRing()
             3 -> launchCamera()
+            4 -> launchPackage(SPOTIFY_PACKAGE)
+            5 -> launchPackage(DISCORD_PACKAGE)
         }
     }
 
@@ -209,6 +215,18 @@ class PhoneIntegrationManager(
         runCatching { context.startActivity(intent) }
     }
 
+    private fun launchPackage(packageName: String) {
+        val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            ?: return
+        runCatching { context.startActivity(intent) }
+    }
+
     private fun has(permission: String) = ContextCompat.checkSelfPermission(
         context, permission) == PackageManager.PERMISSION_GRANTED
+
+    private companion object {
+        const val SPOTIFY_PACKAGE = "com.spotify.music"
+        const val DISCORD_PACKAGE = "com.discord"
+    }
 }

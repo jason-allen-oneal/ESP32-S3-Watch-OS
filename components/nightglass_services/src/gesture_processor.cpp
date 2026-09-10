@@ -12,21 +12,15 @@ constexpr std::int64_t kTwistCooldownUs = 1'500'000;
 constexpr std::int64_t kShakeCooldownUs = 3'000'000;
 constexpr std::int64_t kFlickCooldownUs = 1'200'000;
 // QMI8658 Z is negative when the fitted display faces upward.
-constexpr float kRaiseArmZ = -0.35F;
-constexpr float kRaiseFaceUpZ = -0.70F;
 constexpr float kRaiseMotionDps = 35.0F;
 constexpr float kRaiseMaximumDps = 220.0F;
 constexpr float kRaiseSettleDps = 35.0F;
-constexpr std::int64_t kRaiseWindowUs = 1'200'000;
-constexpr float kShakePeakG = 0.35F;
+constexpr std::int64_t kRaiseWindowUs = 2'000'000;
 constexpr float kShakeRearmG = 0.15F;
-constexpr float kShakeGyroDps = 70.0F;
 constexpr std::int64_t kShakeMinimumPeakGapUs = 80'000;
 constexpr std::int64_t kShakeMaximumPeakGapUs = 240'000;
 constexpr std::int64_t kShakeWindowUs = 1'000'000;
-constexpr float kTwistPeakDps = 100.0F;
 constexpr float kRotationSettleDps = 35.0F;
-constexpr float kFlickPeakDps = 180.0F;
 constexpr float kFlickBrakeDps = 60.0F;
 constexpr float kAxisDominance = 1.4F;
 constexpr std::int64_t kOppositeStartUs = 450'000;
@@ -48,7 +42,49 @@ bool gravity_band(float magnitude_g, float minimum, float maximum) noexcept {
     return magnitude_g >= minimum && magnitude_g <= maximum;
 }
 
+bool finite_profile(const GestureProfile &profile) noexcept {
+    return std::isfinite(profile.raise_face_up_g) &&
+           std::isfinite(profile.twist_peak_dps) &&
+           std::isfinite(profile.shake_peak_g) &&
+           std::isfinite(profile.shake_gyro_dps) &&
+           std::isfinite(profile.flick_peak_dps);
+}
+
 }  // namespace
+
+GestureProfile default_gesture_profile() noexcept { return {}; }
+
+GestureProfile training_gesture_profile() noexcept {
+    GestureProfile profile{};
+    profile.raise_face_up_g = 0.55F;
+    profile.twist_peak_dps = 60.0F;
+    profile.shake_peak_g = 0.20F;
+    profile.shake_gyro_dps = 45.0F;
+    profile.flick_peak_dps = 100.0F;
+    return profile;
+}
+
+bool valid_gesture_profile(const GestureProfile &profile) noexcept {
+    return profile.format_version == GestureProfile::kFormatVersion &&
+           finite_profile(profile) && profile.raise_face_up_g >= 0.50F &&
+           profile.raise_face_up_g <= 0.95F &&
+           profile.twist_peak_dps >= 55.0F && profile.twist_peak_dps <= 200.0F &&
+           profile.shake_peak_g >= 0.18F && profile.shake_peak_g <= 0.70F &&
+           profile.shake_gyro_dps >= 40.0F && profile.shake_gyro_dps <= 150.0F &&
+           profile.flick_peak_dps >= 90.0F && profile.flick_peak_dps <= 320.0F &&
+           (profile.calibrated == 0 || profile.calibrated == 1);
+}
+
+GestureProcessor::GestureProcessor(const GestureProfile &profile) noexcept {
+    set_profile(profile);
+}
+
+void GestureProcessor::set_profile(const GestureProfile &profile) noexcept {
+    profile_ = valid_gesture_profile(profile) ? profile : default_gesture_profile();
+    reset_transient_state();
+    last_sample_us_ = 0;
+    cooldown_until_us_ = 0;
+}
 
 GestureProcessorOutput GestureProcessor::process(const GestureSample &sample) noexcept {
     GestureProcessorOutput output{};
@@ -83,7 +119,12 @@ GestureProcessorOutput GestureProcessor::process(const GestureSample &sample) no
         raise_confirm_samples_ = 0;
         raise_rotation_seen_ = false;
     } else if (!raise_armed_) {
-        if (sample.accel_z_g >= kRaiseArmZ && gravity_band(accel_magnitude, 0.75F, 1.25F)) {
+        // Arm from any meaningfully less face-up pose than the learned finish.
+        // A fixed near-vertical gate rejected ordinary arm-down starting poses
+        // on the fitted watch even though their final face-up pose was clear.
+        const float raise_arm_z = -profile_.raise_face_up_g + 0.18F;
+        if (sample.accel_z_g >= raise_arm_z &&
+            gravity_band(accel_magnitude, 0.75F, 1.25F)) {
             if (++raise_arm_samples_ >= 8) {
                 raise_armed_ = true;
                 raise_armed_at_us_ = sample.sampled_at_us;
@@ -106,11 +147,12 @@ GestureProcessorOutput GestureProcessor::process(const GestureSample &sample) no
         } else if (!raise_rotation_seen_ && pitch_roll < kRaiseMotionDps) {
             raise_rotation_samples_ = 0;
         }
-        if (raise_rotation_seen_ && sample.accel_z_g <= kRaiseFaceUpZ &&
+        const float raise_face_up_z = -profile_.raise_face_up_g;
+        if (raise_rotation_seen_ && sample.accel_z_g <= raise_face_up_z &&
             gravity_band(accel_magnitude, 0.75F, 1.25F) &&
             gyro_magnitude < kRaiseSettleDps) {
             ++raise_confirm_samples_;
-        } else if (sample.accel_z_g > kRaiseFaceUpZ + 0.12F ||
+        } else if (sample.accel_z_g > raise_face_up_z + 0.12F ||
                    gyro_magnitude >= kRaiseSettleDps) {
             raise_confirm_samples_ = 0;
         }
@@ -130,8 +172,8 @@ GestureProcessorOutput GestureProcessor::process(const GestureSample &sample) no
     if (sample.gyro_calibrated && acceleration_delta <= kShakeRearmG) {
         shake_armed_ = true;
     }
-    if (sample.gyro_calibrated && acceleration_delta >= kShakePeakG &&
-        gyro_magnitude >= kShakeGyroDps &&
+    if (sample.gyro_calibrated && acceleration_delta >= profile_.shake_peak_g &&
+        gyro_magnitude >= profile_.shake_gyro_dps &&
         shake_armed_) {
         const float acceleration_axes[3]{sample.accel_x_g, sample.accel_y_g,
                                          sample.accel_z_g};
@@ -166,7 +208,12 @@ GestureProcessorOutput GestureProcessor::process(const GestureSample &sample) no
     const float dominant_value = axes[dominant_axis];
     const float dominant_strength = std::fabs(dominant_value);
     const float other_strength = std::fabs(axes[1U - dominant_axis]);
-    const bool dominant = dominant_strength >= kTwistPeakDps &&
+    // Rotation capture is shared by twist and flick. Arm at the less sensitive
+    // of their two learned gates, then apply the gesture-specific gate when
+    // classifying the completed shape.
+    const float rotation_arm_dps =
+        std::min(profile_.twist_peak_dps, profile_.flick_peak_dps);
+    const bool dominant = dominant_strength >= rotation_arm_dps &&
                           dominant_strength >= other_strength * kAxisDominance;
 
     if (sample.gyro_calibrated && !rotation_active_) {
@@ -219,15 +266,16 @@ GestureProcessorOutput GestureProcessor::process(const GestureSample &sample) no
     if (rotation_active_ && settle_samples_ >= 3) {
         const auto total = sample.sampled_at_us - rotation_started_us_;
         const auto brake_delay = opposite_started_us_ - rotation_first_ended_us_;
-        const bool flick = rotation_strength_ >= kFlickPeakDps &&
+        const bool flick = rotation_strength_ >= profile_.flick_peak_dps &&
                            opposite_strength_ >= kFlickBrakeDps &&
                            brake_delay <= kFlickBrakeWindowUs &&
                            opposite_peak_samples_ <= 2 &&
                            rotation_accel_delta_ >= 0.12F &&
                            rotation_accel_delta_ <= 0.80F && total <= 400'000;
         if (flick) return emit(GestureKind::flick, rotation_strength_, sample.sampled_at_us);
-        const bool twist = opposite_peak_samples_ >= 2 &&
-                           opposite_strength_ >= kTwistPeakDps &&
+        const bool twist = rotation_strength_ >= profile_.twist_peak_dps &&
+                           opposite_peak_samples_ >= 2 &&
+                           opposite_strength_ >= profile_.twist_peak_dps &&
                            brake_delay >= 120'000 && total >= 320'000 &&
                            total <= kTwistWindowUs;
         if (twist) {
@@ -281,7 +329,10 @@ void GestureProcessor::reset_transient_state() noexcept {
     opposite_started_us_ = 0;
 }
 
-void GestureProcessor::reset() noexcept { *this = {}; }
+void GestureProcessor::reset() noexcept {
+    const auto retained_profile = profile_;
+    *this = GestureProcessor(retained_profile);
+}
 
 const char *gesture_name(GestureKind kind) noexcept {
     switch (kind) {

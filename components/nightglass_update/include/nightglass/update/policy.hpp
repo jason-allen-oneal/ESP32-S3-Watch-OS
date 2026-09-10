@@ -6,6 +6,14 @@ namespace nightglass::update {
 
 inline constexpr std::uint32_t kUnhealthyBootLimit = 3;
 inline constexpr std::uint32_t kHealthGateSeconds = 60;
+inline constexpr std::int64_t kTouchHealthMaximumAgeUs = 25'000'000;
+
+[[nodiscard]] constexpr bool health_evidence_fresh(
+    std::int64_t now_us, std::int64_t last_success_us,
+    std::int64_t maximum_age_us) noexcept {
+    return maximum_age_us > 0 && last_success_us > 0 &&
+           last_success_us <= now_us && now_us - last_success_us <= maximum_age_us;
+}
 
 struct BootDecision {
     bool safe_mode{false};

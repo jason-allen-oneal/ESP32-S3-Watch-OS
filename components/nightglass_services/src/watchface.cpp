@@ -4,6 +4,7 @@
 
 #include "esp_log.h"
 #include "nvs.h"
+#include "nightglass/services/premium.hpp"
 
 namespace nightglass::services {
 
@@ -17,13 +18,13 @@ constexpr FaceTextSlot kRevenantTextSlots[]{
      FaceTextAlign::center, FaceColorRole::accent, nullptr},
     {FaceField::fixed_text, {160, 51, 90, 18}, FaceTextStyle::caption_14,
      FaceTextAlign::center, FaceColorRole::secondary, "BATTERY"},
-    {FaceField::steps_icon, {44, 96, 68, 18}, FaceTextStyle::caption_14,
+    {FaceField::steps_icon, {56, 100, 44, 28}, FaceTextStyle::caption_14,
      FaceTextAlign::center, FaceColorRole::accent, nullptr},
-    {FaceField::steps, {44, 117, 68, 42}, FaceTextStyle::body_16,
+    {FaceField::steps, {44, 132, 68, 26}, FaceTextStyle::body_16,
      FaceTextAlign::center, FaceColorRole::primary, nullptr},
-    {FaceField::weather, {298, 113, 68, 39}, FaceTextStyle::body_16,
+    {FaceField::weather, {298, 132, 68, 26}, FaceTextStyle::body_16,
      FaceTextAlign::center, FaceColorRole::primary, nullptr},
-    {FaceField::weather_icon, {310, 152, 44, 28}, FaceTextStyle::caption_14,
+    {FaceField::weather_icon, {310, 100, 44, 28}, FaceTextStyle::caption_14,
      FaceTextAlign::center, FaceColorRole::accent, nullptr},
     {FaceField::fixed_text, {42, 198, 108, 18}, FaceTextStyle::caption_14,
      FaceTextAlign::center, FaceColorRole::accent, "DISTANCE"},
@@ -74,13 +75,14 @@ constexpr FacePack kPacks[]{
          complication_connectivity,
      {0x000000, 0x101413, 0x252D29, 0xF3F7F4, 0x829087, 0xA8FF32, 0x0B3A24},
      FaceAsset::revenant_grid_v2,
-     {ChromeTheme::revenant, FaceAsset::revenant_grid_v2, 36}, kRevenantTextSlots,
+     {ChromeTheme::revenant, FaceAsset::revenant_shell_v1, 64}, kRevenantTextSlots,
      static_cast<std::uint8_t>(std::size(kRevenantTextSlots)), kRevenantActions,
      static_cast<std::uint8_t>(std::size(kRevenantActions))},
 };
 
 WatchFaceService instance;
 std::uint8_t selected_id = 1;
+FacePack selected_view = kPacks[1];
 
 const FacePack *find_pack(std::uint8_t id) {
     for (const auto &pack : kPacks) {
@@ -108,13 +110,21 @@ nightglass::core::Status WatchFaceService::start() {
         ESP_LOGW(kTag, "Face selection unavailable: %s", esp_err_to_name(opened));
         return {nightglass::core::StatusCode::degraded, "face selection persistence unavailable"};
     }
+    refresh_profile();
     ESP_LOGI(kTag, "Selected face: %s", selected().slug);
     return nightglass::core::Status::Ok();
 }
 
 const FacePack &WatchFaceService::selected() const {
-    const auto *pack = find_pack(selected_id);
-    return pack ? *pack : kPacks[0];
+    return selected_view;
+}
+
+void WatchFaceService::refresh_profile() {
+    const auto profile = premium_service().profile();
+    const auto *pack = find_pack(profile.face);
+    selected_view = pack ? *pack : kPacks[0];
+    selected_view.palette.accent = profile.accent;
+    selected_view.palette.accent_dim = ((profile.accent & 0xfcfcfc) >> 2);
 }
 
 const FacePack *WatchFaceService::packs() const { return kPacks; }
@@ -123,13 +133,11 @@ std::size_t WatchFaceService::pack_count() const { return std::size(kPacks); }
 
 bool WatchFaceService::select(std::uint8_t id) {
     if (!find_pack(id)) return false;
-    nvs_handle_t handle{};
-    if (nvs_open(kNamespace, NVS_READWRITE, &handle) != ESP_OK) return false;
-    const auto written = nvs_set_u8(handle, kSelectedKey, id);
-    const auto committed = written == ESP_OK ? nvs_commit(handle) : written;
-    nvs_close(handle);
-    if (committed != ESP_OK) return false;
+    auto profile = premium_service().profile();
+    profile.face = id;
+    if (!premium_service().save(profile)) return false;
     selected_id = id;
+    refresh_profile();
     ESP_LOGI(kTag, "Selected face: %s", selected().slug);
     return true;
 }

@@ -47,8 +47,15 @@ separate system overlay layer is reserved for future modal UI.
 
 The notification center lists the bounded companion cache, distinguishes live
 and offline-cached state, and exposes firmware-owned mark-read and dismiss
-actions. Quick Settings, glance tiles, edge gestures, and side-button navigation
-remain roadmap behavior until their services and input contracts exist.
+actions. Quick Settings opens from the top-edge swipe, notifications open from
+the bottom-edge swipe, and either horizontal edge returns to the previous route
+without stealing normal in-app scrolling. A horizontal swipe on Home opens the
+Context Deck: five live, vertically scrollable cards for the next agenda item,
+movement, weather, media, and inbox/phone state. Cards keep a readable title and
+wrapped detail instead of compressing the full stack into the panel's bottom
+safe area. The short side-button press returns to Home from an app and opens the
+launcher from Home; long press remains reserved for the future system
+power/recovery confirmation menu.
 
 ## Classic design tokens
 
@@ -73,6 +80,12 @@ Users may change watch-face/theme package, complication assignments, launcher
 favorites, glance-tile order, quick controls, handedness, text scale, wake
 gestures, sound/haptic profile, AOD, and notification privacy without flashing.
 
+Gesture setup is an on-watch guided flow rather than a generic sensitivity
+slider. It visibly separates stationary sensor zeroing from intentional motion
+examples, counts each accepted repetition, gives a bounded retry after a missed
+sample, and does not replace the saved profile until a clean quiet check passes.
+Leaving the screen cancels the unfinished run and retains the prior profile.
+
 Face and shell chrome are one validated package selection so application routes
 cannot drift away from the active face. Packages have a format version,
 resource limits, compatible complications, and enum-allowlisted layouts,
@@ -83,12 +96,18 @@ resolves to the built-in Classic face and cyan shell.
 Format 5 is implemented as a built-in manifest registry with persistent NVS
 selection. Nightglass Classic is the fallback. Revenant Grid v2 adds a
 black/gunmetal shell, acid-green accents and borders, themed pressed states,
-and its compiled background at low opacity behind all non-home routes and alert
-overlays. Semantic healthy, warning, and error colors remain green, amber, and
+and a dedicated Quiet Shell background at low opacity behind secondary routes,
+Quick Settings, premium sheets, and alert overlays. The mechanical-skull artwork
+remains on Home; Home/AOD behavior is unchanged. Quiet Shell uses a fixed
+410×502 RGB565 image embedded in the application, not the external asset volume.
+Semantic healthy, warning, and error colors remain green, amber, and
 red. Its non-overlapping safe-area touch map is declarative package data; the
 shell maps only allowlisted actions to system navigation. Declarative weather
-icon fields render bounded native shapes rather than font glyphs. External filesystem loading remains deferred until manifest validation
-and decoded-asset limits are enforced.
+icon fields render bounded native shapes rather than font glyphs. Arbitrary-asset
+filesystem loading remains deferred. The premium extension now imports bounded
+JSON profiles through the phone: Personal complication assignments, palette,
+Context Deck order and display flags, using only supported layouts/resources.
+See [Premium build 4/5/6](PREMIUM_BUILD_456.md) for scope and physical acceptance.
 
 ## Release UX gates
 

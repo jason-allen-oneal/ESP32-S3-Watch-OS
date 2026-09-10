@@ -17,9 +17,19 @@ enum class VoiceTurnState : std::uint8_t {
     uploading,
     processing,
     complete,
+    speaking,
     cancelled,
     failed,
 };
+
+enum class VoiceDestination : std::uint8_t {
+    openclaw,
+    discord_voice_note,
+};
+
+// Discord voice-note handoff is intentionally shorter than the general
+// OpenClaw recorder so a share attachment stays quick to move and review.
+inline constexpr std::uint16_t kVoiceMaximumDiscordReplySeconds = 60;
 
 struct VoiceSettings {
     std::uint16_t maximum_duration_seconds{kVoiceDefaultDurationSeconds};
@@ -43,6 +53,8 @@ struct VoiceSnapshot {
     VoiceHealthState health{VoiceHealthState::unavailable};
     std::uint32_t health_sequence{0};
     std::uint32_t health_age_seconds{0};
+    bool spoken_replies{false};
+    bool discord_reply{false};
     VoiceSettings settings{};
     std::array<char, kVoiceMaximumResponseBytes + 1> response{};
 };
@@ -50,7 +62,8 @@ struct VoiceSnapshot {
 class VoiceService {
 public:
     nightglass::core::Status start();
-    nightglass::core::Status begin_capture();
+    nightglass::core::Status begin_capture(
+        VoiceDestination destination = VoiceDestination::openclaw);
     void finish_capture();
     void cancel();
     void link_lost();
@@ -61,6 +74,7 @@ public:
     nightglass::core::Status update_settings(const VoiceSettings &settings);
     [[nodiscard]] bool quiescent() const;
     bool accept_frame(const VoiceFrame &frame);
+    nightglass::core::Status update_spoken_replies(bool enabled);
     [[nodiscard]] VoiceSnapshot snapshot() const;
 };
 

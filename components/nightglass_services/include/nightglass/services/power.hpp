@@ -8,6 +8,8 @@
 
 namespace nightglass::services {
 
+using PowerStateObserver = void (*)(nightglass::core::PowerState state, void *context);
+
 struct PowerSettings {
     std::uint8_t active_brightness{30};
     std::uint8_t dim_brightness{8};
@@ -44,6 +46,7 @@ public:
     nightglass::core::Status start();
     void note_activity(nightglass::core::WakeReason reason = nightglass::core::WakeReason::touch);
     nightglass::core::Status update_settings(const PowerSettings &settings);
+    void set_state_observer(PowerStateObserver observer, void *context);
     [[nodiscard]] PowerSnapshot snapshot() const;
 };
 

@@ -48,7 +48,7 @@ class VoiceEventFence(private val owner: VoiceTurnOwner) {
 }
 
 /** Dedicated, atomic, GATT-write-acknowledged watch response transport. */
-class VoiceResponseQueue(private val capacity: Int = 24) {
+class VoiceResponseQueue(private val capacity: Int = 768) {
     data class Entry(
         val frame: ByteArray,
         val owner: VoiceTurnOwner?,
@@ -93,6 +93,71 @@ class VoiceResponseQueue(private val capacity: Int = 24) {
         }
         frames.add(Entry(NightglassProtocol.voiceResponseEnd(
             owner.watchSession, responseId, payload.size, crc), owner, true))
+        payload.fill(0)
+        if (sizeLocked() + frames.size > capacity || frames.any { it.frame.size > maximumPayload }) {
+            frames.forEach { it.frame.fill(0) }
+            return false
+        }
+        frames.forEach(queued::add)
+        return true
+    }
+
+    /** Atomically queues text followed by an optional bounded spoken reply. */
+    @Synchronized fun enqueueResponseWithAudio(
+        owner: VoiceTurnOwner,
+        responseId: UInt,
+        audioResponseId: UInt,
+        text: String,
+        audio: ByteArray,
+        maximumPayload: Int,
+    ): Boolean {
+        if (responseId == 0u || audioResponseId == 0u || responseId == audioResponseId ||
+            maximumPayload < 20 || hasOwnerLocked() ||
+            audio.isEmpty() || audio.size > NightglassProtocol.MAX_SPOKEN_REPLY_BYTES) return false
+        val payload = asciiForWatch(text)
+        if (payload.isEmpty()) return false
+        val maximumChunk = minOf(232, maximumPayload - 12)
+        if (maximumChunk <= 0) {
+            payload.fill(0)
+            return false
+        }
+        val textCrc = VoiceTransferReceiver.crc32(payload)
+        val audioCrc = VoiceTransferReceiver.crc32(audio)
+        val frames = ArrayList<Entry>(
+            5 + (payload.size + maximumChunk - 1) / maximumChunk +
+                (audio.size + maximumChunk - 1) / maximumChunk)
+        frames.add(Entry(NightglassProtocol.voiceResponseBegin(
+            owner.watchSession, responseId, payload.size, textCrc), owner, false))
+        var offset = 0
+        while (offset < payload.size) {
+            val end = minOf(offset + maximumChunk, payload.size)
+            val chunk = payload.copyOfRange(offset, end)
+            frames.add(Entry(NightglassProtocol.voiceResponseData(
+                owner.watchSession, responseId, offset, chunk), owner, false))
+            chunk.fill(0)
+            offset = end
+        }
+        frames.add(Entry(NightglassProtocol.voiceResponseEnd(
+            owner.watchSession, responseId, payload.size, textCrc), owner, false))
+        frames.add(Entry(NightglassProtocol.voiceAudioResponseBegin(
+            owner.watchSession, audioResponseId, audio.size, audioCrc), owner, false))
+        val audioMaximumChunk = minOf(230, maximumPayload - 14)
+        if (audioMaximumChunk <= 0) {
+            payload.fill(0)
+            frames.forEach { it.frame.fill(0) }
+            return false
+        }
+        offset = 0
+        while (offset < audio.size) {
+            val end = minOf(offset + audioMaximumChunk, audio.size)
+            val chunk = audio.copyOfRange(offset, end)
+            frames.add(Entry(NightglassProtocol.voiceAudioResponseData(
+                owner.watchSession, audioResponseId, offset, chunk), owner, false))
+            chunk.fill(0)
+            offset = end
+        }
+        frames.add(Entry(NightglassProtocol.voiceAudioResponseEnd(
+            owner.watchSession, audioResponseId, audio.size, audioCrc), owner, true))
         payload.fill(0)
         if (sizeLocked() + frames.size > capacity || frames.any { it.frame.size > maximumPayload }) {
             frames.forEach { it.frame.fill(0) }

@@ -225,6 +225,7 @@ public:
     bool update_quiet_hours(const QuietHoursSettings &settings);
     bool snooze_alarm(std::uint16_t minutes = 10);
     bool set_timer_duration(std::uint32_t seconds);
+    bool start_timer_if_idle(std::uint32_t seconds);
     bool toggle_timer();
     bool reset_timer();
     bool toggle_stopwatch();

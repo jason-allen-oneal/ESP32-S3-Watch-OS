@@ -18,7 +18,7 @@ enum class NotificationCategory : std::uint8_t {
 
 enum class MediaCommand : std::uint8_t {
     play_pause = 1, next = 2, previous = 3, volume_up = 4, volume_down = 5,
-    seek_backward = 6, seek_forward = 7,
+    seek_backward = 6, seek_forward = 7, stop = 8, restart = 9,
 };
 
 enum class CallCommand : std::uint8_t {
@@ -27,7 +27,13 @@ enum class CallCommand : std::uint8_t {
     mute = 3,
     unmute = 4,
 };
-enum class PhoneCommand : std::uint8_t { ring_start = 1, ring_stop = 2, camera = 3 };
+enum class PhoneCommand : std::uint8_t {
+    ring_start = 1,
+    ring_stop = 2,
+    camera = 3,
+    launch_spotify = 4,
+    launch_discord = 5,
+};
 
 struct CompanionNotification {
     std::uint32_t id{0};

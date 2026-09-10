@@ -59,6 +59,12 @@ int main() {
     data[1] = kUpdateFinishOpcode;
     assert(!parse_update_transport_frame(data, command));
 
+    data[1] = kUpdateDataOpcode;
+    assert(parse_usb_update_transport_frame(data, command));
+    assert(command.kind == UpdateTransportCommandKind::data);
+    assert(command.data_size == kUsbUpdateDataMaximum);
+    assert(command.offset == 123);
+
     std::array<std::uint8_t, 10> control{1, kUpdateStatusQueryOpcode, 1, 0, 0, 0,
                                          0, 0, 0, 0};
     assert(parse_update_transport_frame(control, command));
@@ -67,9 +73,10 @@ int main() {
     assert(!parse_update_transport_frame(control, command));
 
     const auto status = encode_update_transport_status(
-        {0x9abcdef012345607ULL, 2, 1, 0, 4096, 230});
+        {0x9abcdef012345607ULL, 2, 1, 0, kUpdateStatusQueryOpcode, 4096, 230});
     assert(status[0] == 1 && status[1] == kUpdateStatusOpcode && status[2] == 7 &&
            status[6] == 0xf0 && status[9] == 0x9a);
+    assert(status[13] == kUpdateStatusQueryOpcode);
     assert(status[14] == 0 && status[15] == 0x10 && status[18] == 0xe6);
     assert(update_stream_position_matches(0x9abcdef012345678ULL,
                                           0x9abcdef012345678ULL, 230, 230,

@@ -15,6 +15,7 @@
 #include "nightglass/services/activity_processor.hpp"
 #include "nightglass/services/clock.hpp"
 #include "nightglass/services/connectivity.hpp"
+#include "nightglass/services/gesture_calibration.hpp"
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/gesture_processor.hpp"
 #include "nightglass/services/gesture_policy.hpp"
@@ -27,7 +28,8 @@ namespace {
 
 constexpr char kTag[] = "nightglass_activity";
 constexpr char kNvsNamespace[] = "ng_activity";
-constexpr TickType_t kPeriod = pdMS_TO_TICKS(40);
+constexpr TickType_t kActivePeriod = pdMS_TO_TICKS(40);
+constexpr TickType_t kBlankPeriod = pdMS_TO_TICKS(100);
 constexpr std::int64_t kStaleAfterUs = 2'000'000;
 constexpr std::int64_t kPeriodicSaveUs = 300'000'000;
 constexpr std::int64_t kSaveRetryBackoffUs = 30'000'000;
@@ -37,7 +39,13 @@ constexpr std::uint16_t kMaximumStepLengthMm = 1'500;
 constexpr std::uint32_t kMinimumGoal = 500;
 constexpr std::uint32_t kMaximumGoal = 100'000;
 
-enum class CommandType : std::uint8_t { settings, reset_today };
+enum class CommandType : std::uint8_t {
+    settings,
+    reset_today,
+    gesture_calibration_start,
+    gesture_calibration_capture,
+    gesture_calibration_cancel,
+};
 struct Command {
     CommandType type{};
     ActivitySettings settings{};
@@ -50,6 +58,7 @@ portMUX_TYPE snapshot_mux = portMUX_INITIALIZER_UNLOCKED;
 ActivitySnapshot current{};
 ActivityProcessor processor;
 GestureProcessor gesture_processor;
+GestureCalibrator gesture_calibrator;
 #if CONFIG_NIGHTGLASS_GESTURE_BOOT_TRACE
 constexpr std::int64_t kGestureTraceDurationUs = 120'000'000;
 std::int64_t gesture_trace_started_us = 0;
@@ -91,7 +100,7 @@ bool save_state() {
     nvs_handle_t handle{};
     esp_err_t result = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
     if (result != ESP_OK) return false;
-    if ((result = nvs_set_u8(handle, "version", 2)) == ESP_OK &&
+    if ((result = nvs_set_u8(handle, "version", 3)) == ESP_OK &&
         // Retain the legacy NVS key so existing calibrated values migrate in place.
         (result = nvs_set_u16(handle, "stride_mm", copy.settings.step_length_mm)) == ESP_OK &&
         (result = nvs_set_u8(handle, "units", static_cast<std::uint8_t>(copy.settings.units))) == ESP_OK &&
@@ -100,6 +109,8 @@ bool save_state() {
         (result = nvs_set_u8(handle, "g_twist", copy.settings.double_twist_quick_settings)) == ESP_OK &&
         (result = nvs_set_u8(handle, "g_shake", copy.settings.shake_notifications)) == ESP_OK &&
         (result = nvs_set_u8(handle, "g_flick", copy.settings.flick_media_next)) == ESP_OK &&
+        (result = nvs_set_blob(handle, "g_profile", &copy.gesture_profile,
+                               sizeof(copy.gesture_profile))) == ESP_OK &&
         (result = nvs_set_u32(handle, "steps", copy.steps_today)) == ESP_OK &&
         (result = nvs_set_i64(handle, "local_day", day_state.tracked_local_day)) == ESP_OK) {
         result = nvs_commit(handle);
@@ -159,6 +170,12 @@ void load_state() {
         if (nvs_get_u8(handle, "g_flick", &enabled) == ESP_OK) {
             loaded.settings.flick_media_next = enabled != 0;
         }
+        GestureProfile profile{};
+        std::size_t profile_size = sizeof(profile);
+        if (nvs_get_blob(handle, "g_profile", &profile, &profile_size) == ESP_OK &&
+            profile_size == sizeof(profile) && valid_gesture_profile(profile)) {
+            loaded.gesture_profile = profile;
+        }
         if (nvs_get_u32(handle, "steps", &value) == ESP_OK) loaded.steps_today = value;
         if (nvs_get_i64(handle, "local_day", &local_day) == ESP_OK) day_state.tracked_local_day = local_day;
         nvs_close(handle);
@@ -168,6 +185,7 @@ void load_state() {
     if (!valid_settings(loaded.settings)) loaded.settings = {};
     loaded.persistence_ok = persistence_ok;
     loaded.calibration_required = ActivityProcessor::kWarmupSamples;
+    loaded.gesture_calibration = gesture_calibrator.snapshot(esp_timer_get_time());
     update_derived(loaded);
     current = loaded;
     persisted_steps = loaded.steps_today;
@@ -268,29 +286,61 @@ void worker(void *) {
     TickType_t wake = xTaskGetTickCount();
     std::int64_t last_motion_sample_us = 0;
     std::int64_t last_gesture_motion_sample_us = 0;
+    std::int64_t last_calibration_keepawake_us = 0;
     bool readiness_announced = false;
     while (true) {
         const auto now_us = esp_timer_get_time();
         Command command{};
         bool force_save = false;
         while (xQueueReceive(command_queue, &command, 0) == pdTRUE) {
-            portENTER_CRITICAL(&snapshot_mux);
             if (command.type == CommandType::settings && valid_settings(command.settings)) {
+                portENTER_CRITICAL(&snapshot_mux);
                 current.settings = command.settings;
                 update_derived(current);
+                ++current.sequence;
+                portEXIT_CRITICAL(&snapshot_mux);
                 dirty = true;
                 priority_dirty = true;
                 force_save = true;
             } else if (command.type == CommandType::reset_today) {
+                portENTER_CRITICAL(&snapshot_mux);
                 current.steps_today = 0;
                 current.last_step_us = 0;
                 update_derived(current);
+                ++current.sequence;
+                portEXIT_CRITICAL(&snapshot_mux);
                 dirty = true;
                 priority_dirty = true;
                 force_save = true;
+            } else if (command.type == CommandType::gesture_calibration_start) {
+                gesture_calibrator.start(now_us);
+                gesture_processor.reset();
+                portENTER_CRITICAL(&snapshot_mux);
+                current.gesture_calibration = gesture_calibrator.snapshot(now_us);
+                ++current.sequence;
+                portEXIT_CRITICAL(&snapshot_mux);
+                ESP_LOGI(kTag, "Guided gesture calibration started");
+            } else if (command.type == CommandType::gesture_calibration_capture) {
+                if (gesture_calibrator.request_capture(now_us)) {
+                    portENTER_CRITICAL(&snapshot_mux);
+                    current.gesture_calibration = gesture_calibrator.snapshot(now_us);
+                    ++current.sequence;
+                    portEXIT_CRITICAL(&snapshot_mux);
+                }
+            } else if (command.type == CommandType::gesture_calibration_cancel) {
+                gesture_calibrator.cancel();
+                portENTER_CRITICAL(&snapshot_mux);
+                current.gesture_calibration = gesture_calibrator.snapshot(now_us);
+                ++current.sequence;
+                portEXIT_CRITICAL(&snapshot_mux);
+                ESP_LOGI(kTag, "Guided gesture calibration cancelled; retained prior profile");
             }
-            ++current.sequence;
-            portEXIT_CRITICAL(&snapshot_mux);
+        }
+
+        if (gesture_calibrator.active() &&
+            now_us - last_calibration_keepawake_us >= 5'000'000) {
+            power_service().note_activity(nightglass::core::WakeReason::unknown);
+            last_calibration_keepawake_us = now_us;
         }
 
         const auto clock = clock_service().snapshot();
@@ -338,7 +388,7 @@ void worker(void *) {
             const bool external_power = hardware.battery.charging ||
                                         usb_serial_jtag_is_connected();
             const bool screen_inactive = power.state != nightglass::core::PowerState::active;
-            const auto gesture = gesture_processor.process({
+            const GestureSample gesture_sample{
                 .accel_x_g = motion.accel_x_g,
                 .accel_y_g = motion.accel_y_g,
                 .accel_z_g = motion.accel_z_g,
@@ -351,10 +401,70 @@ void worker(void *) {
                 .sampled_at_us = motion.sampled_at_us,
                 .allow_raise = screen_inactive,
                 .gyro_calibrated = motion.gyro_calibrated,
-            });
+            };
+            if (gesture_calibrator.active()) {
+                const auto previous_calibration = gesture_calibrator.snapshot(now_us);
+                gesture_calibrator.process(gesture_sample);
+                GestureProfile completed_profile{};
+                const bool completed =
+                    gesture_calibrator.take_completed_profile(completed_profile);
+                const auto calibration = gesture_calibrator.snapshot(now_us);
+                if (completed) {
+                    gesture_processor.set_profile(completed_profile);
+                    dirty = true;
+                    priority_dirty = true;
+                    force_save = true;
+                    ESP_LOGI(kTag,
+                             "Gesture profile calibrated: raise=%.2fg twist=%.1fdps "
+                             "shake=%.2fg/%.1fdps flick=%.1fdps",
+                             completed_profile.raise_face_up_g,
+                             completed_profile.twist_peak_dps,
+                             completed_profile.shake_peak_g,
+                             completed_profile.shake_gyro_dps,
+                             completed_profile.flick_peak_dps);
+                } else if (calibration.stage != previous_calibration.stage) {
+                    if (previous_calibration.stage == GestureCalibrationStage::stationary) {
+                        ESP_LOGI(kTag, "Gesture calibration sensor zero complete; advanced to %s",
+                                 gesture_calibration_stage_name(calibration.stage));
+                    } else {
+                        ESP_LOGI(
+                            kTag,
+                            "Gesture calibration accepted %u/%u for %s; advanced to %s",
+                            static_cast<unsigned>(previous_calibration.repetitions + 1U),
+                            static_cast<unsigned>(previous_calibration.repetitions_required),
+                            gesture_calibration_stage_name(previous_calibration.stage),
+                            gesture_calibration_stage_name(calibration.stage));
+                    }
+                } else if (calibration.last_result == GestureCalibrationResult::sample_ok &&
+                           calibration.repetitions != previous_calibration.repetitions) {
+                    ESP_LOGI(kTag, "Gesture calibration accepted %u/%u for %s",
+                             static_cast<unsigned>(calibration.repetitions),
+                             static_cast<unsigned>(calibration.repetitions_required),
+                             gesture_calibration_stage_name(calibration.stage));
+                } else if (calibration.last_result ==
+                               GestureCalibrationResult::sample_missed &&
+                           calibration.attempts != previous_calibration.attempts) {
+                    ESP_LOGW(kTag, "Gesture calibration missed %s attempt %u",
+                             gesture_calibration_stage_name(calibration.stage),
+                             static_cast<unsigned>(calibration.attempts));
+                } else if (calibration.last_result ==
+                               GestureCalibrationResult::quiet_retry &&
+                           calibration.attempts != previous_calibration.attempts) {
+                    ESP_LOGW(kTag,
+                             "Gesture calibration quiet check found %u false triggers; retrying",
+                             static_cast<unsigned>(calibration.quiet_false_positives));
+                }
+                portENTER_CRITICAL(&snapshot_mux);
+                if (completed) current.gesture_profile = completed_profile;
+                current.gesture_calibration = calibration;
+                ++current.sequence;
+                portEXIT_CRITICAL(&snapshot_mux);
+            } else {
+                const auto gesture = gesture_processor.process(gesture_sample);
+                publish_gesture(gesture, now_us, external_power, recent_physical_input,
+                                screen_inactive);
+            }
             last_gesture_motion_sample_us = motion.sampled_at_us;
-            publish_gesture(gesture, now_us, external_power, recent_physical_input,
-                            screen_inactive);
 #if CONFIG_NIGHTGLASS_GESTURE_BOOT_TRACE
             if (motion.gyro_calibrated && !gesture_trace_complete) {
                 if (gesture_trace_started_us == 0) {
@@ -376,21 +486,11 @@ void worker(void *) {
             }
 #endif
         }
-        if (motion.valid && motion.gyro_calibrated &&
-            motion.sampled_at_us > last_motion_sample_us) {
+        if (motion.valid && motion.sampled_at_us > last_motion_sample_us) {
             const auto output = processor.process({motion.accel_x_g, motion.accel_y_g,
                                                    motion.accel_z_g, motion.sampled_at_us});
             last_motion_sample_us = motion.sampled_at_us;
             publish_processor(output, motion, now_us);
-        } else if (motion.present && motion.valid && !motion.gyro_calibrated) {
-            portENTER_CRITICAL(&snapshot_mux);
-            current.sensor_present = true;
-            current.sample_valid = true;
-            current.readiness = ActivityReadiness::warming_up;
-            current.calibrated = false;
-            current.sampled_at_us = motion.sampled_at_us;
-            ++current.sequence;
-            portEXIT_CRITICAL(&snapshot_mux);
         } else if (!motion.present || !motion.valid ||
                    now_us - motion.sampled_at_us > kStaleAfterUs) {
             portENTER_CRITICAL(&snapshot_mux);
@@ -433,7 +533,12 @@ void worker(void *) {
             }
             set_persistence(ok);
         }
-        vTaskDelayUntil(&wake, kPeriod);
+        const auto power_state = power_service().snapshot().state;
+        const auto period = power_state == nightglass::core::PowerState::screen_blank ||
+                                    power_state == nightglass::core::PowerState::light_sleep
+                                ? kBlankPeriod
+                                : kActivePeriod;
+        vTaskDelayUntil(&wake, period);
     }
 }
 
@@ -444,7 +549,8 @@ nightglass::core::Status ActivityService::start() {
     load_state();
     day_state.fallback_rollover_us = esp_timer_get_time() + 86'400LL * 1'000'000LL;
     processor.reset();
-    gesture_processor.reset();
+    gesture_processor.set_profile(current.gesture_profile);
+    gesture_calibrator.cancel();
     command_queue = xQueueCreate(4, sizeof(Command));
     if (!command_queue) {
         return {nightglass::core::StatusCode::no_memory, "activity command queue failed"};
@@ -483,6 +589,18 @@ bool ActivityService::update_settings(const ActivitySettings &settings) {
 }
 
 bool ActivityService::reset_today() { return submit({CommandType::reset_today}); }
+
+bool ActivityService::start_gesture_calibration() {
+    return submit({CommandType::gesture_calibration_start});
+}
+
+bool ActivityService::capture_gesture_calibration_sample() {
+    return submit({CommandType::gesture_calibration_capture});
+}
+
+bool ActivityService::cancel_gesture_calibration() {
+    return submit({CommandType::gesture_calibration_cancel});
+}
 
 ActivityService &activity_service() { return instance; }
 

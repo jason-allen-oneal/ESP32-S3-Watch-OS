@@ -28,6 +28,8 @@ int main() {
     assert(message.kind == CompanionMessageKind::notification_clear);
     const auto media = encode_media_command(MediaCommand::next, 9);
     assert(media[1] == 0x10 && media[2] == 9 && media[3] == 2);
+    assert(encode_media_command(MediaCommand::stop, 10)[3] == 8);
+    assert(encode_media_command(MediaCommand::restart, 11)[3] == 9);
     const auto action = encode_notification_action(true, 0x12345678, 4);
     assert(action[1] == 0x11 && action[3] == 0x78 && action[6] == 0x12);
     const auto reply = encode_notification_reply(0x12345678, 7, 0xAABBCCDD, "Yes");
@@ -79,6 +81,8 @@ int main() {
         encode_call_command(CallCommand::answer, 0, 0x12345678, 2);
     assert((invalid_call_command == std::array<std::uint8_t, 11>{}));
     assert(encode_phone_command(PhoneCommand::camera, 4)[1] == 0x15);
+    assert(encode_phone_command(PhoneCommand::launch_spotify, 5)[3] == 4);
+    assert(encode_phone_command(PhoneCommand::launch_discord, 6)[3] == 5);
     const std::array<std::uint8_t, 10> wifi{1, 0x20, 3, 3, 'N', 'e', 't', 's', 'e', 'c'};
     assert(parse_companion_message(wifi, message));
     assert(message.kind == CompanionMessageKind::wifi_provision);

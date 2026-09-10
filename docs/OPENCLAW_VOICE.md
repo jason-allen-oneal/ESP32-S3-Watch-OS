@@ -30,8 +30,21 @@ privileges.
   existing OAuth-backed model. If transcription fails, raw audio bytes remain
   host-local; the main-agent session receives no usable audio and the request
   requires the fixed failure response `Voice transcription failed.`
-- The first release renders a bounded plain-text response on the watch.
-  Automatic spoken replies are intentionally deferred.
+- The watch renders the bounded plain-text response in fixed, word-aware pages;
+  it never auto-scrolls the answer. Previous/Next controls keep each page
+  stable while reading.
+- Spoken replies are optional and default off. When enabled on the watch,
+  Android uses its local platform TTS engine to synthesize at most the first
+  480 response characters, converts the result to 8 kHz G.711 mu-law, and
+  sends at most 12 seconds (96,000 bytes) over the same authenticated BLE
+  link. The watch buffers that bounded stream in PSRAM, plays it through the
+  existing PA-gated speaker owner, and wipes it after playback or cancellation.
+  Text remains the fallback if TTS, transport, audio policy, or hardware is
+  unavailable. No provider credential, recording, or TTS file is retained.
+- Discord voice-note replies are a separate watch destination. They reuse the
+  encrypted capture/upload path but never enter OpenClaw; the companion hands
+  the verified recording to Discord's user-confirmed Android share composer,
+  where the user selects the conversation and sends it.
 
 ## Trust and authorization boundary
 
@@ -84,6 +97,7 @@ receiver-credit window and acknowledges the highest contiguous byte offset.
 - Maximum ATT frame: 244 bytes.
 - Maximum encoded request: 2,400,000 bytes (300 seconds at 8 kHz mu-law).
 - Maximum returned UTF-8 text: 2,048 bytes.
+- Maximum spoken reply: 96,000 bytes (12 seconds at 8 kHz mu-law).
 - One capture/upload/response turn at a time.
 - Late frames, stale acknowledgements and stale responses are rejected.
 - A disconnect cancels the turn; it is never replayed after reconnect.
@@ -121,7 +135,7 @@ fallback. Existing non-audio media entries must be preserved. For the current
 `rev` host, the verified binary and model paths are:
 
 - `/usr/bin/whisper-cli`
-- `/home/rev/projects/models/whisper/base.en/ggml-base.en.bin`
+- `~/projects/models/whisper/base.en/ggml-base.en.bin`
 
 The reviewed merge template contains only the local Whisper media settings:
 
@@ -141,7 +155,7 @@ retain any other entry whose capabilities include `audio`.
           command: "/usr/bin/whisper-cli",
           args: [
             "-m",
-            "/home/rev/projects/models/whisper/base.en/ggml-base.en.bin",
+            "~/projects/models/whisper/base.en/ggml-base.en.bin",
             "-otxt",
             "-of",
             "{{OutputBase}}",

@@ -1,13 +1,16 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 #include "lvgl.h"
 #include "nightglass/core/navigation.hpp"
+#include "nightglass/core/service.hpp"
 #include "nightglass/core/status.hpp"
 #include "nightglass/services/connectivity_protocol.hpp"
 #include "nightglass/services/weather_logic.hpp"
+#include "nightglass/services/premium_protocol.hpp"
 
 namespace nightglass::ui {
 
@@ -19,8 +22,10 @@ public:
 private:
     static void timer_callback(lv_timer_t *timer);
     static void system_timer_callback(lv_timer_t *timer);
+    static void power_state_callback(nightglass::core::PowerState state, void *context);
     static void input_callback(lv_event_t *event);
     static void back_callback(lv_event_t *event);
+    static void context_deck_callback(lv_event_t *event);
     static void launcher_callback(lv_event_t *event);
     static void settings_callback(lv_event_t *event);
     static void power_settings_callback(lv_event_t *event);
@@ -33,6 +38,8 @@ private:
     static void activity_goal_callback(lv_event_t *event);
     static void activity_reset_callback(lv_event_t *event);
     static void gesture_settings_callback(lv_event_t *event);
+    static void gesture_calibration_callback(lv_event_t *event);
+    static void gesture_calibration_cancel_callback(lv_event_t *event);
     static void gesture_raise_callback(lv_event_t *event);
     static void gesture_twist_callback(lv_event_t *event);
     static void gesture_shake_callback(lv_event_t *event);
@@ -51,7 +58,16 @@ private:
     static void openclaw_release_callback(lv_event_t *event);
     static void openclaw_cancel_callback(lv_event_t *event);
     static void openclaw_duration_callback(lv_event_t *event);
+    static void openclaw_previous_callback(lv_event_t *event);
+    static void openclaw_next_callback(lv_event_t *event);
+    static void openclaw_spoken_callback(lv_event_t *event);
+    static void discord_voice_press_callback(lv_event_t *event);
+    static void discord_voice_release_callback(lv_event_t *event);
+    static void discord_voice_cancel_callback(lv_event_t *event);
     static void media_app_callback(lv_event_t *event);
+    static void spotify_app_callback(lv_event_t *event);
+    static void discord_app_callback(lv_event_t *event);
+    static void discord_clear_callback(lv_event_t *event);
     static void notification_detail_callback(lv_event_t *event);
     static void notification_list_callback(lv_event_t *event);
     static void notification_reply_send_callback(lv_event_t *event);
@@ -102,16 +118,19 @@ private:
     static void audio_mute_callback(lv_event_t *event);
     static void audio_dnd_callback(lv_event_t *event);
     static void dismiss_alert_callback(lv_event_t *event);
-    static void update_confirm_callback(lv_event_t *event);
-    static void update_abort_callback(lv_event_t *event);
-    static void update_restart_callback(lv_event_t *event);
     static void diagnostics_callback(lv_event_t *event);
     static void about_callback(lv_event_t *event);
     static void face_action_callback(lv_event_t *event);
+    static void display_option_callback(lv_event_t *event);
+    static void premium_open_callback(lv_event_t *event);
+    static void premium_action_callback(lv_event_t *event);
+    static void display_event_callback(lv_event_t *event);
+    static void openclaw_suggestion_callback(lv_event_t *event);
 
     void navigate(nightglass::core::NavigationAction action);
     void render_route();
     void render_home();
+    void render_context_deck();
     void render_launcher();
     void render_settings();
     void render_power_settings();
@@ -122,11 +141,17 @@ private:
     void render_weather();
     void render_connectivity();
     void render_media();
+    void render_discord();
     void render_notifications();
     void render_openclaw();
     void render_classic_home();
     void render_pack_home();
     void render_aod_home();
+    void render_personal_home();
+    void refresh_personal_home();
+    void refresh_ambient();
+    void render_premium_content();
+    void refresh_premium_content();
     void render_quick_settings();
     void render_alarm();
     void render_countdown();
@@ -135,8 +160,11 @@ private:
     void render_diagnostics();
     void render_about();
     void configure_refresh_timer(std::uint32_t period_ms);
+    void apply_power_state(nightglass::core::PowerState state);
+    void apply_ambient_state(nightglass::core::PowerState state);
     void refresh_active_route();
     void refresh_home();
+    void refresh_context_deck();
     void refresh_clock_settings();
     void refresh_watchface_settings();
     void refresh_activity();
@@ -144,6 +172,7 @@ private:
     void refresh_weather();
     void refresh_connectivity();
     void refresh_media();
+    void refresh_discord();
     void refresh_notifications();
     void refresh_openclaw();
     void refresh_alarm();
@@ -156,14 +185,49 @@ private:
     void clear_route_objects();
     void refresh_settings_labels();
     void handle_gesture();
+    void handle_touch_event(lv_event_t *event);
+    bool dispatch_touch_swipe(int delta_x, int delta_y, lv_dir_t gesture_direction);
+    void install_touch_callbacks(lv_obj_t *object);
+    void handle_side_key(bool woke_from_inactive);
 
     nightglass::core::NavigationState navigation_{};
     lv_obj_t *screen_{nullptr};
     lv_obj_t *content_host_{nullptr};
     lv_obj_t *overlay_layer_{nullptr};
+    lv_obj_t *ambient_layer_{nullptr};
+    lv_obj_t *ambient_time_{nullptr};
+    lv_obj_t *ambient_date_{nullptr};
+    std::uint32_t ambient_minute_{0xffffffff};
+    bool ambient_visible_{false};
+    nightglass::services::PremiumProfile rendered_profile_{};
+    bool personal_home_{false};
+    std::array<lv_obj_t *, 3> personal_values_{};
+    bool premium_open_{false};
+    std::uint8_t premium_kind_{0};
+    std::uint32_t premium_target_{0}, premium_token_{0};
+    lv_obj_t *premium_status_{nullptr};
+    lv_obj_t *premium_body_{nullptr};
+    lv_obj_t *premium_items_{nullptr};
+    std::uint8_t *premium_buffer_{nullptr};
+    lv_image_dsc_t premium_image_{};
+    std::int64_t premium_requested_us_{0};
+    std::int64_t input_started_us_{0};
+    std::int64_t render_started_us_{0};
+    std::array<std::uint16_t, 64> render_duration_ms_{};
+    std::size_t render_duration_count_{0};
+    std::array<std::uint16_t, 64> input_latency_ms_{};
+    std::size_t input_latency_count_{0};
+    lv_obj_t *openclaw_suggestion_{nullptr};
+    std::uint32_t suggestion_session_{0};
+    std::uint32_t suggestion_fingerprint_{0};
+    bool suggestion_used_{false};
+    std::int64_t suggestion_confirm_until_{0};
     lv_indev_t *touch_input_{nullptr};
     lv_timer_t *timer_{nullptr};
     lv_timer_t *system_timer_{nullptr};
+    std::atomic<nightglass::core::PowerState> power_state_{
+        nightglass::core::PowerState::active};
+    std::atomic_bool ui_pipeline_suspended_{false};
 
     // Settings route widgets.
     lv_obj_t *setting_active_{nullptr};
@@ -182,6 +246,9 @@ private:
     lv_obj_t *activity_units_{nullptr};
     lv_obj_t *activity_goal_{nullptr};
     lv_obj_t *gesture_state_{nullptr};
+    lv_obj_t *gesture_detail_{nullptr};
+    lv_obj_t *gesture_calibration_{nullptr};
+    lv_obj_t *gesture_calibration_cancel_{nullptr};
     lv_obj_t *gesture_raise_{nullptr};
     lv_obj_t *gesture_twist_{nullptr};
     lv_obj_t *gesture_shake_{nullptr};
@@ -205,13 +272,27 @@ private:
     lv_obj_t *media_artist_{nullptr};
     lv_obj_t *media_progress_{nullptr};
     lv_obj_t *media_time_{nullptr};
+    lv_obj_t *discord_state_{nullptr};
+    lv_obj_t *discord_title_{nullptr};
+    lv_obj_t *discord_body_{nullptr};
+    lv_obj_t *discord_voice_state_{nullptr};
+    lv_obj_t *discord_voice_{nullptr};
+    lv_obj_t *discord_voice_cancel_{nullptr};
+    std::uint32_t discord_sequence_{0};
     lv_obj_t *notification_status_{nullptr};
     lv_obj_t *notification_privacy_{nullptr};
     lv_obj_t *openclaw_state_{nullptr};
     lv_obj_t *openclaw_detail_{nullptr};
     lv_obj_t *openclaw_response_{nullptr};
+    lv_obj_t *openclaw_page_{nullptr};
+    lv_obj_t *openclaw_previous_{nullptr};
+    lv_obj_t *openclaw_next_{nullptr};
+    lv_obj_t *openclaw_spoken_{nullptr};
     lv_obj_t *openclaw_ptt_{nullptr};
     lv_obj_t *openclaw_duration_{nullptr};
+    std::array<char, 2049> openclaw_response_cache_{};
+    std::uint16_t openclaw_response_page_{0};
+    std::uint16_t openclaw_response_page_count_{0};
 
     struct NotificationActionContext {
         Shell *shell{nullptr};
@@ -255,6 +336,22 @@ private:
     lv_obj_t *quick_mute_{nullptr};
     lv_obj_t *quick_dnd_{nullptr};
     lv_obj_t *quick_bluetooth_{nullptr};
+
+    struct ContextCardWidgets {
+        lv_obj_t *eyebrow{nullptr};
+        lv_obj_t *title{nullptr};
+        lv_obj_t *detail{nullptr};
+    };
+    std::array<ContextCardWidgets, 5> context_cards_{};
+
+    // Touch navigation is deliberately edge-gated so vertical scrolling inside
+    // an app remains native LVGL behavior.
+    lv_point_t touch_start_point_{};
+    bool touch_tracking_{false};
+    bool touch_gesture_consumed_{false};
+    bool last_side_key_pressed_{false};
+    bool side_key_wake_only_{false};
+    std::int64_t side_key_pressed_at_us_{0};
 
     // Home route widgets.
     lv_obj_t *home_time_{nullptr};

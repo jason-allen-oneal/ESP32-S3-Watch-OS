@@ -64,6 +64,7 @@ enum class AudioOperation : std::uint8_t {
     playback,
     capture,
     voice_capture,
+    voice_playback,
 };
 
 struct VoiceCaptureResult {
@@ -77,6 +78,15 @@ using VoiceCaptureCallback = void (*)(void *context,
                                       const VoiceCaptureResult &result);
 using VoiceCaptureSink = bool (*)(void *context,
                                   std::span<const std::uint8_t> encoded);
+
+struct VoicePlaybackResult {
+    nightglass::core::StatusCode status{nightglass::core::StatusCode::ok};
+    std::size_t encoded_bytes{0};
+    bool cancelled{false};
+};
+
+using VoicePlaybackCallback = void (*)(void *context,
+                                        const VoicePlaybackResult &result);
 
 struct AudioSettings {
     std::uint8_t volume_percent{100};
@@ -156,6 +166,14 @@ public:
     // `cancel=false` submits samples already captured; `cancel=true` wipes and
     // reports a cancelled turn after the hardware owner has shut down.
     void stop_voice_capture(bool cancel);
+    // Play a bounded 8 kHz G.711 mu-law response through the speaker. The
+    // caller retains ownership until the completion callback, which runs only
+    // after codec/I2S/PA cleanup. On an immediate enqueue failure ownership
+    // remains with the caller.
+    nightglass::core::Status request_voice_playback(
+        std::uint8_t *encoded, std::size_t encoded_bytes,
+        VoicePlaybackCallback callback, void *context);
+    void stop_voice_playback();
     nightglass::core::Status request_test_tone();
     nightglass::core::Status request_sound(SoundCue cue);
     // Invalidates queued and in-flight instances of the specified repeating

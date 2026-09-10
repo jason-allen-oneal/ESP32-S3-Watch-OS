@@ -38,6 +38,15 @@ loader remain future work.
 - Audio service: codec/I2S interfaces are initialized muted at boot when
   enabled; no continuous audio task or sample queue is created.
 
+The LVGL task has a project-owned 16 KiB internal-RAM stack rather than the
+port library's 7 KiB default. Route changes report the task's historical free
+stack against a 4 KiB floor, while the FreeRTOS canary and end-of-stack
+watchpoint fail at the offending task instead of allowing adjacent scheduler
+state to be damaged. Foreground display formatting uses integer/fixed-point
+text paths; libc floating-point `printf` conversion is prohibited on LVGL
+callbacks because its transient stack demand previously overflowed while a
+Back event synchronously rebuilt the weather-enabled home face.
+
 The current network worker is implemented by `NetworkWeatherService`. It owns
 Wi-Fi station lifecycle, credential provisioning, reconnect policy, verified
 HTTPS transport, weather decoding, and last-good cache state. It publishes
@@ -65,21 +74,33 @@ a cross-core critical section and never performs I2C or GPIO work.
   samples (about 20 seconds), rejects moving or
   noisy calibration windows, and stores an in-memory zero-rate bias for each
   axis. Runtime values are bias-corrected, low-pass filtered, and displayed as
-  zero inside a +/-0.5 dps deadband. Motion is explicitly a heuristic, not step
-  count or orientation. Because constant rotation cannot be distinguished from
-  sensor bias without an external reference, the watch must remain still until
-  calibration completes; the UI never labels gyro data live before that point.
+  zero inside a +/-0.5 dps deadband. A completed bias is retained when the gyro
+  is power-gated and restored later in the same boot; an incomplete bias is
+  discarded. Calibration-instability logs are bounded to one every five
+  seconds, the hardware task has an 8 KiB stack with live reserve reporting,
+  and both the FreeRTOS stack canary and end-of-stack watchpoint are enabled.
+  Motion is explicitly a heuristic, not step count or orientation. Because
+  constant rotation cannot be distinguished from sensor bias without an
+  external reference, the watch must remain still until calibration completes;
+  the UI never labels gyro data live before that point.
 - The activity service also feeds each fresh 25 Hz sample into an allocation-free
   gesture processor. Raise-to-wake may use bounded raw gyro data while stationary
   gyro calibration is still running; double-twist, shake, and flick require the
   calibrated stream. Detection uses explicit sample-gap resets, per-gesture
   cooldowns, acceleration/rotation gates, and a separate policy layer that
   suppresses actions during charging/USB, recent touch/button input, alerts,
-  pairing, replies, and OTA sessions. All four actions default off until physical
-  axis and false-positive calibration passes on the fitted watch. The fitted
-  QMI8658 reports display-facing gravity on negative Z; that sign is covered by
-  host fixtures. A production-disabled, 120-second serial trace gate can record
-  bounded raw calibration evidence without enabling gesture actions.
+  pairing, replies, and OTA sessions. A guided six-stage flow first performs the
+  stationary gyro zero, records three intentional examples of raise, double
+  twist, shake, and flick through gesture-specific labelled feature capture,
+  and requires a clean 15-second quiet window. Training therefore measures the
+  full user-started window instead of requiring the stricter everyday detector
+  to recognize its own examples. It derives only five allowlisted
+  scalar gates, clamps them to reviewed limits, and persists the versioned
+  profile only after the complete flow passes; cancel or reboot retains the
+  prior profile. All four actions remain independently disabled by default.
+  The fitted QMI8658 reports display-facing gravity on negative Z; that sign is
+  covered by host fixtures. A production-disabled, 120-second serial trace gate
+  can record bounded raw calibration evidence without enabling gesture actions.
 - GPIO18 starts low. The schematic's P1/P2 motor path and its ALDO3 supply were
   electrically exercised, but this physical unit produced no mechanical
   response and Waveshare does not list an installed actuator. Haptics are
@@ -127,16 +148,18 @@ BOOT -> ACTIVE -> DIM -> SCREEN_BLANK -> LIGHT_SLEEP
 
 The power supervisor steps through configurable active, dim, blank, and light-
 sleep states. GPIO38 touch wake and GPIO10 EXT1 side-key wake are armed only
-around sleep, then normal touch interrupt behavior is restored after resume.
-The first wake touch is consumed before object events. Alarm and countdown
-deadlines also arm timer wake.
+around explicit light sleep, then normal touch interrupt behavior is restored
+after resume. Automatic light sleep remains disabled until GPIO38's required
+falling-edge/low-level hand-off passes repeated HIL wake testing. The first wake
+touch is consumed before object events, with its input timer kept alive until
+release. Alarm and countdown deadlines also arm timer wake.
 
 The side power key is GPIO10 (`SYS_OUT`, active high); GPIO0 remains the boot
 strap. Touch IRQ GPIO38 and RTC IRQ GPIO39 are digital-only and can wake light
 sleep, while GPIO10 and QMI8658 INT1 GPIO21 are RTC IO candidates for later
-deep-sleep wake. Motion wake, direct RTC alarm wake, panel DCS 0x28, deep sleep,
-and PMIC rail gating remain disabled until their isolated wake-loop and recovery
-tests pass. Networking, the idle audio codec path, SD, display, and sensor
+deep-sleep wake. Motion wake, direct RTC alarm wake, deep sleep, and PMIC rail
+gating remain disabled until their isolated wake-loop and recovery tests pass.
+Panel DCS sleep is active. Networking, the idle audio codec path, SD, display, and sensor
 features are eventually gated by the power service; explicit audio tests
 remain bounded and return the output path to mute.
 
@@ -147,11 +170,11 @@ coredumps, and a 19.375 MB asset filesystem. An update must verify board ID,
 partition revision, size, SHA-256, and signature before selecting the inactive
 slot. Bootloader rollback remains armed until the runtime health gate succeeds.
 
-The backend now enforces those metadata, stream, inactive-slot, embedded image,
-and 60-second rollback checks. The production-default signature policy is
-fail-closed because the P-256 verifier has no provisioned public key. Companion
-transport, update/recovery UI, and production key custody remain open. See
-`docs/UPDATE_RECOVERY.md`.
+The backend enforces those metadata, stream, inactive-slot, embedded-image, and
+60-second rollback checks. A provisioned P-256 verifier is fail closed. Both the
+native watch-cable USB receiver and the encrypted, identity-pinned companion BLE
+receiver feed that single backend; their sessions are origin-bound so one link
+cannot hijack or abort the other's transfer. See `docs/UPDATE_RECOVERY.md`.
 
 Secure Boot V2 and flash encryption remain deferred because their eFuse changes
 are irreversible. They require a separately approved production-recovery plan.

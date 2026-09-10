@@ -17,6 +17,14 @@ int main() {
         7, kVoiceMaximumEncodedBytes, 0x12345678U);
     assert(maximum_begin.size == 16);
     assert(encode_voice_begin(7, kVoiceMaximumEncodedBytes + 1U, 1).size == 0);
+    const auto spoken_begin = encode_voice_begin(7, body.size(), voice_crc32(body), true);
+    assert(spoken_begin.size == 16 && spoken_begin.bytes[14] == 0x81);
+    const auto discord_begin = encode_voice_begin(
+        7, body.size(), voice_crc32(body), false, true);
+    assert(discord_begin.size == 16 && discord_begin.bytes[14] == 0x41);
+    const auto combined_begin = encode_voice_begin(
+        7, body.size(), voice_crc32(body), true, true);
+    assert(combined_begin.size == 16 && combined_begin.bytes[14] == 0xc1);
 
     const auto data = encode_voice_data(7, 1, 0, body);
     assert(data.size == 21 && data.bytes[1] == 0x41 && data.bytes[6] == 1);
@@ -63,6 +71,24 @@ int main() {
     auto invalid_status = status;
     invalid_status[6] = 0xff;
     assert(!parse_voice_frame(invalid_status, frame));
+
+    const auto audio_begin = encode_voice_audio_begin(7, 12, 16, 0x12345678);
+    assert(audio_begin.size == 20 && parse_voice_frame(
+        {audio_begin.bytes.data(), audio_begin.size}, frame));
+    assert(frame.kind == VoiceFrameKind::response_audio_begin &&
+           frame.response_id == 12 && frame.total_bytes == 16 &&
+           frame.codec == 1 && frame.sample_rate_khz == 8);
+    const std::array<std::uint8_t, 2> audio_body{0x80, 0xff};
+    const auto audio_data = encode_voice_audio_data(7, 12, 0, audio_body);
+    assert(audio_data.size == 16 && parse_voice_frame(
+        {audio_data.bytes.data(), audio_data.size}, frame));
+    assert(frame.kind == VoiceFrameKind::response_audio_data &&
+           frame.payload.size() == audio_body.size());
+    const auto audio_end = encode_voice_audio_end(7, 12, 16, 0x12345678);
+    assert(audio_end.size == 18 && parse_voice_frame(
+        {audio_end.bytes.data(), audio_end.size}, frame));
+    assert(frame.kind == VoiceFrameKind::response_audio_end && frame.total_bytes == 16);
+    assert(encode_voice_audio_begin(7, 12, kVoiceMaximumSpokenReplyBytes + 1U, 1).size == 0);
 
     const std::array<std::uint8_t, 7> health{1, 0x49, 9, 0, 0, 0, 2};
     assert(parse_voice_frame(health, frame));

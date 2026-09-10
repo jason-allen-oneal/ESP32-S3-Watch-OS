@@ -10,7 +10,7 @@ passes; a commit, build, or partial implementation is not completion.
 |---|---|---|---|
 | OTA-P1 | Baseline and verifier | completed | Clean checkpoint `d428f19`; deterministic release gate passes; P-256 known-answer, mutation, malformed-DER, wrong-key, high/low-S, and Python/C++ payload-parity tests pass with unsigned development disabled. |
 | OTA-P2 | Signing-key custody | in progress | Production P-256 private key exists only in an approved host-owned protected facility; the public SEC1 point is reproducibly exported and provisioned into firmware; no private material exists in Git, build output, logs, shell arguments, APK, or device firmware. |
-| OTA-P3 | Authenticated transport | in progress | Updated Android companion sends an explicitly confirmed signed package over the encrypted, pinned BLE link; fixed-size callbacks enqueue only bounded work; the update worker supports status, abort, exact sequential chunks, and reconnect-safe failure handling through `UpdateService`. |
+| OTA-P3 | Authenticated transport | in progress | Updated Android companion sends an owner-approved signed package over the encrypted, pinned BLE link; selecting the package is approval and the watch applies it automatically; fixed-size callbacks enqueue only bounded work; the update worker supports status, abort, exact sequential chunks, and reconnect-safe failure handling through `UpdateService`. |
 | OTA-P4 | Security and release review | pending | Independent security and QA reviews have no unresolved ship blockers; firmware and APK tests pass; deterministic release artifacts match; release config contains the expected public key and no unsigned bypass. |
 | OTA-P5 | Rollback HIL | pending | Wrong-key, corrupt-image, interrupted-transfer, pending-verify, forced-health-failure rollback, healthy acceptance, BLE reconnect, USB inactivity, display redraw, and audio coexistence checks pass on the attached watch. |
 | OTA-P6 | Companion and watch deployment | pending | Reviewed companion APK is installed, watch is updated through the signed transport rather than a raw slot write, both recover automatically, and final hashes plus boot-state evidence are recorded. |
@@ -18,7 +18,9 @@ passes; a commit, build, or partial implementation is not completion.
 ## Active lanes
 
 - **transport implementation** — current action: firmware and Android BLE
-  transport, queue ownership, explicit confirmation, progress, and tests;
+  transport, queue ownership, owner-approved automatic apply/reboot, progress,
+  and tests; deployments that set the physical-confirmation option retain the
+  automatic apply/restart behavior after signed-package validation;
   next gate: both targets compile and transport unit tests pass; artifact:
   local commit.
 - **key custody and threat review** — current action: select the host-native
@@ -44,4 +46,3 @@ lane and exact gate to rerun.
 - Irreversible Secure Boot, flash-encryption, and eFuse anti-rollback
   provisioning are outside this campaign and require a separately reviewed
   recovery plan.
-

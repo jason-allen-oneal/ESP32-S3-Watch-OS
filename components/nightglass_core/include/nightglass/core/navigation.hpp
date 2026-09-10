@@ -6,6 +6,7 @@ namespace nightglass::core {
 
 enum class Route : std::uint8_t {
     home,
+    context_deck,
     launcher,
     settings,
     power_settings,
@@ -16,6 +17,8 @@ enum class Route : std::uint8_t {
     weather,
     connectivity,
     media,
+    spotify,
+    discord,
     notifications,
     openclaw,
     alarm,
@@ -34,6 +37,7 @@ enum class Overlay : std::uint8_t {
 enum class NavigationAction : std::uint8_t {
     back,
     home,
+    open_context_deck,
     open_launcher,
     open_settings,
     open_power_settings,
@@ -44,6 +48,8 @@ enum class NavigationAction : std::uint8_t {
     open_weather,
     open_connectivity,
     open_media,
+    open_spotify,
+    open_discord,
     open_notifications,
     open_openclaw,
     open_alarm,

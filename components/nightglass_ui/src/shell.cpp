@@ -2,13 +2,20 @@
 
 #include <array>
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <span>
 
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_lvgl_port.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lvgl.h"
+#include "src/misc/cache/instance/lv_image_cache.h"
 #include "nightglass/services/clock.hpp"
 #include "nightglass/services/activity.hpp"
 #include "nightglass/services/gesture_policy.hpp"
@@ -20,14 +27,18 @@
 #include "nightglass/services/hardware.hpp"
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/watchface.hpp"
+#include "nightglass/services/premium.hpp"
 #include "nightglass/services/update_transport.hpp"
 #include "nightglass/services/voice.hpp"
 #include "nightglass/ui/assets/revenant_grid_v2.hpp"
+#include "nightglass/ui/assets/revenant_shell_v1.hpp"
+#include "nightglass/ui/assets/openclaw_mark_v1.hpp"
 
 namespace nightglass::ui {
 
 namespace {
 Shell instance;
+constexpr char kTag[] = "nightglass_ui";
 
 constexpr std::uint32_t kVoid = 0x000000;
 constexpr std::uint32_t kSurface = 0x0B0D12;
@@ -40,6 +51,55 @@ constexpr std::uint32_t kViolet = 0xA78BFA;
 constexpr std::uint32_t kGreen = 0x50D890;
 constexpr std::uint32_t kAmber = 0xFFB454;
 constexpr std::uint32_t kRed = 0xFF6174;
+constexpr UBaseType_t kLvglMinimumStackReserveBytes = 4096;
+
+bool rounded_display_value(float value, float minimum, float maximum, int &rounded) {
+    // The ordered comparisons also reject NaN without pulling floating-point
+    // text conversion into the LVGL task.
+    if (!(value >= minimum && value <= maximum)) return false;
+    rounded = static_cast<int>(value + (value >= 0.0F ? 0.5F : -0.5F));
+    return true;
+}
+
+void format_signed_fixed(char *buffer, std::size_t size, float value,
+                         float minimum, float maximum, unsigned decimals) {
+    if (!(value >= minimum && value <= maximum) || (decimals != 1U && decimals != 2U)) {
+        std::snprintf(buffer, size, "+--");
+        return;
+    }
+    const unsigned scale = decimals == 1U ? 10U : 100U;
+    const bool negative = value < 0.0F;
+    const float magnitude = negative ? -value : value;
+    const auto scaled = static_cast<unsigned>(magnitude * static_cast<float>(scale) + 0.5F);
+    std::snprintf(buffer, size, "%c%u.%0*u", negative ? '-' : '+', scaled / scale,
+                  static_cast<int>(decimals), scaled % scale);
+}
+
+void format_coordinate(char *buffer, std::size_t size, const char *label,
+                       std::int32_t millionths) {
+    const auto signed_value = static_cast<std::int64_t>(millionths);
+    const bool negative = signed_value < 0;
+    const auto magnitude = static_cast<std::uint64_t>(negative ? -signed_value : signed_value);
+    const auto tenths = (magnitude + 50'000U) / 100'000U;
+    std::snprintf(buffer, size, "%s%s%llu.%01llu", label, negative ? "-" : "",
+                  static_cast<unsigned long long>(tenths / 10U),
+                  static_cast<unsigned long long>(tenths % 10U));
+}
+
+void log_lvgl_stack_reserve(const char *context) {
+    const char *task_name = pcTaskGetName(nullptr);
+    if (!task_name || std::strcmp(task_name, "taskLVGL") != 0) return;
+    const auto stack_free = uxTaskGetStackHighWaterMark(nullptr);
+    if (stack_free < kLvglMinimumStackReserveBytes) {
+        ESP_LOGE(kTag, "LVGL stack reserve low: free=%u floor=%u context=%s",
+                 static_cast<unsigned>(stack_free),
+                 static_cast<unsigned>(kLvglMinimumStackReserveBytes), context);
+    } else {
+        ESP_LOGI(kTag, "LVGL stack reserve: free=%u floor=%u context=%s",
+                 static_cast<unsigned>(stack_free),
+                 static_cast<unsigned>(kLvglMinimumStackReserveBytes), context);
+    }
+}
 
 struct ChromePalette {
     std::uint32_t background;
@@ -68,28 +128,60 @@ constexpr int kSafeInset = 28;
 constexpr int kSafeRight = kPanelWidth - kSafeInset;
 constexpr int kSafeBottom = kPanelHeight - kSafeInset;
 constexpr int kSafeContentWidth = kPanelWidth - (2 * kSafeInset);
+constexpr int kEdgeGestureInset = 48;
+constexpr int kSwipeThreshold = 56;
+constexpr std::int64_t kSideKeyLongPressUs = 1'200'000;
 
 const ChromePalette &chrome_palette() {
     const auto &pack = nightglass::services::watchface_service().selected();
-    if (nightglass::services::valid_face_pack(pack) &&
-        pack.chrome.theme == nightglass::services::ChromeTheme::revenant) {
-        return kRevenantChrome;
-    }
-    return kClassicChrome;
+    static ChromePalette palette;
+    palette = pack.chrome.theme == nightglass::services::ChromeTheme::revenant
+        ? kRevenantChrome : kClassicChrome;
+    palette.accent = pack.palette.accent;
+    palette.accent_alternate = pack.palette.accent;
+    palette.border = pack.palette.accent_dim;
+    return palette;
 }
 
-bool revenant_chrome() { return &chrome_palette() == &kRevenantChrome; }
+bool revenant_chrome() {
+    return nightglass::services::watchface_service().selected().chrome.theme ==
+        nightglass::services::ChromeTheme::revenant;
+}
+
+bool is_discord_notification(const nightglass::services::CompanionNotification &notification) {
+    return notification.valid && std::strcmp(notification.app.data(), "Discord") == 0;
+}
+
+const char *discord_notification_kind(
+    const nightglass::services::CompanionNotification &notification) {
+    using nightglass::services::NotificationCategory;
+    switch (notification.category) {
+        case NotificationCategory::call:
+            return "VOICE CALL";
+        case NotificationCategory::social:
+            return "MENTION";
+        case NotificationCategory::message:
+            return notification.replyable ? "REPLY READY" : "MESSAGE";
+        case NotificationCategory::email:
+        case NotificationCategory::calendar:
+        case NotificationCategory::other:
+            return notification.replyable ? "REPLY READY" : "ALERT";
+    }
+    return "DISCORD";
+}
 
 std::uint32_t chrome_color(std::uint32_t color) {
+    if (color == kCyan || color == 0xA8FF32)
+        return nightglass::services::watchface_service().selected().palette.accent;
     if (!revenant_chrome()) return color;
     if (color == kVoid) return kRevenantChrome.background;
     if (color == kSurface) return kRevenantChrome.surface;
     if (color == kElevated) return kRevenantChrome.elevated;
-    if (color == kDivider) return kRevenantChrome.border;
+    if (color == kDivider) return chrome_palette().border;
     if (color == kPrimary) return kRevenantChrome.primary;
     if (color == kSecondary) return kRevenantChrome.secondary;
     if (color == kCyan) return kRevenantChrome.accent;
-    if (color == kViolet) return kRevenantChrome.accent_alternate;
+    if (color == kViolet) return chrome_palette().accent_alternate;
     return color;
 }
 
@@ -107,9 +199,55 @@ void set_button_text(lv_obj_t *button, const char *text) {
     }
 }
 
+// Five lines at the response card's 18 px font fit without clipping on the
+// 410x502 panel. Keep each page deliberately short; the user advances it
+// explicitly instead of fighting a scroll position.
+constexpr std::size_t kOpenClawPageCharacters = 120;
+
+// Split at word boundaries and explicit newlines so the watch never has to
+// auto-scroll a response. The caller can move between stable pages with the
+// two dedicated controls below the response card.
+std::uint16_t paginate_openclaw_response(const char *text, std::size_t length,
+                                         std::uint16_t selected_page,
+                                         char *page_text, std::size_t page_capacity) {
+    if (page_text == nullptr || page_capacity == 0) return 0;
+    page_text[0] = '\0';
+    std::size_t cursor = 0;
+    std::uint16_t page = 0;
+    while (cursor < length) {
+        const auto start = cursor;
+        const std::size_t page_limit = (nightglass::services::premium_service().profile().flags &
+            nightglass::services::kPremiumLargeText) ? 80 : kOpenClawPageCharacters;
+        auto end = std::min(length, start + page_limit);
+        if (end < length) {
+            auto cut = end;
+            while (cut > start + page_limit / 2 && text[cut - 1] != ' ' && text[cut - 1] != '\n') --cut;
+            if (cut > start + page_limit / 2) end = cut;
+        }
+        while (end > start && text[end - 1] == ' ') --end;
+        if (page == selected_page) {
+            const auto count = std::min(end - start, page_capacity - 1U);
+            std::memcpy(page_text, text + start, count);
+            page_text[count] = '\0';
+        }
+        ++page;
+        cursor = end;
+        while (cursor < length && text[cursor] == ' ') ++cursor;
+    }
+    return page == 0 ? 1 : page;
+}
+
 lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
                 std::uint32_t color) {
     auto *obj = lv_label_create(parent);
+    // Keep compact fixed-bound labels legible without scaling their containers.
+    // Full reading surfaces and the Personal face use the larger 20/26 fonts.
+    if (nightglass::services::premium_service().profile().flags &
+        nightglass::services::kPremiumLargeText) {
+        if (font == &lv_font_montserrat_14) font = &lv_font_montserrat_16;
+        else if (font == &lv_font_montserrat_16 || font == &lv_font_montserrat_18)
+            font = &lv_font_montserrat_20;
+    }
     lv_label_set_text(obj, text);
     lv_obj_set_style_text_font(obj, font, 0);
     lv_obj_set_style_text_color(obj, lv_color_hex(chrome_color(color)), 0);
@@ -192,29 +330,25 @@ void draw_steps_icon(lv_obj_t *parent, std::uint32_t color) {
 
     // Two compact footprints. Native LVGL geometry avoids depending on a
     // Unicode glyph that is not part of the compiled Montserrat fonts.
-    weather_shape(parent, 25, 7, 7, 10, color, 4);
-    weather_shape(parent, 23, 2, 5, 5, color, 3);
-    weather_shape(parent, 37, 3, 7, 10, color, 4);
-    weather_shape(parent, 41, 0, 5, 5, color, 3);
+    // Center them in the same 44x28 icon box used by the weather complication.
+    weather_shape(parent, 12, 12, 7, 10, color, 4);
+    weather_shape(parent, 10, 7, 5, 5, color, 3);
+    weather_shape(parent, 24, 8, 7, 10, color, 4);
+    weather_shape(parent, 28, 5, 5, 5, color, 3);
 }
 
 void draw_openclaw_icon(lv_obj_t *parent, std::uint32_t color) {
     if (!parent) return;
     lv_obj_clean(parent);
 
-    // A compact lobster/claw mark built from native LVGL geometry. This keeps
-    // the watch face independent of font glyph coverage and bitmap assets.
-    weather_shape(parent, 38, 18, 12, 30, color, 6);  // body
-    weather_shape(parent, 34, 12, 20, 13, color, 7);  // head
-    weather_shape(parent, 24, 24, 16, 6, color, 3);   // left arm
-    weather_shape(parent, 48, 24, 16, 6, color, 3);   // right arm
-    weather_shape(parent, 9, 8, 17, 17, color, 9);    // left claw
-    weather_shape(parent, 17, 18, 11, 12, color, 6);
-    weather_shape(parent, 62, 8, 17, 17, color, 9);   // right claw
-    weather_shape(parent, 60, 18, 11, 12, color, 6);
-    weather_shape(parent, 33, 4, 3, 12, color, 2);    // antennae
-    weather_shape(parent, 52, 4, 3, 12, color, 2);
-    weather_shape(parent, 33, 43, 22, 4, color, 2);   // tail bar
+    auto *icon = lv_image_create(parent);
+    lv_image_set_src(icon, &openclaw_mark_v1);
+    lv_obj_set_style_image_recolor(icon, lv_color_hex(color), 0);
+    lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, 0);
+    lv_obj_set_style_image_opa(icon, LV_OPA_COVER, 0);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_center(icon);
 }
 
 lv_obj_t *make_button(lv_obj_t *parent, int x, int y, int width, int height,
@@ -286,6 +420,10 @@ lv_obj_t *make_scroller(lv_obj_t *parent) {
     lv_obj_set_style_pad_all(scroller, 4, 0);
     lv_obj_set_scroll_dir(scroller, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(scroller, LV_SCROLLBAR_MODE_ACTIVE);
+    if (nightglass::services::premium_service().profile().flags & nightglass::services::kPremiumReduceMotion) {
+        lv_obj_remove_flag(scroller, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+        lv_obj_remove_flag(scroller, LV_OBJ_FLAG_SCROLL_ELASTIC);
+    }
     if (revenant_chrome()) {
         lv_obj_set_style_bg_color(scroller, lv_color_hex(chrome_palette().border),
                                   LV_PART_SCROLLBAR);
@@ -299,12 +437,12 @@ void format_time(char *buffer, std::size_t size,
                  const char **period) {
     if (use_24_hour) {
         std::snprintf(buffer, size, "%02u:%02u", time.hour, time.minute);
-        *period = "";
+        if (period) *period = "";
         return;
     }
     const auto hour = static_cast<unsigned>(time.hour % 12 == 0 ? 12 : time.hour % 12);
     std::snprintf(buffer, size, "%u:%02u", hour, time.minute);
-    *period = time.hour < 12 ? "AM" : "PM";
+    if (period) *period = time.hour < 12 ? "AM" : "PM";
 }
 
 void format_duration(char *buffer, std::size_t size, std::uint64_t total_ms,
@@ -405,10 +543,25 @@ const lv_image_dsc_t *face_asset(nightglass::services::FaceAsset asset) {
     switch (asset) {
         case nightglass::services::FaceAsset::revenant_grid_v2:
             return &revenant_grid_v2_background;
+        case nightglass::services::FaceAsset::revenant_shell_v1:
+            return &revenant_shell_v1_background;
         case nightglass::services::FaceAsset::none:
             return nullptr;
     }
     return nullptr;
+}
+
+void add_chrome_background(lv_obj_t *parent,
+                           const nightglass::services::FacePack &pack) {
+    if (!nightglass::services::valid_face_pack(pack)) return;
+    const auto *asset = face_asset(pack.chrome.route_background_asset);
+    if (!asset) return;
+    auto *background = lv_image_create(parent);
+    lv_image_set_src(background, asset);
+    lv_obj_set_pos(background, 0, 0);
+    lv_obj_set_style_image_opa(background, pack.chrome.route_background_opacity, 0);
+    lv_obj_remove_flag(background, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(background, LV_OBJ_FLAG_SCROLLABLE);
 }
 }  // namespace
 
@@ -426,6 +579,10 @@ nightglass::core::Status Shell::start() {
     lv_obj_set_size(content_host_, kPanelWidth, kPanelHeight);
     lv_obj_set_pos(content_host_, 0, 0);
     lv_obj_remove_flag(content_host_, LV_OBJ_FLAG_SCROLLABLE);
+    // LVGL gives child objects GESTURE_BUBBLE by default. Stop bubbling at the
+    // shell host so the indev-level gesture event is still emitted for a
+    // button, scroller, or empty watch-face area.
+    lv_obj_remove_flag(content_host_, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     // Reserved system-owned layer. Future modals render here without replacing
     // the persistent screen or allowing applications to cover system chrome.
@@ -434,22 +591,42 @@ nightglass::core::Status Shell::start() {
     lv_obj_set_size(overlay_layer_, kPanelWidth, kPanelHeight);
     lv_obj_set_pos(overlay_layer_, 0, 0);
     lv_obj_add_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(overlay_layer_, LV_OBJ_FLAG_GESTURE_BUBBLE);
 
     navigation_ = {};
+    rendered_profile_ = nightglass::services::premium_service().profile();
+    lv_display_add_event_cb(lv_display_get_default(), display_event_callback,
+                            LV_EVENT_RENDER_READY, this);
+    lv_display_add_event_cb(lv_display_get_default(), display_event_callback,
+                            LV_EVENT_RENDER_START, this);
     render_route();
     for (auto *input = lv_indev_get_next(nullptr); input; input = lv_indev_get_next(input)) {
         if (lv_indev_get_type(input) == LV_INDEV_TYPE_POINTER) {
             touch_input_ = input;
             lv_indev_add_event_cb(touch_input_, input_callback, LV_EVENT_PRESSED, this);
+            lv_indev_add_event_cb(touch_input_, input_callback, LV_EVENT_PRESSING, this);
+            lv_indev_add_event_cb(touch_input_, input_callback, LV_EVENT_GESTURE, this);
+            lv_indev_add_event_cb(touch_input_, input_callback, LV_EVENT_RELEASED, this);
+            lv_indev_add_event_cb(touch_input_, input_callback, LV_EVENT_PRESS_LOST, this);
+            lv_indev_set_gesture_min_distance(touch_input_, static_cast<std::uint8_t>(kSwipeThreshold));
             break;
         }
     }
     lv_screen_load(screen_);
     system_timer_ = lv_timer_create(system_timer_callback, 250, this);
+    nightglass::services::power_service().set_state_observer(power_state_callback, this);
+    const auto power = nightglass::services::power_service().snapshot();
+    last_side_key_pressed_ = power.side_key_ready && power.side_key_pressed;
+    apply_power_state(power.state);
     return nightglass::core::Status::Ok();
 }
 
 void Shell::stop() {
+    lv_display_remove_event_cb_with_user_data(lv_display_get_default(),
+                                              display_event_callback, this);
+    nightglass::services::power_service().set_state_observer(nullptr, nullptr);
+    if (ui_pipeline_suspended_.load()) apply_power_state(nightglass::core::PowerState::active);
+    nightglass::services::hardware_service().set_gyro_enabled(false);
     configure_refresh_timer(0);
     if (system_timer_) {
         lv_timer_delete(system_timer_);
@@ -462,14 +639,24 @@ void Shell::stop() {
     if (screen_) {
         lv_obj_delete(screen_);
     }
+    lv_image_cache_drop(&premium_image_);
     screen_ = nullptr;
     content_host_ = nullptr;
     overlay_layer_ = nullptr;
+    ambient_layer_ = ambient_time_ = ambient_date_ = nullptr;
+    ambient_visible_ = false;
+    if (premium_buffer_) heap_caps_free(premium_buffer_);
+    premium_buffer_ = nullptr;
     alert_card_ = nullptr;
     displayed_alert_kind_ = 0;
     displayed_alert_alarm_index_ = nightglass::services::kNoAlarmIndex;
     quick_settings_open_ = false;
     home_aod_active_ = false;
+    touch_tracking_ = false;
+    touch_gesture_consumed_ = false;
+    last_side_key_pressed_ = false;
+    side_key_wake_only_ = false;
+    side_key_pressed_at_us_ = 0;
     clear_route_objects();
     navigation_ = {};
 }
@@ -481,40 +668,336 @@ void Shell::timer_callback(lv_timer_t *timer) {
 void Shell::system_timer_callback(lv_timer_t *timer) {
     auto *self = static_cast<Shell *>(lv_timer_get_user_data(timer));
     const auto power = nightglass::services::power_service().snapshot();
-    if (power.state == nightglass::core::PowerState::screen_blank ||
-        power.state == nightglass::core::PowerState::light_sleep) {
-        const auto voice = nightglass::services::voice_service().snapshot();
-        if (voice.state == nightglass::services::VoiceTurnState::recording ||
-            voice.state == nightglass::services::VoiceTurnState::finishing ||
-            voice.state == nightglass::services::VoiceTurnState::uploading ||
-            voice.state == nightglass::services::VoiceTurnState::processing) {
-            nightglass::services::voice_service().cancel();
+    const bool was_inactive = self->power_state_.load() != nightglass::core::PowerState::active;
+    self->apply_power_state(power.state);
+    if (self->ui_pipeline_suspended_.load()) return;
+    self->apply_ambient_state(power.state);
+    const auto profile = nightglass::services::premium_service().profile();
+    if (profile != self->rendered_profile_) {
+        self->rendered_profile_ = profile;
+        self->render_route();
+    }
+    self->handle_side_key(was_inactive);
+    self->handle_gesture();
+    if (self->ambient_visible_) { self->refresh_ambient(); return; }
+    self->refresh_system_overlay();
+}
+
+void Shell::power_state_callback(nightglass::core::PowerState state, void *context) {
+    if (context) static_cast<Shell *>(context)->apply_power_state(state);
+}
+
+void Shell::apply_power_state(nightglass::core::PowerState state) {
+    const auto previous = power_state_.exchange(state);
+    const bool blanked = state == nightglass::core::PowerState::screen_blank ||
+                         state == nightglass::core::PowerState::light_sleep ||
+                         state == nightglass::core::PowerState::deep_sleep;
+    if (blanked) {
+        if (ui_pipeline_suspended_.load()) return;
+        // VoiceSnapshot carries the complete response buffer and is too large
+        // for this callback's power-task stack. The lifecycle query expresses
+        // the intent directly without placing that buffer on the stack.
+        auto &voice = nightglass::services::voice_service();
+        if (!voice.quiescent()) voice.cancel();
+        if (!lvgl_port_lock(0)) {
+            ESP_LOGE(kTag, "Unable to lock LVGL while blanking display");
+            return;
+        }
+        if (timer_) lv_timer_pause(timer_);
+        if (system_timer_) lv_timer_pause(system_timer_);
+        const esp_err_t stopped = lvgl_port_stop();
+        ui_pipeline_suspended_.store(stopped == ESP_OK || stopped == ESP_ERR_INVALID_STATE);
+        lvgl_port_unlock();
+        if (!ui_pipeline_suspended_.load()) {
+            ESP_LOGE(kTag, "Unable to stop LVGL tick: %s", esp_err_to_name(stopped));
+        }
+        return;
+    }
+
+    if (!ui_pipeline_suspended_.load() && previous == state) return;
+    if (!lvgl_port_lock(0)) {
+        ESP_LOGE(kTag, "Unable to lock LVGL while waking display");
+        return;
+    }
+    if (ui_pipeline_suspended_.load()) {
+        const esp_err_t resumed = lvgl_port_resume();
+        if (resumed != ESP_OK && resumed != ESP_ERR_INVALID_STATE) {
+            lvgl_port_unlock();
+            ESP_LOGE(kTag, "Unable to resume LVGL tick: %s", esp_err_to_name(resumed));
+            return;
         }
     }
-    self->handle_gesture();
-    self->refresh_system_overlay();
+    // This observer also runs on the 8 KiB power-supervisor stack. A home
+    // redraw can rebuild the route and nest two large refresh_home frames;
+    // never execute rendering here. Resume AND ready the existing timers so
+    // taskLVGL performs both the route redraw and system/ambient updates.
+    if (system_timer_) {
+        lv_timer_resume(system_timer_);
+        lv_timer_ready(system_timer_);
+    }
+    if (timer_) {
+        if (state == nightglass::core::PowerState::ambient) {
+            // A blank-to-ambient wake can retain an already-visible layer.
+            // Its normal route timer must stay paused even without a UI edge.
+            lv_timer_pause(timer_);
+        } else {
+            lv_timer_resume(timer_);
+            lv_timer_ready(timer_);
+        }
+    }
+    ui_pipeline_suspended_.store(false);
+    lvgl_port_unlock();
+    // Readying a timer does not wake the port's event-group wait by itself.
+    lvgl_port_task_wake(LVGL_PORT_EVENT_USER, nullptr);
+}
+
+void Shell::apply_ambient_state(nightglass::core::PowerState state) {
+    // Called only by the LVGL system timer, never by the power observer.
+    const bool ambient = state == nightglass::core::PowerState::ambient;
+    if (ambient != ambient_visible_) {
+        if (!ambient_layer_) {
+            ambient_layer_ = lv_obj_create(screen_);
+            lv_obj_remove_style_all(ambient_layer_);
+            lv_obj_set_size(ambient_layer_, kPanelWidth, kPanelHeight);
+            lv_obj_set_style_bg_color(ambient_layer_, lv_color_black(), 0);
+            lv_obj_set_style_bg_opa(ambient_layer_, LV_OPA_COVER, 0);
+            lv_obj_remove_flag(ambient_layer_, LV_OBJ_FLAG_SCROLLABLE);
+            ambient_time_ = label(ambient_layer_, "--:--", &lv_font_montserrat_48, 0x707070);
+            ambient_date_ = label(ambient_layer_, "", &lv_font_montserrat_20, 0x505050);
+            install_touch_callbacks(ambient_layer_);
+        }
+        ambient_visible_ = ambient;
+        if (ambient) {
+            lv_anim_delete(content_host_, nullptr);
+            lv_obj_set_style_opa(content_host_, LV_OPA_COVER, 0);
+            lv_obj_remove_flag(ambient_layer_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(ambient_layer_);
+            if (timer_) lv_timer_pause(timer_);
+            ambient_minute_ = 0xffffffff;
+            refresh_ambient();
+        } else {
+            lv_obj_add_flag(ambient_layer_, LV_OBJ_FLAG_HIDDEN);
+            if (timer_) {
+                lv_timer_resume(timer_);
+                lv_timer_ready(timer_);
+            }
+        }
+    }
 }
 
 void Shell::input_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    const auto before = nightglass::services::power_service().snapshot();
-    nightglass::services::power_service().note_activity(nightglass::core::WakeReason::touch);
-    if ((before.state == nightglass::core::PowerState::dim ||
-         before.state == nightglass::core::PowerState::ambient ||
-         before.state == nightglass::core::PowerState::screen_blank ||
-         before.wake_touch_pending) &&
-        self->touch_input_) {
-        // The first contact on a black screen is wake-only. LVGL sends indev
-        // events before object events, so this prevents click-through and then
-        // ignores the remainder of the same physical touch until release.
-        lv_indev_stop_processing(self->touch_input_);
-        lv_indev_wait_release(self->touch_input_);
+    if (lv_event_get_code(event) == LV_EVENT_PRESSED && !self->input_started_us_)
+        self->input_started_us_ = esp_timer_get_time();
+    self->handle_touch_event(event);
+}
+
+void Shell::handle_touch_event(lv_event_t *event) {
+    if (!event) return;
+    const auto code = lv_event_get_code(event);
+    if (code == LV_EVENT_PRESSED) {
+        const auto before = nightglass::services::power_service().snapshot();
+        nightglass::services::power_service().note_activity(nightglass::core::WakeReason::touch);
+        touch_tracking_ = false;
+        touch_gesture_consumed_ = false;
+        if ((before.state == nightglass::core::PowerState::dim ||
+             before.state == nightglass::core::PowerState::ambient ||
+             before.state == nightglass::core::PowerState::screen_blank ||
+             before.wake_touch_pending) && touch_input_) {
+            // The first contact on a black screen is wake-only. LVGL sends indev
+            // events before object events, so this prevents click-through and then
+            // ignores the remainder of the same physical touch until release.
+            touch_gesture_consumed_ = true;
+            lv_indev_stop_processing(touch_input_);
+            // Event-mode indevs normally resume this timer after dispatching
+            // PRESSED. wait_release makes LVGL return before that point, so a
+            // controller without a release IRQ could otherwise remain stuck
+            // forever after the first wake touch.
+            if (auto *read_timer = lv_indev_get_read_timer(touch_input_)) {
+                lv_timer_resume(read_timer);
+            }
+            lv_indev_wait_release(touch_input_);
+            return;
+        }
+        if (touch_input_) {
+            lv_indev_get_point(touch_input_, &touch_start_point_);
+            ESP_LOGI(kTag, "Touch pressed x=%d y=%d", touch_start_point_.x,
+                     touch_start_point_.y);
+            touch_tracking_ = true;
+        }
+        return;
     }
+    if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if (code == LV_EVENT_RELEASED && touch_tracking_ && !touch_gesture_consumed_ &&
+            touch_input_) {
+            lv_point_t current{};
+            lv_indev_get_point(touch_input_, &current);
+            if (dispatch_touch_swipe(current.x - touch_start_point_.x,
+                                     current.y - touch_start_point_.y, LV_DIR_NONE)) {
+                touch_gesture_consumed_ = true;
+                lv_indev_stop_processing(touch_input_);
+                lv_indev_wait_release(touch_input_);
+            }
+        }
+        touch_tracking_ = false;
+        touch_gesture_consumed_ = false;
+        return;
+    }
+    if ((code != LV_EVENT_PRESSING && code != LV_EVENT_GESTURE) || !touch_tracking_ ||
+        touch_gesture_consumed_ || !touch_input_) {
+        return;
+    }
+
+    lv_point_t current{};
+    lv_indev_get_point(touch_input_, &current);
+    int delta_x = current.x - touch_start_point_.x;
+    int delta_y = current.y - touch_start_point_.y;
+    const auto direction = code == LV_EVENT_GESTURE
+                               ? lv_indev_get_gesture_dir(touch_input_)
+                               : LV_DIR_NONE;
+    const bool recognized = dispatch_touch_swipe(delta_x, delta_y, direction);
+
+    if (recognized) {
+        touch_gesture_consumed_ = true;
+        touch_tracking_ = false;
+        lv_indev_stop_processing(touch_input_);
+        lv_indev_wait_release(touch_input_);
+    }
+}
+
+bool Shell::dispatch_touch_swipe(int delta_x, int delta_y, lv_dir_t gesture_direction) {
+    // LVGL emits GESTURE from the indev (rather than PRESSING) once the
+    // configured distance is crossed. Preserve that direction even if the
+    // last sampled point has already been released or coalesced.
+    if (gesture_direction != LV_DIR_NONE) {
+        switch (gesture_direction) {
+            case LV_DIR_LEFT:
+                delta_x = std::min(delta_x, -kSwipeThreshold);
+                break;
+            case LV_DIR_RIGHT:
+                delta_x = std::max(delta_x, kSwipeThreshold);
+                break;
+            case LV_DIR_TOP:
+                delta_y = std::min(delta_y, -kSwipeThreshold);
+                break;
+            case LV_DIR_BOTTOM:
+                delta_y = std::max(delta_y, kSwipeThreshold);
+                break;
+            case LV_DIR_NONE:
+            case LV_DIR_HOR:
+            case LV_DIR_VER:
+            case LV_DIR_ALL:
+                break;
+        }
+    }
+    const int absolute_x = std::abs(delta_x);
+    const int absolute_y = std::abs(delta_y);
+    if (std::max(absolute_x, absolute_y) < kSwipeThreshold) return false;
+
+    using nightglass::core::NavigationAction;
+    // Home has no previous route, so an edge-start horizontal swipe should
+    // still do something useful instead of dispatching Back into a no-op.
+    // Keep the overlay path separate so a swipe can dismiss Quick Settings.
+    if (navigation_.route == nightglass::core::Route::home && !quick_settings_open_ &&
+        absolute_y < absolute_x && absolute_x >= kSwipeThreshold) {
+        navigate(NavigationAction::open_context_deck);
+        ESP_LOGI(kTag, "Touch gesture: context deck");
+        return true;
+    }
+    if (absolute_y > absolute_x && touch_start_point_.y <= kEdgeGestureInset &&
+        delta_y >= kSwipeThreshold) {
+        if (!quick_settings_open_) {
+            quick_settings_open_ = true;
+            render_route();
+        }
+        ESP_LOGI(kTag, "Touch gesture: quick settings");
+        return true;
+    }
+    if (absolute_y > absolute_x &&
+        touch_start_point_.y >= kPanelHeight - kEdgeGestureInset &&
+        delta_y <= -kSwipeThreshold) {
+        quick_settings_open_ = false;
+        navigate(NavigationAction::open_notifications);
+        ESP_LOGI(kTag, "Touch gesture: notifications");
+        return true;
+    }
+    if (absolute_y < absolute_x && touch_start_point_.x <= kEdgeGestureInset &&
+        delta_x >= kSwipeThreshold) {
+        if (quick_settings_open_) {
+            quick_settings_open_ = false;
+            render_route();
+        } else {
+            navigate(NavigationAction::back);
+        }
+        ESP_LOGI(kTag, "Touch gesture: back from left edge");
+        return true;
+    }
+    if (absolute_y < absolute_x &&
+        touch_start_point_.x >= kPanelWidth - kEdgeGestureInset &&
+        delta_x <= -kSwipeThreshold) {
+        if (quick_settings_open_) {
+            quick_settings_open_ = false;
+            render_route();
+        } else {
+            navigate(NavigationAction::back);
+        }
+        ESP_LOGI(kTag, "Touch gesture: back from right edge");
+        return true;
+    }
+    return false;
+}
+
+void Shell::install_touch_callbacks(lv_obj_t *object) {
+    if (!object) return;
+    // LVGL sends PRESSING to the active object. Bubble it through every
+    // rendered child so the shell can recognize movement before a scroller or
+    // button consumes it. dispatch_touch_swipe() is idempotent for duplicate
+    // callbacks encountered while bubbling.
+    lv_obj_add_flag(object, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(object, input_callback, LV_EVENT_PRESSING, this);
+    const auto child_count = lv_obj_get_child_count(object);
+    for (std::uint32_t index = 0; index < child_count; ++index) {
+        install_touch_callbacks(lv_obj_get_child(object, index));
+    }
+}
+
+void Shell::handle_side_key(bool woke_from_inactive) {
+    const auto power = nightglass::services::power_service().snapshot();
+    const bool pressed = power.side_key_ready && power.side_key_pressed;
+    const auto now = esp_timer_get_time();
+    if (pressed && !last_side_key_pressed_) {
+        side_key_pressed_at_us_ = now;
+        side_key_wake_only_ = woke_from_inactive;
+    } else if (!pressed && last_side_key_pressed_) {
+        const auto held_us = side_key_pressed_at_us_ > 0 ? now - side_key_pressed_at_us_ : 0;
+        if (held_us >= kSideKeyLongPressUs) {
+            // Long press remains reserved for the system power/recovery menu.
+            // Keep it inert until that modal has an explicit confirmation path.
+            ESP_LOGI(kTag, "Side key long press reserved for system menu");
+        } else if (!side_key_wake_only_) {
+            if (quick_settings_open_) {
+                quick_settings_open_ = false;
+                render_route();
+            } else if (navigation_.route != nightglass::core::Route::home) {
+                navigate(nightglass::core::NavigationAction::home);
+            } else {
+                navigate(nightglass::core::NavigationAction::open_launcher);
+            }
+        }
+        side_key_pressed_at_us_ = 0;
+        side_key_wake_only_ = false;
+    }
+    last_side_key_pressed_ = pressed;
 }
 
 void Shell::back_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
         nightglass::core::NavigationAction::back);
+}
+
+void Shell::context_deck_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_context_deck);
 }
 
 void Shell::launcher_callback(lv_event_t *event) {
@@ -544,17 +1027,9 @@ void Shell::watchface_settings_callback(lv_event_t *event) {
 
 void Shell::watchface_next_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    auto &service = nightglass::services::watchface_service();
-    const auto &selected = service.selected();
-    const auto *packs = service.packs();
-    const auto count = service.pack_count();
-    bool changed = false;
-    for (std::size_t index = 0; index < count; ++index) {
-        if (packs[index].id == selected.id) {
-            changed = service.select(packs[(index + 1) % count].id);
-            break;
-        }
-    }
+    auto profile = nightglass::services::premium_service().profile();
+    profile.face = (profile.face + 1) % 3;
+    const bool changed = nightglass::services::premium_service().save(profile);
     if (changed) {
         // The pack owns both its home face and system chrome. Recreate the
         // active route and any visible system overlay from the new metadata.
@@ -957,25 +1432,6 @@ void Shell::dismiss_alert_callback(lv_event_t *event) {
     }
 }
 
-void Shell::update_confirm_callback(lv_event_t *event) {
-    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    (void)nightglass::services::update_transport().confirm();
-    self->refresh_system_overlay();
-}
-
-void Shell::update_abort_callback(lv_event_t *event) {
-    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    (void)nightglass::services::update_transport().abort();
-    self->refresh_system_overlay();
-}
-
-void Shell::update_restart_callback(lv_event_t *event) {
-    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
-    if (!nightglass::services::update_transport().restart()) {
-        self->refresh_system_overlay();
-    }
-}
-
 void Shell::diagnostics_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
         nightglass::core::NavigationAction::open_diagnostics);
@@ -1028,6 +1484,27 @@ void Shell::activity_reset_callback(lv_event_t *event) {
 void Shell::gesture_settings_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
         nightglass::core::NavigationAction::open_gestures);
+}
+
+void Shell::gesture_calibration_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    const auto calibration =
+        nightglass::services::activity_service().snapshot().gesture_calibration;
+    if (calibration.stage == nightglass::services::GestureCalibrationStage::idle ||
+        calibration.stage == nightglass::services::GestureCalibrationStage::complete) {
+        nightglass::services::activity_service().start_gesture_calibration();
+    } else if (calibration.stage !=
+                   nightglass::services::GestureCalibrationStage::stationary &&
+               calibration.phase == nightglass::services::GestureCapturePhase::waiting) {
+        nightglass::services::activity_service().capture_gesture_calibration_sample();
+    }
+    self->refresh_gestures();
+}
+
+void Shell::gesture_calibration_cancel_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    nightglass::services::activity_service().cancel_gesture_calibration();
+    self->refresh_gestures();
 }
 
 void Shell::gesture_raise_callback(lv_event_t *event) {
@@ -1178,20 +1655,110 @@ void Shell::openclaw_duration_callback(lv_event_t *event) {
     self->refresh_openclaw();
 }
 
+void Shell::openclaw_previous_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (self->openclaw_response_page_ > 0) --self->openclaw_response_page_;
+    self->refresh_openclaw();
+}
+
+void Shell::openclaw_next_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (self->openclaw_response_page_ + 1 < self->openclaw_response_page_count_) {
+        ++self->openclaw_response_page_;
+    }
+    self->refresh_openclaw();
+}
+
+void Shell::openclaw_spoken_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    const auto snapshot = nightglass::services::voice_service().snapshot();
+    const auto status = nightglass::services::voice_service().update_spoken_replies(
+        !snapshot.spoken_replies);
+    if (!status.is_ok() && self->openclaw_detail_) {
+        set_state(self->openclaw_state_, "BUSY", kAmber);
+        lv_label_set_text(self->openclaw_detail_, status.detail);
+        return;
+    }
+    self->refresh_openclaw();
+}
+
+void Shell::discord_voice_press_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (!self) return;
+    const auto status = nightglass::services::voice_service().begin_capture(
+        nightglass::services::VoiceDestination::discord_voice_note);
+    if (!status.is_ok() && self->discord_voice_state_) {
+        set_state(self->discord_voice_state_, "UNAVAILABLE", kRed);
+        set_button_text(self->discord_voice_, status.detail);
+    }
+}
+
+void Shell::discord_voice_release_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (!self) return;
+    if (lv_event_get_code(event) == LV_EVENT_PRESS_LOST) {
+        nightglass::services::voice_service().cancel();
+    } else {
+        nightglass::services::voice_service().finish_capture();
+    }
+    self->refresh_discord();
+}
+
+void Shell::discord_voice_cancel_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (!self) return;
+    nightglass::services::voice_service().cancel();
+    self->refresh_discord();
+}
+
 void Shell::media_app_callback(lv_event_t *event) {
     static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
         nightglass::core::NavigationAction::open_media);
+}
+
+void Shell::spotify_app_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_spotify);
+}
+
+void Shell::discord_app_callback(lv_event_t *event) {
+    static_cast<Shell *>(lv_event_get_user_data(event))->navigate(
+        nightglass::core::NavigationAction::open_discord);
+}
+
+void Shell::discord_clear_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (!self) return;
+    const auto snapshot = nightglass::services::connectivity_service().snapshot();
+    bool sent = false;
+    for (const auto &notification : snapshot.notifications) {
+        if (is_discord_notification(notification)) {
+            sent = nightglass::services::connectivity_service().mark_notification(
+                       notification.id, true) || sent;
+        }
+    }
+    if (!sent && self->discord_state_) set_state(self->discord_state_, "NOTHING TO CLEAR", kSecondary);
 }
 
 void Shell::notification_detail_callback(lv_event_t *event) {
     auto *context = static_cast<NotificationActionContext *>(lv_event_get_user_data(event));
     if (!context || !context->shell || context->id == 0) return;
     context->shell->selected_notification_id_ = context->id;
+    if (context->shell->navigation_.route == nightglass::core::Route::discord) {
+        // Keep the user inside the Discord surface. The dedicated detail view
+        // below keeps the Discord inbox back stack and reply controls intact.
+        context->shell->render_route();
+        return;
+    }
     context->shell->render_route();
 }
 
 void Shell::notification_list_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (self && self->navigation_.route == nightglass::core::Route::discord) {
+        nightglass::services::voice_service().cancel();
+    }
+    if (!self) return;
     self->selected_notification_id_ = 0;
     self->render_route();
 }
@@ -1285,43 +1852,81 @@ void Shell::face_action_callback(lv_event_t *event) {
 }
 
 void Shell::navigate(nightglass::core::NavigationAction action) {
+    if (premium_open_) {
+        premium_open_ = false;
+        nightglass::services::premium_service().clear_content();
+        if (action == nightglass::core::NavigationAction::back) { render_route(); return; }
+    }
     const auto next = nightglass::core::reduce_navigation(navigation_, action);
     if (next == navigation_) return;
     if (navigation_.route == nightglass::core::Route::openclaw &&
         next.route != nightglass::core::Route::openclaw) {
         nightglass::services::voice_service().cancel();
     }
+    if (navigation_.route == nightglass::core::Route::discord &&
+        next.route != nightglass::core::Route::discord) {
+        nightglass::services::voice_service().cancel();
+    }
+    if (navigation_.route == nightglass::core::Route::gestures &&
+        next.route != nightglass::core::Route::gestures) {
+        const auto calibration =
+            nightglass::services::activity_service().snapshot().gesture_calibration;
+        if (nightglass::services::gesture_calibration_active(calibration)) {
+            nightglass::services::activity_service().cancel_gesture_calibration();
+        }
+    }
     navigation_ = next;
     render_route();
+    log_lvgl_stack_reserve("navigation");
 }
 
 void Shell::render_route() {
+    nightglass::services::watchface_service().refresh_profile();
+    if (premium_open_ && quick_settings_open_) {
+        premium_open_ = false;
+        nightglass::services::premium_service().clear_content();
+    }
+    const auto render_started = esp_timer_get_time();
+    lv_anim_delete(content_host_, nullptr);
+    lv_obj_set_style_opa(content_host_, LV_OPA_COVER, 0);
+    personal_home_ = false;
+    personal_values_.fill(nullptr);
+    premium_status_ = premium_body_ = premium_items_ = nullptr;
+    nightglass::services::hardware_service().set_gyro_enabled(
+        !quick_settings_open_ && navigation_.route == nightglass::core::Route::diagnostics);
     configure_refresh_timer(0);
     clear_route_objects();
     lv_obj_clean(content_host_);
+    lv_image_cache_drop(&premium_image_);
 
     const auto &pack = nightglass::services::watchface_service().selected();
     const auto &chrome = chrome_palette();
     lv_obj_set_style_bg_color(content_host_, lv_color_hex(chrome.background), 0);
     lv_obj_set_style_bg_opa(content_host_, LV_OPA_COVER, 0);
-    if (quick_settings_open_) {
-        render_quick_settings();
-        return;
-    }
-    if (navigation_.route != nightglass::core::Route::home &&
-        nightglass::services::valid_face_pack(pack) &&
-        pack.chrome.route_background_asset != nightglass::services::FaceAsset::none) {
-        if (const auto *asset = face_asset(pack.chrome.route_background_asset)) {
-            auto *background = lv_image_create(content_host_);
-            lv_image_set_src(background, asset);
-            lv_obj_set_pos(background, 0, 0);
-            lv_obj_set_style_image_opa(background, pack.chrome.route_background_opacity, 0);
-        }
+    // System sheets may be open while the underlying route is still Home.
+    // Add static chrome before every secondary route, never Home or AOD itself.
+    if (premium_open_ || quick_settings_open_ ||
+        navigation_.route != nightglass::core::Route::home) {
+        add_chrome_background(content_host_, pack);
     }
 
+    if (premium_open_) {
+        render_premium_content();
+        install_touch_callbacks(content_host_);
+        return;
+    }
+
+    if (quick_settings_open_) {
+        render_quick_settings();
+        install_touch_callbacks(content_host_);
+        return;
+    }
     switch (navigation_.route) {
         case nightglass::core::Route::home:
             render_home();
+            break;
+        case nightglass::core::Route::context_deck:
+            render_context_deck();
             break;
         case nightglass::core::Route::launcher:
             render_launcher();
@@ -1353,6 +1958,12 @@ void Shell::render_route() {
         case nightglass::core::Route::media:
             render_media();
             break;
+        case nightglass::core::Route::spotify:
+            render_media();
+            break;
+        case nightglass::core::Route::discord:
+            render_discord();
+            break;
         case nightglass::core::Route::notifications:
             render_notifications();
             break;
@@ -1378,6 +1989,21 @@ void Shell::render_route() {
             render_about();
             break;
     }
+    install_touch_callbacks(content_host_);
+    if (!(nightglass::services::premium_service().profile().flags &
+          nightglass::services::kPremiumReduceMotion) && !ambient_visible_) {
+        lv_anim_t transition;
+        lv_anim_init(&transition);
+        lv_anim_set_var(&transition, content_host_);
+        lv_anim_set_values(&transition, 190, 255);
+        lv_anim_set_duration(&transition, 120);
+        lv_anim_set_exec_cb(&transition, [](void *object, std::int32_t opacity) {
+            lv_obj_set_style_opa(static_cast<lv_obj_t *>(object), opacity, 0);
+        });
+        lv_anim_start(&transition);
+    }
+    ESP_LOGI(kTag, "UI route build=%lldus route=%u", esp_timer_get_time() - render_started,
+             static_cast<unsigned>(navigation_.route));
 }
 
 void Shell::render_home() {
@@ -1388,6 +2014,13 @@ void Shell::render_home() {
         render_aod_home();
         configure_refresh_timer(1000);
         refresh_home();
+        return;
+    }
+    const auto profile = nightglass::services::premium_service().profile();
+    if (profile.face == 2 || (profile.flags & nightglass::services::kPremiumLargeText)) {
+        render_personal_home();
+        configure_refresh_timer(1000);
+        refresh_personal_home();
         return;
     }
     const auto &pack = nightglass::services::watchface_service().selected();
@@ -1583,43 +2216,125 @@ void Shell::render_launcher() {
                 kSurface, kPrimary, connectivity_callback, this);
     make_button(scroller, 0, 7 * gap, kSafeContentWidth - 16, row_height, "MEDIA",
                 kSurface, kPrimary, media_app_callback, this);
-    make_button(scroller, 0, 8 * gap, kSafeContentWidth - 16, row_height, "NOTIFICATIONS",
+    make_button(scroller, 0, 8 * gap, kSafeContentWidth - 16, row_height, "SPOTIFY",
+                kCyan, kVoid, spotify_app_callback, this);
+    make_button(scroller, 0, 9 * gap, kSafeContentWidth - 16, row_height, "DISCORD",
+                kViolet, kVoid, discord_app_callback, this);
+    make_button(scroller, 0, 10 * gap, kSafeContentWidth - 16, row_height, "NOTIFICATIONS",
                 kSurface, kPrimary, notifications_callback, this);
-    make_button(scroller, 0, 9 * gap, kSafeContentWidth - 16, row_height, "AUDIO",
+    make_button(scroller, 0, 11 * gap, kSafeContentWidth - 16, row_height, "AUDIO",
                 kSurface, kPrimary, audio_callback, this);
-    make_button(scroller, 0, 10 * gap, kSafeContentWidth - 16, row_height, "OPENCLAW",
+    make_button(scroller, 0, 12 * gap, kSafeContentWidth - 16, row_height, "OPENCLAW",
                 kCyan, kVoid, openclaw_callback, this);
-    make_button(scroller, 0, 11 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
+    make_button(scroller, 0, 13 * gap, kSafeContentWidth - 16, row_height, "DIAGNOSTICS",
                 kSurface, kPrimary, diagnostics_callback, this);
-    make_button(scroller, 0, 12 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
+    make_button(scroller, 0, 14 * gap, kSafeContentWidth - 16, row_height, "ABOUT",
                 kSurface, kPrimary, about_callback, this);
-    make_button(scroller, 0, 13 * gap, kSafeContentWidth - 16, row_height, "QUICK SETTINGS",
+    make_button(scroller, 0, 15 * gap, kSafeContentWidth - 16, row_height, "QUICK SETTINGS",
                 kSurface, kPrimary, quick_settings_callback, this);
+    make_button(scroller, 0, 16 * gap, kSafeContentWidth - 16, row_height, "CONTEXT DECK",
+                kCyan, kVoid, context_deck_callback, this);
+}
+
+void Shell::render_context_deck() {
+    add_header(content_host_, "CONTEXT", back_callback, this);
+    constexpr std::array<const char *, 5> kEyebrows{
+        "NEXT UP", "MOVE", "WEATHER", "MEDIA", "INBOX",
+    };
+    // Five live cards cannot all fit below the system header at a readable
+    // three-line size. Keep the deck a real vertical surface instead of
+    // compressing the last cards into the rounded-corner/clipped region.
+    auto *scroller = make_scroller(content_host_);
+    const auto profile = nightglass::services::premium_service().profile();
+    const bool large = profile.flags & nightglass::services::kPremiumLargeText;
+    const int kCardStep = large ? 128 : 104;
+    const int kCardHeight = large ? 120 : 96;
+    constexpr int kCardWidth = kSafeContentWidth - 8;
+    unsigned position = 0;
+    for (auto index : profile.deck_order) {
+        if (!(profile.deck_mask & (1U << index))) continue;
+        auto *card = lv_obj_create(scroller);
+        lv_obj_set_size(card, kCardWidth, kCardHeight);
+        lv_obj_set_pos(card, 0, static_cast<int>(position++) * kCardStep);
+        lv_obj_set_style_radius(card, 16, 0);
+        lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(chrome_palette().border), 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_set_style_pad_all(card, 12, 0);
+        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        auto &widgets = context_cards_[index];
+        widgets.eyebrow = label(card, kEyebrows[index], &lv_font_montserrat_14, kSecondary);
+        lv_obj_set_pos(widgets.eyebrow, 0, 0);
+        widgets.title = label(card, "Loading", &lv_font_montserrat_18, kPrimary);
+        lv_obj_set_pos(widgets.title, 0, large ? 22 : 18);
+        lv_obj_set_width(widgets.title, kCardWidth - 24);
+        lv_obj_set_height(widgets.title, 24);
+        lv_label_set_long_mode(widgets.title, LV_LABEL_LONG_MODE_DOTS);
+        widgets.detail = label(card, "Updating", &lv_font_montserrat_14, kSecondary);
+        lv_obj_set_pos(widgets.detail, 0, large ? 54 : 46);
+        lv_obj_set_width(widgets.detail, kCardWidth - 24);
+        lv_obj_set_height(widgets.detail, large ? 46 : 34);
+        lv_label_set_long_mode(widgets.detail, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_style_text_line_space(widgets.detail, 2, 0);
+    }
+    configure_refresh_timer(1000);
+    refresh_context_deck();
 }
 
 void Shell::render_openclaw() {
     add_header(content_host_, "OPENCLAW", back_callback, this);
-    auto *card = make_route_card(content_host_, 104, 160);
+    auto *scroller = make_scroller(content_host_);
+    const auto make_inner_card = [scroller](int y, int height) {
+        auto *card = lv_obj_create(scroller);
+        lv_obj_set_size(card, kSafeContentWidth - 16, height);
+        lv_obj_set_pos(card, 0, y);
+        lv_obj_set_style_radius(card, 16, 0);
+        lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(chrome_palette().border), 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_set_style_pad_all(card, 12, 0);
+        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        return card;
+    };
+    auto *card = make_inner_card(0, 112);
     openclaw_state_ = label(card, "READY", &lv_font_montserrat_20, kGreen);
     lv_obj_set_pos(openclaw_state_, 0, 0);
     openclaw_detail_ = label(card, "Hold to speak. Release to send.",
                              &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(openclaw_detail_, 0, 36);
-    lv_obj_set_width(openclaw_detail_, kSafeContentWidth - 32);
+    lv_obj_set_width(openclaw_detail_, kSafeContentWidth - 40);
     lv_label_set_long_mode(openclaw_detail_, LV_LABEL_LONG_MODE_WRAP);
 
-    openclaw_response_ = label(content_host_, "Your response will appear here.",
-                               &lv_font_montserrat_16, kPrimary);
-    lv_obj_set_pos(openclaw_response_, kSafeInset, 188);
-    lv_obj_set_size(openclaw_response_, kSafeContentWidth, 72);
-    lv_label_set_long_mode(openclaw_response_, LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+    auto *response_card = make_inner_card(122, 154);
+    auto *response_heading = label(response_card, "RESPONSE", &lv_font_montserrat_14,
+                                   kSecondary);
+    lv_obj_set_pos(response_heading, 0, 0);
+    openclaw_page_ = label(response_card, "PAGE 1 / 1", &lv_font_montserrat_14,
+                           kSecondary);
+    lv_obj_set_pos(openclaw_page_, 238, 0);
+    lv_obj_set_width(openclaw_page_, 100);
+    lv_label_set_long_mode(openclaw_page_, LV_LABEL_LONG_MODE_DOTS);
+    openclaw_response_ = label(response_card, "Your response will appear here.",
+                               &lv_font_montserrat_18, kPrimary);
+    lv_obj_set_pos(openclaw_response_, 0, 30);
+    lv_obj_set_size(openclaw_response_, kSafeContentWidth - 40, 108);
+    lv_label_set_long_mode(openclaw_response_, LV_LABEL_LONG_MODE_WRAP);
 
-    openclaw_duration_ = make_button(content_host_, kSafeInset, 270,
-                                     kSafeContentWidth, 48, "MAX 60 SECONDS",
+    openclaw_previous_ = make_button(scroller, 0, 288, 174, 48, "PREVIOUS",
+                                     kSurface, kPrimary,
+                                     openclaw_previous_callback, this);
+    openclaw_next_ = make_button(scroller, 182, 288, 180, 48, "NEXT",
+                                 kSurface, kPrimary,
+                                 openclaw_next_callback, this);
+
+    openclaw_duration_ = make_button(scroller, 0, 348,
+                                     kSafeContentWidth - 16, 48, "MAX 60 SECONDS",
                                      kSurface, kPrimary,
                                      openclaw_duration_callback, this);
 
-    openclaw_ptt_ = make_button(content_host_, kSafeInset, 326, kSafeContentWidth,
+    openclaw_ptt_ = make_button(scroller, 0, 408, kSafeContentWidth - 16,
                                 82, "HOLD TO SPEAK", kCyan, kVoid, nullptr, this);
     lv_obj_add_event_cb(openclaw_ptt_, openclaw_press_callback,
                         LV_EVENT_PRESSED, this);
@@ -1627,8 +2342,14 @@ void Shell::render_openclaw() {
                         LV_EVENT_RELEASED, this);
     lv_obj_add_event_cb(openclaw_ptt_, openclaw_release_callback,
                         LV_EVENT_PRESS_LOST, this);
-    make_button(content_host_, kSafeInset, 418, kSafeContentWidth, 52,
+    openclaw_spoken_ = make_button(scroller, 0, 502, kSafeContentWidth - 16, 48,
+                                   "SPOKEN REPLIES  OFF", kSurface, kPrimary,
+                                   openclaw_spoken_callback, this);
+    make_button(scroller, 0, 562, kSafeContentWidth - 16, 52,
                 "CANCEL", kSurface, kAmber, openclaw_cancel_callback, this);
+    openclaw_suggestion_ = make_button(scroller, 0, 632, kSafeContentWidth - 16, 68,
+        "NO SUGGESTED ACTION", kSurface, kPrimary, openclaw_suggestion_callback, this);
+    lv_obj_add_state(openclaw_suggestion_, LV_STATE_DISABLED);
     configure_refresh_timer(100);
     refresh_openclaw();
 }
@@ -1678,26 +2399,25 @@ void Shell::render_settings() {
 }
 
 void Shell::render_watchface_settings() {
-    add_header(content_host_, "WATCH FACE", back_callback, this);
-    auto *card = make_route_card(content_host_, 118, 152);
-    auto *heading = label(card, "ACTIVE PACK", &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(heading, 0, 0);
-    watchface_name_ = label(card, "", &lv_font_montserrat_26, kPrimary);
-    lv_obj_set_pos(watchface_name_, 0, 38);
-    lv_obj_set_width(watchface_name_, kSafeContentWidth - 32);
-    auto *contract = label(card, "Declarative | versioned | persistent",
-                           &lv_font_montserrat_14, kGreen);
-    lv_obj_set_pos(contract, 0, 85);
-
-    make_button(content_host_, kSafeInset, 294, kSafeContentWidth, 72, "NEXT FACE",
+    add_header(content_host_, "FACE & DISPLAY", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    watchface_name_ = label(scroller, "", &lv_font_montserrat_26, kPrimary);
+    lv_obj_set_width(watchface_name_, kSafeContentWidth - 16);
+    make_button(scroller, 0, 76, kSafeContentWidth - 16, 60, "NEXT FACE",
                 kCyan, kVoid, watchface_next_callback, this);
-    auto *note = label(content_host_,
-                       "Face packs choose a supported layout, palette, and complications. "
-                       "They cannot execute firmware code.",
-                       &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(note, kSafeInset, 392);
-    lv_obj_set_width(note, kSafeContentWidth);
-    lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
+    const auto p = nightglass::services::premium_service().profile();
+    constexpr std::array<const char *, 3> names{"ALWAYS ON", "LARGE TEXT", "REDUCE MOTION"};
+    for (unsigned i = 0; i < names.size(); ++i) {
+        char text[40]{};
+        std::snprintf(text, sizeof(text), "%s: %s", names[i], (p.flags & (1U << i)) ? "ON" : "OFF");
+        make_button(scroller, 0, 152 + i * 76, kSafeContentWidth - 16, 60, text,
+                    kSurface, kPrimary, display_option_callback,
+                    reinterpret_cast<void *>(static_cast<std::uintptr_t>(1U << i)));
+    }
+    auto *note = label(scroller, "Edit faces, colors and cards on your phone.\n\n"
+        "Always On uses more battery and pauses at 15%. Large Text uses the spacious Personal face.",
+        &lv_font_montserrat_16, kSecondary);
+    lv_obj_set_pos(note, 0, 390); lv_obj_set_width(note, kSafeContentWidth - 20);
     refresh_watchface_settings();
 }
 
@@ -1726,26 +2446,38 @@ void Shell::render_activity() {
 void Shell::render_gestures() {
     add_header(content_host_, "GESTURES", back_callback, this);
     auto *scroller = make_scroller(content_host_);
-    gesture_state_ = label(scroller, "WAITING FOR CALIBRATION", &lv_font_montserrat_16,
-                           kSecondary);
+    gesture_state_ = label(scroller, "GESTURE PROFILE", &lv_font_montserrat_16, kSecondary);
     lv_obj_set_pos(gesture_state_, 8, 4);
     lv_obj_set_width(gesture_state_, kSafeContentWidth - 32);
-    gesture_raise_ = make_button(scroller, 0, 64, kSafeContentWidth - 16, 64, "",
+    gesture_detail_ = label(scroller, "Guided calibration is ready.",
+                            &lv_font_montserrat_14, kPrimary);
+    lv_obj_set_pos(gesture_detail_, 8, 36);
+    lv_obj_set_width(gesture_detail_, kSafeContentWidth - 32);
+    lv_label_set_long_mode(gesture_detail_, LV_LABEL_LONG_MODE_WRAP);
+    gesture_calibration_ = make_button(scroller, 0, 126, kSafeContentWidth - 16, 64,
+                                       "START GUIDED CALIBRATION", kViolet, kVoid,
+                                       gesture_calibration_callback, this);
+    gesture_calibration_cancel_ = make_button(
+        scroller, 0, 200, kSafeContentWidth - 16, 48, "CANCEL - KEEP OLD PROFILE",
+        kSurface, kAmber, gesture_calibration_cancel_callback, this);
+    auto *actions = label(scroller, "ACTIONS", &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(actions, 8, 270);
+    gesture_raise_ = make_button(scroller, 0, 300, kSafeContentWidth - 16, 64, "",
                                  kSurface, kPrimary, gesture_raise_callback, this);
-    gesture_twist_ = make_button(scroller, 0, 138, kSafeContentWidth - 16, 64, "",
+    gesture_twist_ = make_button(scroller, 0, 374, kSafeContentWidth - 16, 64, "",
                                  kSurface, kPrimary, gesture_twist_callback, this);
-    gesture_shake_ = make_button(scroller, 0, 212, kSafeContentWidth - 16, 64, "",
+    gesture_shake_ = make_button(scroller, 0, 448, kSafeContentWidth - 16, 64, "",
                                  kSurface, kPrimary, gesture_shake_callback, this);
-    gesture_flick_ = make_button(scroller, 0, 286, kSafeContentWidth - 16, 64, "",
+    gesture_flick_ = make_button(scroller, 0, 522, kSafeContentWidth - 16, 64, "",
                                  kSurface, kPrimary, gesture_flick_callback, this);
     auto *note = label(scroller,
-                       "Actions default off until physical axis and false-positive "
-                       "calibration passes on this watch.",
+                       "Calibration saves sensitivity on this watch. Actions stay at "
+                       "their current on/off settings.",
                        &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(note, 8, 370);
+    lv_obj_set_pos(note, 8, 606);
     lv_obj_set_width(note, kSafeContentWidth - 32);
     lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
-    configure_refresh_timer(500);
+    configure_refresh_timer(200);
     refresh_gestures();
 }
 
@@ -1844,8 +2576,11 @@ void Shell::render_connectivity() {
 }
 
 void Shell::render_media() {
-    add_header(content_host_, "MEDIA", back_callback, this);
-    auto *card = make_route_card(content_host_, 102, 190);
+    const bool spotify_route = navigation_.route == nightglass::core::Route::spotify;
+    add_header(content_host_, spotify_route ? "SPOTIFY" : "MEDIA", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    auto *card = make_route_card(scroller, 0, 186);
+    lv_obj_set_pos(card, 0, 0); lv_obj_set_width(card, kSafeContentWidth - 12);
     media_state_ = label(card, "PHONE DISCONNECTED", &lv_font_montserrat_14, kAmber);
     lv_obj_set_pos(media_state_, 0, 0);
     media_title_ = label(card, "Nothing playing", &lv_font_montserrat_20, kPrimary);
@@ -1862,29 +2597,304 @@ void Shell::render_media() {
     lv_bar_set_range(media_progress_, 0, 1000);
     media_time_ = label(card, "0:00 / 0:00", &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(media_time_, 0, 136);
-    make_button(content_host_, kSafeInset, 300, 108, 58, "PREV", kSurface, kPrimary,
+    // Five compact transport controls mirror the common phone player layout:
+    // previous, rewind, play/pause, fast-forward, and next.
+    constexpr int control_y = 198;
+    constexpr int control_height = 48;
+    make_button(scroller, 0, control_y, 62, control_height, "PREV", kSurface,
+                kPrimary,
                 media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
                     nightglass::services::MediaCommand::previous)));
-    make_button(content_host_, 151, 300, 108, 58, "PLAY", kCyan, kVoid,
-                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
-                    nightglass::services::MediaCommand::play_pause)));
-    make_button(content_host_, 274, 300, 108, 58, "NEXT", kSurface, kPrimary,
-                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
-                    nightglass::services::MediaCommand::next)));
-    make_button(content_host_, kSafeInset, 368, 170, 48, "SEEK -10", kSurface, kPrimary,
+    make_button(scroller, 68, control_y, 62, control_height, "-15", kSurface, kPrimary,
                 media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
                     nightglass::services::MediaCommand::seek_backward)));
-    make_button(content_host_, 212, 368, 170, 48, "SEEK +10", kSurface, kPrimary,
+    make_button(scroller, 136, control_y, 70, control_height, "PLAY", kCyan, kVoid,
+                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::play_pause)));
+    make_button(scroller, 212, control_y, 62, control_height, "+15", kSurface, kPrimary,
                 media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
                     nightglass::services::MediaCommand::seek_forward)));
-    make_button(content_host_, kSafeInset, 426, 170, 48, "VOLUME -", kSurface, kPrimary,
+    make_button(scroller, 280, control_y, 62, control_height, "NEXT", kSurface, kPrimary,
+                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::next)));
+    constexpr int secondary_y = 258;
+    make_button(scroller, 0, secondary_y, 106, 52, "RESTART", kSurface, kPrimary,
+                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::restart)));
+    make_button(scroller, 118, secondary_y, 106, 52, "STOP", kSurface, kAmber,
+                media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::MediaCommand::stop)));
+    if (spotify_route) {
+        make_button(scroller, 236, secondary_y, 106, 52, "OPEN APP", kSurface, kPrimary,
+                    phone_command_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                        nightglass::services::PhoneCommand::launch_spotify)));
+    }
+    constexpr int volume_y = 322;
+    make_button(scroller, 0, volume_y, 166, 52, "VOLUME -", kSurface, kPrimary,
                 media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
                     nightglass::services::MediaCommand::volume_down)));
-    make_button(content_host_, 212, 426, 170, 48, "VOLUME +", kSurface, kPrimary,
+    make_button(scroller, 176, volume_y, 166, 52, "VOLUME +", kSurface, kPrimary,
                 media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
                     nightglass::services::MediaCommand::volume_up)));
+    make_button(scroller, 0, 386, kSafeContentWidth - 12, 56,
+                "ARTWORK / QUEUE / OUTPUT", kSurface, kPrimary, premium_open_callback, this);
     configure_refresh_timer(1000);
     refresh_media();
+}
+
+void Shell::render_discord() {
+    const auto snapshot = nightglass::services::connectivity_service().snapshot();
+    discord_sequence_ = snapshot.notification_sequence;
+    notification_action_count_ = 0;
+
+    const bool connected = snapshot.state ==
+                           nightglass::services::CompanionLinkState::connected_encrypted;
+
+    // A Discord message gets its own detail surface instead of being routed
+    // through the general notification shade. That keeps the app context,
+    // gives the message enough room to read, and makes the reply path obvious.
+    if (selected_notification_id_ != 0) {
+        const auto selected = std::find_if(
+            snapshot.notifications.begin(), snapshot.notifications.end(),
+            [this](const auto &notification) {
+                return is_discord_notification(notification) &&
+                       notification.id == selected_notification_id_;
+            });
+        if (selected != snapshot.notifications.end()) {
+            add_header(content_host_, "DISCORD MESSAGE", notification_list_callback, this);
+            auto *scroller = make_scroller(content_host_);
+            constexpr int card_width = kSafeContentWidth - 16;
+            constexpr int card_height = 266;
+            auto *card = lv_obj_create(scroller);
+            lv_obj_set_size(card, card_width, card_height);
+            lv_obj_set_pos(card, 0, 0);
+            lv_obj_set_style_radius(card, 14, 0);
+            lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
+            lv_obj_set_style_border_color(card, lv_color_hex(chrome_palette().border), 0);
+            lv_obj_set_style_border_width(card, 1, 0);
+            lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+            auto *kind = label(card, discord_notification_kind(*selected),
+                               &lv_font_montserrat_14,
+                               selected->replyable ? kCyan : kGreen);
+            lv_obj_set_pos(kind, 12, 8);
+            auto *title = label(card, selected->title.data(), &lv_font_montserrat_20,
+                                kPrimary);
+            lv_obj_set_pos(title, 12, 30);
+            lv_obj_set_width(title, card_width - 24);
+            lv_obj_set_height(title, 52);
+            lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_WRAP);
+            auto *body = label(card, selected->body.data(), &lv_font_montserrat_16,
+                               kSecondary);
+            lv_obj_set_pos(body, 12, 86);
+            lv_obj_set_width(body, card_width - 24);
+            lv_obj_set_height(body, 48);
+            lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_WRAP);
+
+            make_button(card, 12, 140, card_width - 24, 48, "CONVERSATION + ACTIONS",
+                        kSurface, kPrimary, premium_open_callback, this);
+
+            auto &open = notification_actions_[notification_action_count_++];
+            open = {this, selected->id, false, nullptr};
+            make_button(card, 12, 198, 150, 48, "OPEN DISCORD", kViolet, kVoid,
+                        notification_action_callback, &open);
+            auto &dismiss = notification_actions_[notification_action_count_++];
+            dismiss = {this, selected->id, true, nullptr};
+            make_button(card, 174, 198, 152, 48, "DISMISS", kSurface, kAmber,
+                        notification_action_callback, &dismiss);
+
+            discord_voice_state_ = label(scroller, "VOICE NOTE | READY",
+                                         &lv_font_montserrat_14, kSecondary);
+            lv_obj_set_pos(discord_voice_state_, 8, 280);
+            lv_obj_set_width(discord_voice_state_, card_width - 24);
+            lv_label_set_long_mode(discord_voice_state_, LV_LABEL_LONG_MODE_DOTS);
+            discord_voice_ = make_button(scroller, 0, 302, 164, 52, "HOLD TO RECORD",
+                                         kCyan, kVoid, nullptr, this);
+            lv_obj_add_event_cb(discord_voice_, discord_voice_press_callback,
+                                LV_EVENT_PRESSED, this);
+            lv_obj_add_event_cb(discord_voice_, discord_voice_release_callback,
+                                LV_EVENT_RELEASED, this);
+            lv_obj_add_event_cb(discord_voice_, discord_voice_release_callback,
+                                LV_EVENT_PRESS_LOST, this);
+            discord_voice_cancel_ = make_button(scroller, 174, 302, 164, 52, "CANCEL",
+                                                 kSurface, kAmber,
+                                                 discord_voice_cancel_callback, this);
+            lv_obj_add_flag(discord_voice_cancel_, LV_OBJ_FLAG_HIDDEN);
+
+            if (selected->replyable) {
+                auto *heading = label(scroller, "QUICK REPLY", &lv_font_montserrat_14,
+                                      kSecondary);
+                lv_obj_set_pos(heading, 8, 374);
+                if (snapshot.reply_notification_id == selected->id) {
+                    const char *reply_state = snapshot.reply_pending
+                                                  ? "SENDING REPLY..."
+                                                  : snapshot.reply_status == 0
+                                                        ? "REPLY SENT TO PHONE"
+                                                        : "REPLY FAILED";
+                    auto *result = label(scroller, reply_state, &lv_font_montserrat_14,
+                                         snapshot.reply_pending ? kAmber
+                                                                : snapshot.reply_status == 0
+                                                                      ? kGreen : kRed);
+                    lv_obj_set_pos(result, 178, 374);
+                    lv_obj_set_width(result, card_width - 178);
+                    lv_label_set_long_mode(result, LV_LABEL_LONG_MODE_DOTS);
+                }
+                constexpr std::array<const char *, 4> replies{
+                    "ACK", "ON MY WAY", "CALL ME", "LATER"};
+                for (std::size_t index = 0; index < replies.size(); ++index) {
+                    auto &reply = notification_actions_[notification_action_count_++];
+                    reply = {this, selected->id, false, replies[index]};
+                    make_button(scroller, index % 2 == 0 ? 0 : 174,
+                                402 + static_cast<int>(index / 2) * 58,
+                                index % 2 == 0 ? 164 : 164, 48, replies[index],
+                                kSurface, kPrimary, notification_action_callback, &reply);
+                }
+                auto *custom = label(scroller, "TYPE A DISCORD REPLY",
+                                     &lv_font_montserrat_14, kSecondary);
+                lv_obj_set_pos(custom, 8, 526);
+                notification_reply_box_ = lv_textarea_create(scroller);
+                lv_obj_set_size(notification_reply_box_, card_width - 16, 68);
+                lv_obj_set_pos(notification_reply_box_, 0, 554);
+                lv_textarea_set_one_line(notification_reply_box_, true);
+                lv_textarea_set_max_length(notification_reply_box_, 96);
+                lv_textarea_set_placeholder_text(notification_reply_box_, "Reply text");
+                auto *keyboard = lv_keyboard_create(scroller);
+                lv_obj_set_size(keyboard, card_width - 16, 190);
+                lv_obj_set_pos(keyboard, 0, 634);
+                lv_keyboard_set_textarea(keyboard, notification_reply_box_);
+                make_button(scroller, 0, 840, card_width - 16, 52, "SEND REPLY",
+                            kCyan, kVoid, notification_reply_send_callback, this);
+            } else {
+                auto *note = label(scroller,
+                                   "Discord did not expose an inline reply action for this message.",
+                                   &lv_font_montserrat_14, kSecondary);
+                lv_obj_set_pos(note, 8, 374);
+                lv_obj_set_width(note, card_width - 24);
+                lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
+            }
+            configure_refresh_timer(100);
+            refresh_discord();
+            return;
+        }
+        selected_notification_id_ = 0;
+    }
+
+    add_header(content_host_, "DISCORD", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    std::size_t discord_count = 0;
+    std::size_t reply_count = 0;
+    for (const auto &notification : snapshot.notifications) {
+        if (!is_discord_notification(notification)) continue;
+        ++discord_count;
+        if (notification.replyable) ++reply_count;
+    }
+    auto *summary = lv_obj_create(scroller);
+    lv_obj_set_size(summary, kSafeContentWidth - 16, 66);
+    lv_obj_set_pos(summary, 0, 0);
+    lv_obj_set_style_radius(summary, 14, 0);
+    lv_obj_set_style_bg_color(summary, lv_color_hex(chrome_palette().surface), 0);
+    lv_obj_set_style_border_color(summary, lv_color_hex(chrome_palette().border), 0);
+    lv_obj_set_style_border_width(summary, 1, 0);
+    lv_obj_remove_flag(summary, LV_OBJ_FLAG_SCROLLABLE);
+    char summary_text[64]{};
+    std::snprintf(summary_text, sizeof(summary_text), "%u MESSAGE%s  |  %u REPLY%s",
+                  static_cast<unsigned>(discord_count), discord_count == 1 ? "" : "S",
+                  static_cast<unsigned>(reply_count), reply_count == 1 ? "" : "S");
+    discord_state_ = label(summary,
+                            connected ? summary_text : "PHONE DISCONNECTED",
+                            &lv_font_montserrat_16,
+                            connected && discord_count > 0 ? kGreen : kAmber);
+    lv_obj_set_pos(discord_state_, 12, 10);
+    auto *summary_detail = label(summary,
+                                 connected ? "LIVE INBOX  |  DMs, mentions, and calls"
+                                           : "Reconnect the companion to refresh Discord",
+                                 &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(summary_detail, 12, 38);
+    lv_obj_set_width(summary_detail, kSafeContentWidth - 56);
+    lv_label_set_long_mode(summary_detail, LV_LABEL_LONG_MODE_DOTS);
+
+    make_button(scroller, 0, 76, 174, 46, "OPEN DISCORD", kViolet, kVoid,
+                phone_command_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
+                    nightglass::services::PhoneCommand::launch_discord)));
+    make_button(scroller, 190, 76, 174, 46, "CLEAR INBOX", kSurface, kAmber,
+                discord_clear_callback, this);
+
+    int y = 134;
+    std::size_t displayed = 0;
+    for (const auto &notification : snapshot.notifications) {
+        if (!is_discord_notification(notification)) continue;
+        if (notification_action_count_ + 3 > 24) break;
+        const int card_height = 142;
+        constexpr int card_width = kSafeContentWidth - 16;
+        auto *card = lv_obj_create(scroller);
+        lv_obj_set_size(card, card_width, card_height);
+        lv_obj_set_pos(card, 0, y);
+        lv_obj_set_style_radius(card, 14, 0);
+        lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(chrome_palette().border), 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+        auto *app = label(card, discord_notification_kind(notification),
+                          &lv_font_montserrat_14,
+                          notification.replyable ? kCyan : kGreen);
+        lv_obj_set_pos(app, 12, 8);
+        auto *title = label(card, notification.title.data(), &lv_font_montserrat_16, kPrimary);
+        lv_obj_set_pos(title, 12, 32);
+        lv_obj_set_width(title, card_width - 24);
+        lv_label_set_long_mode(title, LV_LABEL_LONG_MODE_DOTS);
+        auto *body = label(card, notification.body.data(), &lv_font_montserrat_14, kSecondary);
+        lv_obj_set_pos(body, 12, 56);
+        lv_obj_set_width(body, card_width - 24);
+        lv_obj_set_height(body, 38);
+        lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_WRAP);
+
+        if (notification.replyable) {
+            auto &reply = notification_actions_[notification_action_count_++];
+            reply = {this, notification.id, false, nullptr};
+            make_button(card, 12, 98, 96, 38, "REPLY", kCyan, kVoid,
+                        notification_detail_callback, &reply);
+            auto &open = notification_actions_[notification_action_count_++];
+            open = {this, notification.id, false, nullptr};
+            make_button(card, 116, 98, 96, 38, "OPEN", kSurface, kPrimary,
+                        notification_action_callback, &open);
+            auto &dismiss = notification_actions_[notification_action_count_++];
+            dismiss = {this, notification.id, true, nullptr};
+            make_button(card, 220, 98, 106, 38, "DISMISS", kSurface, kAmber,
+                        notification_action_callback, &dismiss);
+        } else {
+            auto &voice = notification_actions_[notification_action_count_++];
+            voice = {this, notification.id, false, nullptr};
+            make_button(card, 12, 98, 96, 38, "VOICE", kCyan, kVoid,
+                        notification_detail_callback, &voice);
+            auto &open = notification_actions_[notification_action_count_++];
+            open = {this, notification.id, false, nullptr};
+            make_button(card, 116, 98, 96, 38, "OPEN", kSurface, kPrimary,
+                        notification_action_callback, &open);
+            auto &dismiss = notification_actions_[notification_action_count_++];
+            dismiss = {this, notification.id, true, nullptr};
+            make_button(card, 220, 98, 106, 38, "DISMISS", kSurface, kAmber,
+                        notification_action_callback, &dismiss);
+        }
+        y += card_height + 10;
+        ++displayed;
+    }
+    if (displayed == 0) {
+        auto *empty = label(scroller,
+                            connected ? "NO DISCORD NOTIFICATIONS" :
+                                        "Connect the companion to receive Discord messages.",
+                            &lv_font_montserrat_16, kSecondary);
+        lv_obj_set_pos(empty, 12, 138);
+        lv_obj_set_width(empty, kSafeContentWidth - 40);
+        lv_label_set_long_mode(empty, LV_LABEL_LONG_MODE_WRAP);
+    }
+    auto *note = label(scroller,
+                       "Discord actions use the phone listener; no Discord token is stored here.",
+                       &lv_font_montserrat_14, kSecondary);
+    lv_obj_set_pos(note, 8, y + 8);
+    lv_obj_set_width(note, kSafeContentWidth - 32);
+    lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
+    configure_refresh_timer(500);
 }
 
 void Shell::render_notifications() {
@@ -1911,8 +2921,10 @@ void Shell::render_notifications() {
             auto *body = label(detail, selected->body.data(), &lv_font_montserrat_16, kSecondary);
             lv_obj_set_pos(body, 8, 92);
             lv_obj_set_width(body, kSafeContentWidth - 32);
-            lv_obj_set_height(body, 150);
+            lv_obj_set_height(body, 90);
             lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_WRAP);
+            make_button(detail, 0, 194, kSafeContentWidth - 20, 48, "CONVERSATION + ACTIONS",
+                        kSurface, kPrimary, premium_open_callback, this);
             auto &open = notification_actions_[notification_action_count_++];
             open = {this, selected->id, false, nullptr};
             make_button(detail, 0, 252, 174, 50, "OPEN ON PHONE", kSurface, kPrimary,
@@ -2054,7 +3066,8 @@ void Shell::render_notifications() {
 void Shell::refresh_watchface_settings() {
     if (!watchface_name_) return;
     const auto &pack = nightglass::services::watchface_service().selected();
-    lv_label_set_text(watchface_name_, pack.name);
+    const auto profile = nightglass::services::premium_service().profile();
+    lv_label_set_text(watchface_name_, profile.face == 2 ? profile.name.data() : pack.name);
 }
 
 void Shell::render_power_settings() {
@@ -2310,13 +3323,19 @@ void Shell::configure_refresh_timer(std::uint32_t period_ms) {
     }
     if (period_ms > 0) {
         timer_ = lv_timer_create(timer_callback, period_ms, this);
+        if (ambient_visible_) lv_timer_pause(timer_);
     }
 }
 
 void Shell::refresh_active_route() {
+    if (ambient_visible_) return;
+    if (premium_open_) { refresh_premium_content(); return; }
     switch (navigation_.route) {
         case nightglass::core::Route::home:
             refresh_home();
+            break;
+        case nightglass::core::Route::context_deck:
+            refresh_context_deck();
             break;
         case nightglass::core::Route::diagnostics:
             refresh_diagnostics();
@@ -2340,7 +3359,11 @@ void Shell::refresh_active_route() {
             refresh_connectivity();
             break;
         case nightglass::core::Route::media:
+        case nightglass::core::Route::spotify:
             refresh_media();
+            break;
+        case nightglass::core::Route::discord:
+            refresh_discord();
             break;
         case nightglass::core::Route::notifications:
             refresh_notifications();
@@ -2365,6 +3388,131 @@ void Shell::refresh_active_route() {
         case nightglass::core::Route::launcher:
         case nightglass::core::Route::about:
             break;
+    }
+}
+
+void Shell::refresh_context_deck() {
+
+    auto set_card = [](const ContextCardWidgets &card, const char *title,
+                       const char *detail, std::uint32_t title_color = kPrimary) {
+        if (card.title) {
+            lv_label_set_text(card.title, title);
+            lv_obj_set_style_text_color(card.title, lv_color_hex(chrome_color(title_color)), 0);
+        }
+        if (card.detail) lv_label_set_text(card.detail, detail);
+    };
+
+    const auto connectivity = nightglass::services::connectivity_service().snapshot();
+    const auto clock = nightglass::services::clock_service().snapshot();
+    const auto activity = nightglass::services::activity_service().snapshot();
+    const auto weather = nightglass::services::network_weather_service().snapshot();
+
+    char title[128]{};
+    char detail[128]{};
+
+    // Next up: keep the watch useful even when the phone is quiet. Agenda is
+    // already bounded by the companion protocol and is safe to render here.
+    if (connectivity.agenda.count > 0 && connectivity.agenda.events[0].valid) {
+        const auto &event = connectivity.agenda.events[0];
+        if (event.all_day) {
+            std::snprintf(title, sizeof(title), "ALL DAY");
+        } else {
+            const auto offset_minutes = clock.settings.utc_offset_minutes +
+                                        (clock.settings.daylight_saving ? 60 : 0);
+            const auto local_start = nightglass::services::epoch_to_civil(
+                static_cast<std::int64_t>(event.start_epoch_seconds) +
+                static_cast<std::int64_t>(offset_minutes) * 60);
+            std::snprintf(title, sizeof(title), "%02u:%02u  %s", local_start.hour,
+                          local_start.minute, event.title.data());
+        }
+        std::snprintf(detail, sizeof(detail), "%s%s",
+                      event.location[0] ? event.location.data() : "Calendar event",
+                      event.all_day ? "" : "  |  PHONE");
+        set_card(context_cards_[0], title, detail, kCyan);
+    } else {
+        set_card(context_cards_[0], "No upcoming event", "Your schedule is clear", kGreen);
+    }
+
+    // Move: use the same activity readiness language as the full Activity app.
+    const char *readiness = activity.readiness == nightglass::services::ActivityReadiness::ready
+                                ? "READY"
+                                : activity.readiness == nightglass::services::ActivityReadiness::warming_up
+                                      ? "CALIBRATING"
+                                      : activity.readiness == nightglass::services::ActivityReadiness::stale
+                                            ? "STALE" : "UNAVAILABLE";
+    std::snprintf(title, sizeof(title), "%lu STEPS",
+                  static_cast<unsigned long>(activity.steps_today));
+    std::snprintf(detail, sizeof(detail), "GOAL %u%%  |  %s", activity.goal_percent, readiness);
+    set_card(context_cards_[1], title, detail,
+             activity.readiness == nightglass::services::ActivityReadiness::ready ? kGreen : kAmber);
+
+    // Weather: display a compact glance, never a floating-point conversion.
+    int temperature = 0;
+    int apparent = 0;
+    const bool weather_valid = weather.data_valid &&
+                               rounded_display_value(weather.current.temperature, -150.0F,
+                                                     150.0F, temperature) &&
+                               rounded_display_value(weather.current.apparent_temperature,
+                                                     -150.0F, 150.0F, apparent);
+    if (weather_valid) {
+        const char *units = weather.settings.units == nightglass::services::WeatherUnits::metric
+                                ? "C" : "F";
+        const char *source = weather.source == nightglass::services::WeatherSource::phone
+                                 ? "PHONE"
+                                 : weather.source == nightglass::services::WeatherSource::direct
+                                       ? "DIRECT" : weather.source == nightglass::services::WeatherSource::cache
+                                             ? "CACHED" : "WEATHER";
+        std::snprintf(title, sizeof(title), "%d %s", temperature, units);
+        std::snprintf(detail, sizeof(detail), "FEELS %d  |  %s%s", apparent, source,
+                      weather.stale ? "  |  STALE" : "");
+        set_card(context_cards_[2], title, detail, weather.stale ? kAmber : kGreen);
+    } else {
+        set_card(context_cards_[2], "Weather waiting",
+                 weather.settings.location_configured ? "Waiting for phone data" : "Set a location in Weather",
+                 kAmber);
+    }
+
+    // Media: preserve title/artist when available, but make the disconnected
+    // state obvious at a glance.
+    const bool phone_connected = connectivity.state ==
+                                 nightglass::services::CompanionLinkState::connected_encrypted;
+    if (phone_connected && connectivity.media.available) {
+        std::snprintf(title, sizeof(title), "%s", connectivity.media.title[0]
+                                                     ? connectivity.media.title.data()
+                                                     : "Untitled");
+        std::snprintf(detail, sizeof(detail), "%s%s%s",
+                      connectivity.media.playing ? "PLAYING" : "PAUSED",
+                      connectivity.media.artist[0] ? "  |  " : "",
+                      connectivity.media.artist[0] ? connectivity.media.artist.data() : "");
+        set_card(context_cards_[3], title, detail,
+                 connectivity.media.playing ? kCyan : kPrimary);
+    } else {
+        set_card(context_cards_[3], "Media idle",
+                 phone_connected ? "Start music on the phone" : "Phone link unavailable", kAmber);
+    }
+
+    // Inbox/phone: calls take precedence over the count because they are the
+    // most time-sensitive item on the wrist.
+    if (connectivity.call.ringing || connectivity.call.active) {
+        set_card(context_cards_[4], connectivity.call.ringing ? "Incoming call" : "In call",
+                 connectivity.call.label[0] ? connectivity.call.label.data()
+                                             : (connectivity.call.muted ? "Muted" : "Phone call"),
+                 connectivity.call.ringing ? kAmber : kGreen);
+    } else {
+        std::snprintf(title, sizeof(title), "%u notification%s",
+                      connectivity.notification_count,
+                      connectivity.notification_count == 1 ? "" : "s");
+        if (connectivity.phone_battery.valid) {
+            std::snprintf(detail, sizeof(detail), "%s  |  PHONE %u%%%s",
+                          phone_connected ? "Phone connected" : "Link unavailable",
+                          connectivity.phone_battery.percent,
+                          connectivity.phone_battery.charging ? " CHARGING" : "");
+        } else {
+            std::snprintf(detail, sizeof(detail), "%s",
+                          phone_connected ? "Phone connected" : "Link unavailable");
+        }
+        set_card(context_cards_[4], title, detail,
+                 connectivity.notification_count > 0 ? kCyan : kSecondary);
     }
 }
 
@@ -2399,6 +3547,10 @@ void Shell::refresh_openclaw() {
         case nightglass::services::VoiceTurnState::complete:
             state = "COMPLETE"; color = kGreen;
             std::snprintf(detail, sizeof(detail), "Response received | hold to ask again");
+            break;
+        case nightglass::services::VoiceTurnState::speaking:
+            state = "SPEAKING"; color = kCyan;
+            std::snprintf(detail, sizeof(detail), "Watch is reading the response aloud");
             break;
         case nightglass::services::VoiceTurnState::cancelled:
             state = "CANCELLED"; color = kAmber;
@@ -2442,9 +3594,85 @@ void Shell::refresh_openclaw() {
     }
     set_state(openclaw_state_, state, color);
     lv_label_set_text(openclaw_detail_, detail);
-    lv_label_set_text(openclaw_response_, snapshot.response_bytes > 0
-                                               ? snapshot.response.data()
-                                               : "Your response will appear here.");
+    const auto response_length = static_cast<std::size_t>(snapshot.response_bytes);
+    if (response_length > 0) {
+        const bool changed = std::strlen(openclaw_response_cache_.data()) != response_length ||
+                             std::memcmp(openclaw_response_cache_.data(),
+                                         snapshot.response.data(), response_length) != 0;
+        if (changed) {
+            std::memcpy(openclaw_response_cache_.data(), snapshot.response.data(),
+                        response_length);
+            openclaw_response_cache_[response_length] = '\0';
+            openclaw_response_page_ = 0;
+        }
+    } else if (openclaw_response_cache_[0] != '\0') {
+        openclaw_response_cache_.fill('\0');
+        openclaw_response_page_ = 0;
+    }
+    char page_text[kOpenClawPageCharacters + 1]{};
+    const auto suggestion = nightglass::services::parse_watch_suggestion(
+        std::string_view(snapshot.response.data(), response_length));
+    const auto fingerprint = nightglass::services::premium_crc32(std::span(
+        reinterpret_cast<const std::uint8_t *>(snapshot.response.data()), response_length));
+    if (snapshot.session_id != suggestion_session_ || fingerprint != suggestion_fingerprint_) {
+        suggestion_session_ = snapshot.session_id; suggestion_used_ = false; suggestion_confirm_until_ = 0;
+        suggestion_fingerprint_ = fingerprint;
+    }
+    if (openclaw_suggestion_) {
+        const bool usable = snapshot.state == nightglass::services::VoiceTurnState::complete &&
+            suggestion.kind != nightglass::services::WatchSuggestionKind::none && !suggestion_used_;
+        if (usable) {
+            lv_obj_clear_state(openclaw_suggestion_, LV_STATE_DISABLED);
+            char action[64]{};
+            const char *prefix = esp_timer_get_time() < suggestion_confirm_until_ ? "CONFIRM: " : "REVIEW: ";
+            if (suggestion.kind == nightglass::services::WatchSuggestionKind::timer)
+                std::snprintf(action, sizeof(action), "%sTIMER %lus", prefix, static_cast<unsigned long>(suggestion.seconds));
+            else {
+                constexpr const char *names[]{"", "", "OPEN SPOTIFY", "OPEN PHONE", "OPEN INBOX", "RING PHONE"};
+                std::snprintf(action, sizeof(action), "%s%s", prefix, names[static_cast<unsigned>(suggestion.kind)]);
+            }
+            set_button_text(openclaw_suggestion_, action);
+        } else {
+            lv_obj_add_state(openclaw_suggestion_, LV_STATE_DISABLED);
+            set_button_text(openclaw_suggestion_, suggestion_used_ ? "ACTION HANDED OFF" : "NO SUGGESTED ACTION");
+        }
+    }
+    if (response_length > 0) {
+        openclaw_response_page_count_ = paginate_openclaw_response(
+            openclaw_response_cache_.data(), suggestion.text_length, openclaw_response_page_,
+            page_text, sizeof(page_text));
+        if (openclaw_response_page_ >= openclaw_response_page_count_) {
+            openclaw_response_page_ = openclaw_response_page_count_ - 1;
+            openclaw_response_page_count_ = paginate_openclaw_response(
+                openclaw_response_cache_.data(), suggestion.text_length, openclaw_response_page_,
+                page_text, sizeof(page_text));
+        }
+        lv_label_set_text(openclaw_response_, page_text);
+    } else {
+        openclaw_response_page_count_ = 1;
+        lv_label_set_text(openclaw_response_, "Your response will appear here.");
+    }
+    if (openclaw_page_) {
+        char page[32]{};
+        std::snprintf(page, sizeof(page), "PAGE %u / %u",
+                      static_cast<unsigned>(openclaw_response_page_ + 1U),
+                      static_cast<unsigned>(openclaw_response_page_count_));
+        lv_label_set_text(openclaw_page_, page);
+    }
+    if (openclaw_previous_) {
+        if (openclaw_response_page_ == 0) lv_obj_add_state(openclaw_previous_, LV_STATE_DISABLED);
+        else lv_obj_clear_state(openclaw_previous_, LV_STATE_DISABLED);
+    }
+    if (openclaw_next_) {
+        if (openclaw_response_page_ + 1 >= openclaw_response_page_count_)
+            lv_obj_add_state(openclaw_next_, LV_STATE_DISABLED);
+        else lv_obj_clear_state(openclaw_next_, LV_STATE_DISABLED);
+    }
+    if (openclaw_spoken_) {
+        set_button_text(openclaw_spoken_, snapshot.spoken_replies
+                                            ? "SPOKEN REPLIES  ON"
+                                            : "SPOKEN REPLIES  OFF");
+    }
     set_button_text(openclaw_ptt_, snapshot.state == nightglass::services::VoiceTurnState::recording
                                       ? "RELEASE TO SEND" : "HOLD TO SPEAK");
     if (openclaw_duration_) {
@@ -2489,16 +3717,155 @@ void Shell::refresh_activity() {
 }
 
 void Shell::refresh_gestures() {
-    if (!gesture_state_) return;
+    if (!gesture_state_ || !gesture_detail_ || !gesture_calibration_ ||
+        !gesture_calibration_cancel_) {
+        return;
+    }
     const auto snapshot = nightglass::services::activity_service().snapshot();
-    char text[128]{};
-    std::snprintf(text, sizeof(text), "LAST  %s | R%lu T%lu S%lu F%lu",
-                  nightglass::services::gesture_name(snapshot.last_gesture),
-                  static_cast<unsigned long>(snapshot.raise_count),
-                  static_cast<unsigned long>(snapshot.double_twist_count),
-                  static_cast<unsigned long>(snapshot.shake_count),
-                  static_cast<unsigned long>(snapshot.flick_count));
-    lv_label_set_text(gesture_state_, text);
+    const auto calibration = snapshot.gesture_calibration;
+    const bool active = nightglass::services::gesture_calibration_active(calibration);
+    char text[160]{};
+    char detail[256]{};
+
+    auto set_button_enabled = [](lv_obj_t *button, bool enabled) {
+        if (!button) return;
+        if (enabled) {
+            lv_obj_remove_state(button, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(button, LV_STATE_DISABLED);
+        }
+    };
+    lv_obj_t *action_buttons[]{gesture_raise_, gesture_twist_, gesture_shake_, gesture_flick_};
+    for (auto *button : action_buttons) set_button_enabled(button, !active);
+
+    if (active) {
+        lv_obj_remove_flag(gesture_calibration_cancel_, LV_OBJ_FLAG_HIDDEN);
+        unsigned step = 1;
+        switch (calibration.stage) {
+            case nightglass::services::GestureCalibrationStage::raise: step = 2; break;
+            case nightglass::services::GestureCalibrationStage::double_twist: step = 3; break;
+            case nightglass::services::GestureCalibrationStage::shake: step = 4; break;
+            case nightglass::services::GestureCalibrationStage::flick: step = 5; break;
+            case nightglass::services::GestureCalibrationStage::quiet: step = 6; break;
+            case nightglass::services::GestureCalibrationStage::idle:
+            case nightglass::services::GestureCalibrationStage::stationary:
+            case nightglass::services::GestureCalibrationStage::complete: break;
+        }
+        std::snprintf(text, sizeof(text), "STEP %u OF 6 | %s", step,
+                      nightglass::services::gesture_calibration_stage_name(calibration.stage));
+        set_state(gesture_state_, text, kViolet);
+
+        if (calibration.stage == nightglass::services::GestureCalibrationStage::stationary) {
+            const auto motion = nightglass::services::hardware_service().snapshot().motion;
+            const unsigned progress = motion.gyro_calibration_required == 0
+                                          ? 0
+                                          : 100U * motion.gyro_calibration_samples /
+                                                motion.gyro_calibration_required;
+            std::snprintf(detail, sizeof(detail),
+                          "Set the watch face-up on a firm surface.\n"
+                          "Do not touch it | %u%% | restarts %lu",
+                          progress,
+                          static_cast<unsigned long>(motion.gyro_calibration_restarts));
+            std::snprintf(text, sizeof(text), "ZEROING SENSOR | %u%%", progress);
+            set_button_enabled(gesture_calibration_, false);
+        } else {
+            const char *instruction = "";
+            switch (calibration.stage) {
+                case nightglass::services::GestureCalibrationStage::raise:
+                    instruction = "Lower your wrist, pause, then turn the display toward your eyes.";
+                    break;
+                case nightglass::services::GestureCalibrationStage::double_twist:
+                    instruction = "Rotate your wrist out, pause briefly, then rotate it back.";
+                    break;
+                case nightglass::services::GestureCalibrationStage::shake:
+                    instruction = "Make four firm, even side-to-side shakes.";
+                    break;
+                case nightglass::services::GestureCalibrationStage::flick:
+                    instruction = "Make one quick wrist snap and stop cleanly.";
+                    break;
+                case nightglass::services::GestureCalibrationStage::quiet:
+                    instruction = "Wear it normally for 15 seconds; do not perform a gesture.";
+                    break;
+                case nightglass::services::GestureCalibrationStage::idle:
+                case nightglass::services::GestureCalibrationStage::stationary:
+                case nightglass::services::GestureCalibrationStage::complete: break;
+            }
+            const unsigned seconds = (calibration.remaining_ms + 999U) / 1000U;
+            if (calibration.phase == nightglass::services::GestureCapturePhase::countdown) {
+                std::snprintf(detail, sizeof(detail), "Get into the starting position.\n%s",
+                              instruction);
+                std::snprintf(text, sizeof(text), "GET READY | %u", seconds);
+                set_button_enabled(gesture_calibration_, false);
+            } else if (calibration.phase ==
+                       nightglass::services::GestureCapturePhase::recording) {
+                std::snprintf(detail, sizeof(detail), "%s", instruction);
+                std::snprintf(text, sizeof(text), "MOVE NOW | %u SEC", seconds);
+                set_button_enabled(gesture_calibration_, false);
+            } else {
+                const char *prefix = "";
+                if (calibration.last_result ==
+                    nightglass::services::GestureCalibrationResult::sample_missed) {
+                    prefix = "No clean match - try again.\n";
+                } else if (calibration.last_result ==
+                           nightglass::services::GestureCalibrationResult::quiet_retry) {
+                    prefix = "Gesture-like movement found - repeat the quiet check.\n";
+                }
+                std::snprintf(detail, sizeof(detail), "%s%s", prefix, instruction);
+                if (calibration.stage == nightglass::services::GestureCalibrationStage::quiet) {
+                    std::snprintf(text, sizeof(text), "START 15-SECOND QUIET CHECK");
+                } else {
+                    std::snprintf(text, sizeof(text), "RECORD %s | %u OF %u",
+                                  nightglass::services::gesture_calibration_stage_name(
+                                      calibration.stage),
+                                  static_cast<unsigned>(calibration.repetitions + 1U),
+                                  static_cast<unsigned>(calibration.repetitions_required));
+                }
+                set_button_enabled(gesture_calibration_, true);
+            }
+        }
+        lv_label_set_text(gesture_detail_, detail);
+        set_button_text(gesture_calibration_, text);
+    } else {
+        lv_obj_add_flag(gesture_calibration_cancel_, LV_OBJ_FLAG_HIDDEN);
+        set_button_enabled(gesture_calibration_, true);
+        if (snapshot.gesture_profile.calibrated != 0) {
+            const bool any_action = snapshot.settings.raise_to_wake ||
+                                    snapshot.settings.double_twist_quick_settings ||
+                                    snapshot.settings.shake_notifications ||
+                                    snapshot.settings.flick_media_next;
+            const auto motion = nightglass::services::hardware_service().snapshot().motion;
+            if (any_action && !motion.gyro_calibrated) {
+                const unsigned progress = motion.gyro_calibration_required == 0
+                                              ? 0
+                                              : 100U * motion.gyro_calibration_samples /
+                                                    motion.gyro_calibration_required;
+                std::snprintf(text, sizeof(text), "PROFILE SAVED | SENSOR %u%%", progress);
+                set_state(gesture_state_, text, kAmber);
+                std::snprintf(detail, sizeof(detail),
+                              "Keep the watch still while its gyro zeroes.\n"
+                              "Personal sensitivity remains saved.");
+            } else {
+                std::snprintf(text, sizeof(text), "CALIBRATED | LAST %s",
+                              nightglass::services::gesture_name(snapshot.last_gesture));
+                set_state(gesture_state_, text, kGreen);
+                std::snprintf(
+                    detail, sizeof(detail),
+                    "Personal sensitivity is saved%s.\nDetections: R%lu T%lu S%lu F%lu",
+                    snapshot.persistence_ok ? "" : " in memory only",
+                    static_cast<unsigned long>(snapshot.raise_count),
+                    static_cast<unsigned long>(snapshot.double_twist_count),
+                    static_cast<unsigned long>(snapshot.shake_count),
+                    static_cast<unsigned long>(snapshot.flick_count));
+            }
+            set_button_text(gesture_calibration_, "CALIBRATE AGAIN");
+        } else {
+            set_state(gesture_state_, "NOT CALIBRATED", kAmber);
+            std::snprintf(detail, sizeof(detail),
+                          "Records three examples of each gesture, then checks for false triggers.");
+            set_button_text(gesture_calibration_, "START GUIDED CALIBRATION");
+        }
+        lv_label_set_text(gesture_detail_, detail);
+    }
     set_button_text(gesture_raise_, snapshot.settings.raise_to_wake
                                         ? "RAISE TO WAKE  ON"
                                         : "RAISE TO WAKE  OFF");
@@ -2524,14 +3891,21 @@ void Shell::refresh_weather() {
                                    : snapshot.source == nightglass::services::WeatherSource::cache
                                          ? "CACHED"
                                          : "NO DATA";
-    if (snapshot.data_valid) {
-        std::snprintf(text, sizeof(text), "%.0f%s | %s", snapshot.current.temperature,
+    int temperature = 0;
+    int apparent_temperature = 0;
+    int wind_speed = 0;
+    const bool measurements_valid =
+        rounded_display_value(snapshot.current.temperature, -150.0F, 150.0F, temperature) &&
+        rounded_display_value(snapshot.current.apparent_temperature, -150.0F, 150.0F,
+                              apparent_temperature) &&
+        rounded_display_value(snapshot.current.wind_speed, 0.0F, 500.0F, wind_speed);
+    if (snapshot.data_valid && measurements_valid) {
+        std::snprintf(text, sizeof(text), "%d%s | %s", temperature,
                       snapshot.settings.units == nightglass::services::WeatherUnits::metric
                           ? " C" : " F", source);
         set_state(weather_state_, text, snapshot.stale ? kAmber : kGreen);
-        std::snprintf(text, sizeof(text), "FEELS %.0f | WIND %.0f | CODE %u\nAGE %lu min%s",
-                      snapshot.current.apparent_temperature, snapshot.current.wind_speed,
-                      snapshot.current.weather_code,
+        std::snprintf(text, sizeof(text), "FEELS %d | WIND %d | CODE %u\nAGE %lu min%s",
+                      apparent_temperature, wind_speed, snapshot.current.weather_code,
                       static_cast<unsigned long>(snapshot.age_seconds / 60),
                       snapshot.stale ? " | OFFLINE" : "");
     } else {
@@ -2548,9 +3922,9 @@ void Shell::refresh_weather() {
                                         ? "UNITS  METRIC" : "UNITS  IMPERIAL");
     std::snprintf(text, sizeof(text), "REFRESH  %u MIN", snapshot.settings.refresh_minutes);
     set_button_text(weather_refresh_, text);
-    std::snprintf(text, sizeof(text), "LAT  %.1f", snapshot.settings.latitude_e6 / 1'000'000.0);
+    format_coordinate(text, sizeof(text), "LAT  ", snapshot.settings.latitude_e6);
     set_button_text(weather_latitude_, text);
-    std::snprintf(text, sizeof(text), "LON  %.1f", snapshot.settings.longitude_e6 / 1'000'000.0);
+    format_coordinate(text, sizeof(text), "LON  ", snapshot.settings.longitude_e6);
     set_button_text(weather_longitude_, text);
 }
 
@@ -2670,7 +4044,69 @@ void Shell::refresh_media() {
     }
 }
 
+void Shell::refresh_discord() {
+    const auto snapshot = nightglass::services::connectivity_service().snapshot();
+    if (discord_voice_state_) {
+        const auto voice = nightglass::services::voice_service().snapshot();
+        const bool connected = snapshot.state ==
+                               nightglass::services::CompanionLinkState::connected_encrypted;
+        using nightglass::services::VoiceTurnState;
+        const bool own_turn = voice.discord_reply;
+        const bool recording = voice.state == VoiceTurnState::recording;
+        const bool transferring = voice.state == VoiceTurnState::finishing ||
+                                  voice.state == VoiceTurnState::uploading;
+        const bool processing = voice.state == VoiceTurnState::processing;
+        const bool own_active = own_turn && (recording || transferring || processing);
+        const bool other_active = !own_turn &&
+                                   (recording || transferring || processing ||
+                                    voice.state == VoiceTurnState::speaking);
+        const char *state = connected ? "VOICE NOTE | READY" : "PHONE DISCONNECTED";
+        const char *button = connected ? "HOLD TO RECORD" : "PHONE OFFLINE";
+        std::uint32_t color = connected ? kSecondary : kAmber;
+        if (recording) {
+            state = own_turn ? "RECORDING | RELEASE TO SEND" : "VOICE BUSY";
+            button = own_turn ? "RELEASE TO SEND" : "VOICE BUSY";
+            color = own_turn ? kCyan : kAmber;
+        } else if (transferring) {
+            state = own_turn ? "SENDING VOICE NOTE" : "VOICE BUSY";
+            button = own_turn ? "SENDING..." : "VOICE BUSY";
+            color = kAmber;
+        } else if (processing) {
+            state = own_turn ? "PREPARING DISCORD SHARE" : "VOICE BUSY";
+            button = own_turn ? "PREPARING..." : "VOICE BUSY";
+            color = kAmber;
+        } else if (voice.state == VoiceTurnState::complete && own_turn) {
+            state = "VOICE NOTE READY | CHECK PHONE";
+            color = kGreen;
+        } else if (voice.state == VoiceTurnState::cancelled && own_turn) {
+            state = "VOICE NOTE CANCELLED";
+            color = kSecondary;
+        } else if ((voice.state == VoiceTurnState::failed ||
+                    voice.state == VoiceTurnState::unavailable) && own_turn) {
+            state = "VOICE NOTE UNAVAILABLE";
+            color = kRed;
+        } else if (other_active) {
+            state = "VOICE BUSY";
+            button = "VOICE BUSY";
+            color = kAmber;
+        }
+        set_state(discord_voice_state_, state, color);
+        set_button_text(discord_voice_, button);
+        if (discord_voice_) {
+            if (other_active || (!connected && !own_active))
+                lv_obj_add_state(discord_voice_, LV_STATE_DISABLED);
+            else lv_obj_clear_state(discord_voice_, LV_STATE_DISABLED);
+        }
+        if (discord_voice_cancel_) {
+            if (own_active) lv_obj_remove_flag(discord_voice_cancel_, LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_add_flag(discord_voice_cancel_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (snapshot.notification_sequence != discord_sequence_) render_route();
+}
+
 void Shell::refresh_home() {
+    if (personal_home_) { refresh_personal_home(); return; }
     if (!home_time_) return;
     const auto power = nightglass::services::power_service().snapshot();
     const bool should_use_aod = power.state == nightglass::core::PowerState::dim ||
@@ -2806,8 +4242,11 @@ void Shell::refresh_home() {
     }
     const auto weather = nightglass::services::network_weather_service().snapshot();
     if (home_weather_) {
-        if (weather.data_valid) {
-            std::snprintf(buffer, sizeof(buffer), "%.0f%s", weather.current.temperature,
+        int temperature = 0;
+        if (weather.data_valid &&
+            rounded_display_value(weather.current.temperature, -150.0F, 150.0F,
+                                  temperature)) {
+            std::snprintf(buffer, sizeof(buffer), "%d%s", temperature,
                           weather.settings.units == nightglass::services::WeatherUnits::metric
                               ? "C" : "F");
             set_state(home_weather_, buffer, weather.stale ? kAmber : pack.palette.accent);
@@ -3140,47 +4579,11 @@ void Shell::refresh_quick_settings() {
 
 void Shell::refresh_system_overlay() {
     if (!overlay_layer_) return;
-    constexpr std::uint8_t kUpdateOverlay = 0xfd;
     constexpr std::uint8_t kPairingOverlay = 0xfe;
     const auto kind = nightglass::services::clock_service().active_alert();
     const auto connectivity = nightglass::services::connectivity_service().snapshot();
-    const auto update = nightglass::services::update_transport().snapshot();
     // Alarm and countdown controls are safety-critical. Pairing can wait and
     // reappear after the active alert is dismissed.
-    if ((update.awaiting_confirmation || update.ready_to_reboot) &&
-        kind == nightglass::services::AlertKind::none) {
-        if (alert_card_ && displayed_alert_kind_ == kUpdateOverlay) return;
-        lv_obj_clean(overlay_layer_);
-        lv_obj_set_style_bg_color(overlay_layer_, lv_color_hex(kVoid), 0);
-        lv_obj_set_style_bg_opa(overlay_layer_, LV_OPA_90, 0);
-        lv_obj_remove_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(overlay_layer_);
-        alert_card_ = make_route_card(overlay_layer_, 82, 280);
-        auto *heading = label(alert_card_, update.ready_to_reboot ? "UPDATE READY" :
-                              "INSTALL UPDATE?", &lv_font_montserrat_24,
-                              kPrimary);
-        lv_obj_align(heading, LV_ALIGN_TOP_MID, 0, 12);
-        auto *version = label(alert_card_, update.target_version.data(),
-                              &lv_font_montserrat_20, kCyan);
-        lv_obj_align(version, LV_ALIGN_CENTER, 0, -10);
-        if (update.ready_to_reboot) {
-            make_button(overlay_layer_, 112, 380, 240, 66, "RESTART NOW",
-                        kCyan, kVoid, update_restart_callback, this);
-        } else {
-            make_button(overlay_layer_, kSafeInset, 380, 170, 66, "CANCEL",
-                        kSurface, kPrimary, update_abort_callback, this);
-            make_button(overlay_layer_, 212, 380, 170, 66, "INSTALL",
-                        kCyan, kVoid, update_confirm_callback, this);
-        }
-        displayed_alert_kind_ = kUpdateOverlay;
-        return;
-    }
-    if (alert_card_ && displayed_alert_kind_ == kUpdateOverlay) {
-        lv_obj_clean(overlay_layer_);
-        lv_obj_add_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
-        alert_card_ = nullptr;
-        displayed_alert_kind_ = 0;
-    }
     if (connectivity.pairing_passkey_active &&
         kind == nightglass::services::AlertKind::none) {
         if (alert_card_ && displayed_alert_kind_ == kPairingOverlay) return;
@@ -3235,15 +4638,7 @@ void Shell::refresh_system_overlay() {
     lv_obj_remove_flag(overlay_layer_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(overlay_layer_);
     const auto &pack = nightglass::services::watchface_service().selected();
-    if (nightglass::services::valid_face_pack(pack) &&
-        pack.chrome.route_background_asset != nightglass::services::FaceAsset::none) {
-        if (const auto *asset = face_asset(pack.chrome.route_background_asset)) {
-            auto *background = lv_image_create(overlay_layer_);
-            lv_image_set_src(background, asset);
-            lv_obj_set_pos(background, 0, 0);
-            lv_obj_set_style_image_opa(background, pack.chrome.route_background_opacity, 0);
-        }
-    }
+    add_chrome_background(overlay_layer_, pack);
     alert_card_ = make_route_card(overlay_layer_, 112, 230);
     const char *title = kind == nightglass::services::AlertKind::alarm ? "ALARM"
                         : kind == nightglass::services::AlertKind::countdown ? "TIMER COMPLETE"
@@ -3380,12 +4775,34 @@ void Shell::refresh_diagnostics() {
     } else {
         set_state(diagnostics_motion_state_, motion_age > 500'000 ? "STALE" : "LIVE",
                   motion_age > 500'000 ? kAmber : kGreen);
+        char bias_x[16]{};
+        char bias_y[16]{};
+        char bias_z[16]{};
+        char accel_x[16]{};
+        char accel_y[16]{};
+        char accel_z[16]{};
+        char gyro_x[16]{};
+        char gyro_y[16]{};
+        char gyro_z[16]{};
+        format_signed_fixed(bias_x, sizeof(bias_x), motion.gyro_bias_x_dps,
+                            -2'000.0F, 2'000.0F, 1);
+        format_signed_fixed(bias_y, sizeof(bias_y), motion.gyro_bias_y_dps,
+                            -2'000.0F, 2'000.0F, 1);
+        format_signed_fixed(bias_z, sizeof(bias_z), motion.gyro_bias_z_dps,
+                            -2'000.0F, 2'000.0F, 1);
+        format_signed_fixed(accel_x, sizeof(accel_x), motion.accel_x_g, -32.0F, 32.0F, 2);
+        format_signed_fixed(accel_y, sizeof(accel_y), motion.accel_y_g, -32.0F, 32.0F, 2);
+        format_signed_fixed(accel_z, sizeof(accel_z), motion.accel_z_g, -32.0F, 32.0F, 2);
+        format_signed_fixed(gyro_x, sizeof(gyro_x), motion.gyro_x_dps,
+                            -2'000.0F, 2'000.0F, 1);
+        format_signed_fixed(gyro_y, sizeof(gyro_y), motion.gyro_y_dps,
+                            -2'000.0F, 2'000.0F, 1);
+        format_signed_fixed(gyro_z, sizeof(gyro_z), motion.gyro_z_dps,
+                            -2'000.0F, 2'000.0F, 1);
         std::snprintf(buffer, sizeof(buffer),
-                      "%s | bias %+.1f %+.1f %+.1f\nACC %+.2f  %+.2f  %+.2f g\nGYR %+.1f  %+.1f  %+.1f d/s",
-                      motion.moving ? "Moving" : "Still", motion.gyro_bias_x_dps,
-                      motion.gyro_bias_y_dps, motion.gyro_bias_z_dps, motion.accel_x_g,
-                      motion.accel_y_g, motion.accel_z_g, motion.gyro_x_dps,
-                      motion.gyro_y_dps, motion.gyro_z_dps);
+                      "%s | bias %s %s %s\nACC %s  %s  %s g\nGYR %s  %s  %s d/s",
+                      motion.moving ? "Moving" : "Still", bias_x, bias_y, bias_z,
+                      accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
         lv_label_set_text(diagnostics_motion_detail_, buffer);
     }
 
@@ -3461,6 +4878,7 @@ void Shell::clear_route_objects() {
     quick_mute_ = nullptr;
     quick_dnd_ = nullptr;
     quick_bluetooth_ = nullptr;
+    context_cards_.fill(ContextCardWidgets{});
     home_alarm_ = nullptr;
     home_timer_ = nullptr;
     home_connectivity_ = nullptr;
@@ -3476,6 +4894,9 @@ void Shell::clear_route_objects() {
     activity_units_ = nullptr;
     activity_goal_ = nullptr;
     gesture_state_ = nullptr;
+    gesture_detail_ = nullptr;
+    gesture_calibration_ = nullptr;
+    gesture_calibration_cancel_ = nullptr;
     gesture_raise_ = nullptr;
     gesture_twist_ = nullptr;
     gesture_shake_ = nullptr;
@@ -3498,15 +4919,324 @@ void Shell::clear_route_objects() {
     media_artist_ = nullptr;
     media_progress_ = nullptr;
     media_time_ = nullptr;
+    discord_state_ = nullptr;
+    discord_title_ = nullptr;
+    discord_body_ = nullptr;
+    discord_voice_state_ = nullptr;
+    discord_voice_ = nullptr;
+    discord_voice_cancel_ = nullptr;
+    discord_sequence_ = 0;
     notification_status_ = nullptr;
     notification_privacy_ = nullptr;
     openclaw_state_ = nullptr;
     openclaw_detail_ = nullptr;
     openclaw_response_ = nullptr;
+    openclaw_page_ = nullptr;
+    openclaw_previous_ = nullptr;
+    openclaw_next_ = nullptr;
+    openclaw_spoken_ = nullptr;
     openclaw_ptt_ = nullptr;
+    openclaw_suggestion_ = nullptr;
     openclaw_duration_ = nullptr;
+    openclaw_response_cache_.fill('\0');
+    openclaw_response_page_ = 0;
+    openclaw_response_page_count_ = 0;
     notification_reply_box_ = nullptr;
     notification_action_count_ = 0;
+}
+
+void Shell::display_option_callback(lv_event_t *event) {
+    auto p = nightglass::services::premium_service().profile();
+    p.flags ^= static_cast<std::uint8_t>(reinterpret_cast<std::uintptr_t>(lv_event_get_user_data(event)));
+    if (nightglass::services::premium_service().save(p)) shell().render_route();
+}
+
+void Shell::openclaw_suggestion_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    const auto voice = nightglass::services::voice_service().snapshot();
+    if (voice.state != nightglass::services::VoiceTurnState::complete ||
+        voice.session_id != self->suggestion_session_ || self->suggestion_used_) return;
+    if (nightglass::services::premium_crc32(std::span(
+        reinterpret_cast<const std::uint8_t *>(voice.response.data()), voice.response_bytes)) != self->suggestion_fingerprint_) return;
+    const auto suggestion = nightglass::services::parse_watch_suggestion(
+        std::string_view(voice.response.data(), voice.response_bytes));
+    using nightglass::services::WatchSuggestionKind;
+    if (suggestion.kind == WatchSuggestionKind::none) return;
+    const auto now = esp_timer_get_time();
+    if (now >= self->suggestion_confirm_until_) {
+        self->suggestion_confirm_until_ = now + 8'000'000;
+        self->refresh_openclaw();
+        return;
+    }
+    self->suggestion_confirm_until_ = 0;
+    bool accepted = false;
+    switch (suggestion.kind) {
+        case WatchSuggestionKind::timer: {
+            const auto clock = nightglass::services::clock_service().snapshot();
+            if (clock.timer_running || clock.timer_ringing) {
+                set_state(self->openclaw_detail_, "A timer is already active. It was not replaced.", kAmber);
+                return;
+            }
+            accepted = nightglass::services::clock_service().start_timer_if_idle(suggestion.seconds);
+            if (accepted) self->navigate(nightglass::core::NavigationAction::open_countdown);
+            break;
+        }
+        case WatchSuggestionKind::spotify: self->navigate(nightglass::core::NavigationAction::open_spotify); accepted = true; break;
+        case WatchSuggestionKind::phone: self->navigate(nightglass::core::NavigationAction::open_connectivity); accepted = true; break;
+        case WatchSuggestionKind::inbox: self->navigate(nightglass::core::NavigationAction::open_notifications); accepted = true; break;
+        case WatchSuggestionKind::ring:
+            accepted = nightglass::services::connectivity_service().send_phone(nightglass::services::PhoneCommand::ring_start); break;
+        default: break;
+    }
+    self->suggestion_used_ = accepted;
+    if (!accepted) set_state(self->openclaw_detail_, "Action unavailable. Nothing changed.", kAmber);
+}
+
+void Shell::display_event_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (lv_event_get_code(event) == LV_EVENT_RENDER_START) {
+        self->render_started_us_ = esp_timer_get_time(); return;
+    }
+    if (self->render_started_us_) {
+        const auto elapsed = esp_timer_get_time() - self->render_started_us_;
+        self->render_started_us_ = 0;
+        self->render_duration_ms_[self->render_duration_count_++ % self->render_duration_ms_.size()] =
+            static_cast<std::uint16_t>(std::min<std::int64_t>(65535, (elapsed + 999) / 1000));
+        if (self->render_duration_count_ % 32 == 0) {
+            auto samples = self->render_duration_ms_;
+            const auto count = std::min(self->render_duration_count_, samples.size());
+            std::sort(samples.begin(), samples.begin() + count);
+            ESP_LOGI(kTag, "UI render-cycle n=%u median=%ums p95=%ums max=%ums",
+                static_cast<unsigned>(count), samples[count / 2], samples[(count * 95 - 1) / 100], samples[count - 1]);
+        }
+    }
+    if (!self->input_started_us_) return;
+    const auto elapsed = esp_timer_get_time() - self->input_started_us_;
+    self->input_started_us_ = 0;
+    // This measures event-to-render, not glass scanout or physical touch onset.
+    const auto ms = static_cast<std::uint16_t>(std::min<std::int64_t>(65535, elapsed / 1000));
+    self->input_latency_ms_[self->input_latency_count_++ % self->input_latency_ms_.size()] = ms;
+    auto samples = self->input_latency_ms_;
+    const auto count = std::min(self->input_latency_count_, samples.size());
+    std::sort(samples.begin(), samples.begin() + count);
+    ESP_LOGI(kTag, "UI input-to-render n=%u latest=%ums median=%ums p95=%ums",
+        static_cast<unsigned>(count), ms, samples[count / 2], samples[(count * 95 - 1) / 100]);
+}
+
+void Shell::refresh_ambient() {
+    if (!ambient_time_ || !ambient_visible_) return;
+    const auto clock = nightglass::services::clock_service().snapshot();
+    // Monotonic shift continues even if the wall clock needs setting.
+    const auto minute = static_cast<std::uint32_t>(esp_timer_get_time() / 60'000'000);
+    const auto key = clock.time_valid ? static_cast<std::uint32_t>(clock.utc_epoch_seconds / 60)
+                                      : (minute | 0x80000000U);
+    if (key == ambient_minute_) return;
+    ambient_minute_ = key;
+    char time[24]{"--:--"}, date[40]{"Time unavailable"};
+    if (clock.time_valid) {
+        const char *period = "";
+        format_time(time, sizeof(time), clock.local_time, clock.settings.use_24_hour, &period);
+        if (period[0]) { const auto end = std::strlen(time); std::snprintf(time + end, sizeof(time) - end, " %s", period); }
+        std::snprintf(date, sizeof(date), "%04ld-%02u-%02u", static_cast<long>(clock.local_time.year),
+                      clock.local_time.month, clock.local_time.day);
+    }
+    lv_label_set_text(ambient_time_, time); lv_label_set_text(ambient_date_, date);
+    const int x = nightglass::services::premium_aod_shift(minute);
+    const int y = nightglass::services::premium_aod_shift(minute / 9);
+    lv_obj_align(ambient_time_, LV_ALIGN_CENTER, x, y - 22);
+    lv_obj_align(ambient_date_, LV_ALIGN_CENTER, x, y + 30);
+}
+
+void Shell::render_personal_home() {
+    personal_home_ = true;
+    const auto p = nightglass::services::premium_service().profile();
+    auto *name = label(content_host_, p.name.data(), &lv_font_montserrat_20, p.accent);
+    lv_obj_set_pos(name, 40, 30); lv_obj_set_width(name, 330);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_MODE_DOTS);
+    home_time_ = label(content_host_, "--:--", &lv_font_montserrat_48, kPrimary);
+    lv_obj_set_pos(home_time_, 40, 74);
+    home_date_ = label(content_host_, "", &lv_font_montserrat_20, kSecondary);
+    lv_obj_set_pos(home_date_, 40, 139);
+    constexpr const char *names[]{"BATTERY", "STEPS", "WEATHER", "TIMER", "ALARM",
+                                  "INBOX", "DISTANCE", "PHONE"};
+    constexpr nightglass::services::FaceAction actions[]{
+        nightglass::services::FaceAction::open_diagnostics,
+        nightglass::services::FaceAction::open_activity,
+        nightglass::services::FaceAction::open_weather,
+        nightglass::services::FaceAction::open_countdown,
+        nightglass::services::FaceAction::open_alarm,
+        nightglass::services::FaceAction::open_notifications,
+        nightglass::services::FaceAction::open_activity,
+        nightglass::services::FaceAction::open_connectivity};
+    for (unsigned i = 0; i < 3; ++i) {
+        auto *card = make_button(content_host_, 28, 185 + i * 75, 354, 66, "",
+                                 kSurface, kPrimary, face_action_callback,
+            reinterpret_cast<void *>(static_cast<std::uintptr_t>(actions[p.complications[i]])));
+        lv_obj_set_user_data(card, this);
+        auto *name_label = label(card, names[p.complications[i]], &lv_font_montserrat_14, kSecondary);
+        lv_obj_set_pos(name_label, 0, -2);
+        personal_values_[i] = label(card, "--", &lv_font_montserrat_26, p.accent);
+        lv_obj_set_pos(personal_values_[i], 0, 20); lv_obj_set_width(personal_values_[i], 310);
+        lv_label_set_long_mode(personal_values_[i], LV_LABEL_LONG_MODE_DOTS);
+        lv_obj_remove_flag(name_label, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(personal_values_[i], LV_OBJ_FLAG_CLICKABLE);
+    }
+    make_button(content_host_, 28, 421, 170, 52, "CONTEXT", kSurface, kPrimary, context_deck_callback, this);
+    make_button(content_host_, 212, 421, 170, 52, "APPS", kCyan, kVoid, launcher_callback, this);
+}
+
+void Shell::refresh_personal_home() {
+    const auto p = nightglass::services::premium_service().profile();
+    const auto clock = nightglass::services::clock_service().snapshot();
+    const auto activity = nightglass::services::activity_service().snapshot();
+    const auto connection = nightglass::services::connectivity_service().snapshot();
+    const auto weather = nightglass::services::network_weather_service().snapshot();
+    const auto battery = nightglass::services::hardware_service().snapshot().battery;
+    char text[80]{"--:--"};
+    if (clock.time_valid) {
+        const char *period = "";
+        format_time(text, sizeof(text), clock.local_time, clock.settings.use_24_hour, &period);
+        if (period[0]) { const auto end = std::strlen(text); std::snprintf(text + end, sizeof(text) - end, " %s", period); }
+    }
+    lv_label_set_text(home_time_, text);
+    if (clock.time_valid)
+        std::snprintf(text, sizeof(text), "%04ld-%02u-%02u", static_cast<long>(clock.local_time.year),
+                      clock.local_time.month, clock.local_time.day);
+    else std::snprintf(text, sizeof(text), "Time unavailable");
+    lv_label_set_text(home_date_, text);
+    for (unsigned i = 0; i < 3; ++i) {
+        switch (p.complications[i]) {
+            case 0:
+                if (battery.percent_valid && battery.battery_present)
+                    std::snprintf(text, sizeof(text), "%u%% %s", battery.percent, battery.charging ? "charging" : "");
+                else std::snprintf(text, sizeof(text), "Unavailable");
+                break;
+            case 1: std::snprintf(text, sizeof(text), "%lu", static_cast<unsigned long>(activity.steps_today)); break;
+            case 2: {
+                int temperature{};
+                if (weather.data_valid && rounded_display_value(weather.current.temperature, -100, 160, temperature))
+                    std::snprintf(text, sizeof(text), "%d %s", temperature,
+                        weather.settings.units == nightglass::services::WeatherUnits::metric ? "C" : "F");
+                else std::snprintf(text, sizeof(text), "Unavailable");
+                break;
+            }
+            case 3: std::snprintf(text, sizeof(text), "%02u:%02u %s", static_cast<unsigned>(clock.timer_remaining_seconds / 60),
+                static_cast<unsigned>(clock.timer_remaining_seconds % 60), clock.timer_running ? "running" : "ready"); break;
+            case 4: {
+                const auto next = clock.time_valid ? nightglass::services::next_alarm_index(clock.alarms,
+                    nightglass::services::civil_to_epoch(clock.local_time), clock.local_time.weekday)
+                    : nightglass::services::kNoAlarmIndex;
+                if (next < clock.alarms.size()) std::snprintf(text, sizeof(text), "%02u:%02u", clock.alarms[next].hour, clock.alarms[next].minute);
+                else std::snprintf(text, sizeof(text), "No alarm");
+                break;
+            }
+            case 5: std::snprintf(text, sizeof(text), "%u notifications", connection.notification_count); break;
+            case 6: nightglass::services::format_activity_distance(text, sizeof(text), activity.distance_mm, activity.settings.units); break;
+            default: std::snprintf(text, sizeof(text), "%s", connection.state ==
+                nightglass::services::CompanionLinkState::connected_encrypted ? "Connected" : "Offline"); break;
+        }
+        if (personal_values_[i]) lv_label_set_text(personal_values_[i], text);
+    }
+}
+
+void Shell::premium_open_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    self->premium_kind_ = self->navigation_.route == nightglass::core::Route::media ||
+                          self->navigation_.route == nightglass::core::Route::spotify ? 1 : 2;
+    self->premium_target_ = self->premium_kind_ == 1 ? 0 : self->selected_notification_id_;
+    self->premium_open_ = true; self->premium_token_ = 0;
+    self->premium_requested_us_ = esp_timer_get_time();
+    nightglass::services::premium_service().request_content(self->premium_kind_, self->premium_target_);
+    self->render_route();
+}
+
+void Shell::premium_action_callback(lv_event_t *event) {
+    const auto value = reinterpret_cast<std::uintptr_t>(lv_event_get_user_data(event));
+    auto &self = shell();
+    const bool sent = nightglass::services::premium_service().action(value >> 8, value & 255);
+    set_state(self.premium_status_, sent ? "Sent to phone; awaiting result" : "Expired - reopen to refresh", sent ? kAmber : kRed);
+}
+
+void Shell::render_premium_content() {
+    add_header(content_host_, premium_kind_ == 1 ? "QUEUE & OUTPUT" : "CONVERSATION", back_callback, this);
+    auto *scroller = make_scroller(content_host_);
+    premium_status_ = label(scroller, "Loading from phone...", &lv_font_montserrat_16, kSecondary);
+    lv_obj_set_width(premium_status_, kSafeContentWidth - 20);
+    premium_items_ = lv_obj_create(scroller);
+    lv_obj_remove_style_all(premium_items_);
+    lv_obj_set_pos(premium_items_, 0, 64); lv_obj_set_width(premium_items_, kSafeContentWidth - 20);
+    lv_obj_set_height(premium_items_, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(premium_items_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(premium_items_, 16, 0);
+    premium_token_ = 0;
+    configure_refresh_timer(250);
+    refresh_premium_content();
+}
+
+void Shell::refresh_premium_content() {
+    if (!premium_status_ || !premium_items_) return;
+    const auto connection = nightglass::services::connectivity_service().snapshot();
+    const bool visible = connection.state == nightglass::services::CompanionLinkState::connected_encrypted &&
+        (premium_kind_ != 2 || (connection.notification_privacy == nightglass::services::NotificationPrivacyPolicy::show_details &&
+            connection.notification_details_unlocked && std::any_of(connection.notifications.begin(), connection.notifications.end(),
+                [this](const auto &n) { return n.valid && n.id == premium_target_; })));
+    if (!visible || esp_timer_get_time() - premium_requested_us_ >= 60'000'000) {
+        lv_obj_clean(premium_items_);
+        lv_image_cache_drop(&premium_image_);
+        if (premium_buffer_) std::memset(premium_buffer_, 0, nightglass::services::kPremiumContentBytes);
+        nightglass::services::premium_service().clear_content();
+        set_state(premium_status_, "Content expired or unavailable. Back to refresh.", kAmber);
+        return;
+    }
+    const auto status = nightglass::services::premium_service().action_status();
+    if (status <= 5) set_state(premium_status_, status == 0 ? "Action handed to app" : "App could not perform action", status == 0 ? kGreen : kAmber);
+    if (premium_token_) return;
+    if (!premium_buffer_) premium_buffer_ = static_cast<std::uint8_t *>(heap_caps_calloc(
+        1, nightglass::services::kPremiumContentBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!premium_buffer_) { set_state(premium_status_, "Not enough memory", kRed); return; }
+    std::uint32_t token{}, target{}; std::uint8_t kind{};
+    const auto size = nightglass::services::premium_service().copy_content(
+        std::span(premium_buffer_, nightglass::services::kPremiumContentBytes), token, kind, target);
+    if (!size) {
+        if (esp_timer_get_time() - premium_requested_us_ > 10'000'000)
+            set_state(premium_status_, "No response. Companion update or notification access may be needed.", kAmber);
+        return;
+    }
+    nightglass::services::PremiumDocument document{};
+    if (kind != premium_kind_ || target != premium_target_ ||
+        !nightglass::services::decode_premium_document(std::span(premium_buffer_, size), document) || document.kind != kind) {
+        set_state(premium_status_, "Unsupported content", kRed); return;
+    }
+    premium_token_ = token;
+    set_state(premium_status_, kind == 2 ? "Notification history only - full thread on phone"
+                                         : "Live phone snapshot - refresh after changes", kSecondary);
+    if (!document.artwork.empty()) {
+        premium_image_ = {};
+        premium_image_.header.magic = LV_IMAGE_HEADER_MAGIC;
+        premium_image_.header.cf = LV_COLOR_FORMAT_RGB565;
+        premium_image_.header.w = 40; premium_image_.header.h = 40;
+        premium_image_.header.stride = 80;
+        premium_image_.data_size = document.artwork.size();
+        premium_image_.data = document.artwork.data();
+        auto *art = lv_image_create(premium_items_); lv_image_set_src(art, &premium_image_);
+        // Native-size artwork avoids a scaled image extending outside its
+        // layout box and clipping the reader's rounded safe inset.
+    }
+    premium_body_ = label(premium_items_, document.body.data(),
+        (rendered_profile_.flags & nightglass::services::kPremiumLargeText) ? &lv_font_montserrat_26 : &lv_font_montserrat_20, kPrimary);
+    lv_obj_set_width(premium_body_, kSafeContentWidth - 24);
+    lv_label_set_long_mode(premium_body_, LV_LABEL_LONG_MODE_WRAP);
+    for (unsigned i = 0; i < document.action_count; ++i) {
+        const auto &a = document.actions[i];
+        auto *button = make_button(premium_items_, 0, 0, kSafeContentWidth - 24, 112, a.label.data(), kSurface, kPrimary,
+            premium_action_callback, reinterpret_cast<void *>((std::uintptr_t{a.action} << 8) | a.index));
+        auto *caption = lv_obj_get_child(button, 0);
+        lv_obj_set_width(caption, kSafeContentWidth - 56);
+        lv_label_set_long_mode(caption, LV_LABEL_LONG_MODE_WRAP);
+        lv_obj_set_style_text_align(caption, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(caption);
+    }
+    install_touch_callbacks(premium_items_);
 }
 
 Shell &shell() { return instance; }

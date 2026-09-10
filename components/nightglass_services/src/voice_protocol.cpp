@@ -104,6 +104,36 @@ bool parse_voice_frame(std::span<const std::uint8_t> frame,
         return message.response_id != 0 && message.total_bytes != 0 &&
                message.total_bytes <= kVoiceMaximumResponseBytes;
     }
+    if (kind == VoiceFrameKind::response_audio_begin) {
+        if (!valid_common(frame, message, 20) || frame.size() != 20) return false;
+        message.response_id = read_u32(frame.data() + 6);
+        message.total_bytes = read_u32(frame.data() + 10);
+        message.crc32 = read_u32(frame.data() + 14);
+        message.codec = frame[18];
+        message.sample_rate_khz = frame[19];
+        return message.response_id != 0 && message.total_bytes != 0 &&
+               message.total_bytes <= kVoiceMaximumSpokenReplyBytes &&
+               message.codec == 1 && message.sample_rate_khz == 8;
+    }
+    if (kind == VoiceFrameKind::response_audio_data) {
+        if (!valid_common(frame, message, kVoiceAudioDataHeaderBytes) ||
+            frame.size() > kVoiceMaximumFrameBytes) return false;
+        message.response_id = read_u32(frame.data() + 6);
+        message.offset = read_u32(frame.data() + 10);
+        message.payload = frame.subspan(kVoiceAudioDataHeaderBytes);
+        return message.response_id != 0 &&
+               message.offset <= kVoiceMaximumSpokenReplyBytes &&
+               !message.payload.empty() &&
+               message.payload.size() <= kVoiceMaximumSpokenReplyBytes - message.offset;
+    }
+    if (kind == VoiceFrameKind::response_audio_end) {
+        if (!valid_common(frame, message, 18) || frame.size() != 18) return false;
+        message.response_id = read_u32(frame.data() + 6);
+        message.total_bytes = read_u32(frame.data() + 10);
+        message.crc32 = read_u32(frame.data() + 14);
+        return message.response_id != 0 && message.total_bytes != 0 &&
+               message.total_bytes <= kVoiceMaximumSpokenReplyBytes;
+    }
     if (kind == VoiceFrameKind::response_status) {
         if (!valid_common(frame, message, 7) || frame.size() != 7) return false;
         message.status = static_cast<VoiceStatus>(frame[6]);
@@ -122,14 +152,21 @@ bool parse_voice_frame(std::span<const std::uint8_t> frame,
 
 EncodedVoiceFrame encode_voice_begin(std::uint32_t session_id,
                                      std::uint32_t total_bytes,
-                                     std::uint32_t crc32) noexcept {
+                                     std::uint32_t crc32,
+                                     bool spoken_replies,
+                                     bool discord_reply) noexcept {
     auto frame = fixed_frame(VoiceFrameKind::request_begin, session_id, 16);
     if (frame.size == 0 || total_bytes == 0 || total_bytes > kVoiceMaximumEncodedBytes) {
         return {};
     }
     write_u32(frame.bytes.data() + 6, total_bytes);
     write_u32(frame.bytes.data() + 10, crc32);
-    frame.bytes[14] = 1;  // G.711 mu-law.
+    // High bits are per-turn flags. Clearing both keeps the existing text-only
+    // frame byte-for-byte compatible; each non-default destination requires a
+    // companion that understands and masks the corresponding flag.
+    frame.bytes[14] = static_cast<std::uint8_t>(
+        1U | (spoken_replies ? kVoiceRequestFlagSpokenReplies : 0U) |
+        (discord_reply ? kVoiceRequestFlagDiscordReply : 0U));
     frame.bytes[15] = 8;  // kHz.
     return frame;
 }
@@ -169,6 +206,57 @@ EncodedVoiceFrame encode_voice_cancel(std::uint32_t session_id,
         static_cast<std::uint8_t>(reason) >
             static_cast<std::uint8_t>(VoiceStatus::processing_failed)) return {};
     frame.bytes[6] = static_cast<std::uint8_t>(reason);
+    return frame;
+}
+
+EncodedVoiceFrame encode_voice_audio_begin(std::uint32_t session_id,
+                                           std::uint32_t response_id,
+                                           std::uint32_t total_bytes,
+                                           std::uint32_t crc32) noexcept {
+    auto frame = fixed_frame(VoiceFrameKind::response_audio_begin, session_id, 20);
+    if (frame.size == 0 || response_id == 0 || total_bytes == 0 ||
+        total_bytes > kVoiceMaximumSpokenReplyBytes) {
+        return {};
+    }
+    write_u32(frame.bytes.data() + 6, response_id);
+    write_u32(frame.bytes.data() + 10, total_bytes);
+    write_u32(frame.bytes.data() + 14, crc32);
+    frame.bytes[18] = 1;  // G.711 mu-law.
+    frame.bytes[19] = 8;  // kHz.
+    return frame;
+}
+
+EncodedVoiceFrame encode_voice_audio_data(std::uint32_t session_id,
+                                          std::uint32_t response_id,
+                                          std::uint32_t offset,
+                                          std::span<const std::uint8_t> payload) noexcept {
+    auto frame = fixed_frame(VoiceFrameKind::response_audio_data, session_id,
+                             kVoiceAudioDataHeaderBytes + payload.size());
+    if (frame.size == 0 || response_id == 0 || payload.empty() ||
+        payload.size() > kVoiceMaximumDataPayloadBytes ||
+        offset > kVoiceMaximumSpokenReplyBytes ||
+        payload.size() > kVoiceMaximumSpokenReplyBytes - offset) {
+        return {};
+    }
+    write_u32(frame.bytes.data() + 6, response_id);
+    write_u32(frame.bytes.data() + 10, offset);
+    std::copy(payload.begin(), payload.end(),
+              frame.bytes.begin() + kVoiceAudioDataHeaderBytes);
+    return frame;
+}
+
+EncodedVoiceFrame encode_voice_audio_end(std::uint32_t session_id,
+                                         std::uint32_t response_id,
+                                         std::uint32_t total_bytes,
+                                         std::uint32_t crc32) noexcept {
+    auto frame = fixed_frame(VoiceFrameKind::response_audio_end, session_id, 18);
+    if (frame.size == 0 || response_id == 0 || total_bytes == 0 ||
+        total_bytes > kVoiceMaximumSpokenReplyBytes) {
+        return {};
+    }
+    write_u32(frame.bytes.data() + 6, response_id);
+    write_u32(frame.bytes.data() + 10, total_bytes);
+    write_u32(frame.bytes.data() + 14, crc32);
     return frame;
 }
 

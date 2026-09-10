@@ -2,6 +2,7 @@ package dev.nightglass.companion
 
 import android.Manifest
 import android.content.*
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.net.Uri
@@ -26,10 +27,13 @@ class MainActivity : AppCompatActivity() {
     private var resetReceiverRegistered = false
     private var otaReceiverRegistered = false
     private var voiceConversationReceiverRegistered = false
+    private var statusReceiverRegistered = false
     private lateinit var otaStatus: TextView
+    private lateinit var linkStatus: TextView
+    private lateinit var linkStatusDetail: TextView
     private val packagePicker = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        if (uris.isNotEmpty()) inspectAndConfirmPackage(uris)
+        if (uris.isNotEmpty()) inspectAndStartPackage(uris)
     }
     private val resetResultReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -64,18 +68,75 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this@MainActivity, detail, Toast.LENGTH_LONG).show()
         }
     }
+    private val statusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != NightglassConnectionService.ACTION_STATUS) return
+            renderLinkStatus(
+                intent.getStringExtra(NightglassConnectionService.EXTRA_STATUS_TEXT)
+                    ?: "Status unavailable",
+                intent.getStringExtra(NightglassConnectionService.EXTRA_STATUS_CLASS)
+                    ?: "updated",
+                intent.getLongExtra(NightglassConnectionService.EXTRA_STATUS_UPDATED_AT, 0L),
+            )
+        }
+    }
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         val pad = (20 * resources.displayMetrics.density).toInt()
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, pad) }
         root.addView(TextView(this).apply { text = "Nightglass companion"; textSize = 26f })
+        root.addView(Button(this).apply {
+            text = "Watch control center"
+            setOnClickListener { startActivity(Intent(this@MainActivity,
+                dev.nightglass.companion.premium.ControlCenterActivity::class.java)) }
+        })
         root.addView(TextView(this).apply { text = "Bluetooth pairing uses Android's system bond flow. Notification text remains in memory and is sent only over the encrypted BLE link." })
-        root.addView(Button(this).apply { text = "Connect / pair Nightglass"; setOnClickListener { requestAndConnect() } })
+        root.addView(TextView(this).apply {
+            text = "Watch link"; textSize = 20f; setPadding(0, pad, 0, 0)
+        })
+        linkStatus = TextView(this).apply {
+            text = "WAITING FOR NIGHTGLASS"; textSize = 18f
+            setPadding(0, 8, 0, 0)
+        }
+        root.addView(linkStatus)
+        linkStatusDetail = TextView(this).apply {
+            text = "Tap Connect / pair Nightglass to begin"
+            setTextColor(Color.DKGRAY)
+        }
+        root.addView(linkStatusDetail)
+        root.addView(Button(this).apply {
+            text = "Connect / pair Nightglass"
+            setOnClickListener { requestAndConnect() }
+        })
+        root.addView(Button(this).apply {
+            text = "Reconnect now"
+            setOnClickListener {
+                ContextCompat.startForegroundService(
+                    this@MainActivity,
+                    Intent(this@MainActivity, NightglassConnectionService::class.java)
+                        .setAction(NightglassConnectionService.ACTION_CONNECT),
+                )
+            }
+        })
         root.addView(Button(this).apply { text = "Grant notification access"; setOnClickListener { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } })
         root.addView(Button(this).apply { text = "Disconnect"; setOnClickListener { startService(Intent(this@MainActivity, NightglassConnectionService::class.java).setAction(NightglassConnectionService.ACTION_DISCONNECT)) } })
         root.addView(Button(this).apply {
             text = "Reset and re-pair watch…"
             setOnClickListener { confirmResetPinnedWatch() }
+        })
+        root.addView(TextView(this).apply {
+            text = "Direct app bridges"; textSize = 20f; setPadding(0, pad, 0, 0)
+        })
+        root.addView(TextView(this).apply {
+            text = "The watch uses the existing encrypted link for Spotify playback and Discord notification actions. These buttons open the installed phone apps without storing provider credentials in Nightglass."
+        })
+        root.addView(Button(this).apply {
+            text = "Open Spotify"
+            setOnClickListener { launchPackage("com.spotify.music") }
+        })
+        root.addView(Button(this).apply {
+            text = "Open Discord"
+            setOnClickListener { launchPackage("com.discord") }
         })
         root.addView(TextView(this).apply { text = "Phone weather proxy"; textSize = 20f; setPadding(0, pad, 0, 0) })
         root.addView(TextView(this).apply { text = "Weather uses whichever Internet connection this phone has (Wi-Fi or cellular). Direct watch Wi-Fi is an optional fallback; its password is never saved or logged." })
@@ -142,7 +203,7 @@ class MainActivity : AppCompatActivity() {
             text = "Signed watch update"; textSize = 20f; setPadding(0, pad, 0, 0)
         })
         root.addView(TextView(this).apply {
-            text = "Select firmware.bin, manifest.json, manifest.payload, and manifest.sig from the Nightglass release packager. The phone validates the package before confirmation; the watch independently verifies its signature and writes only the inactive OTA slot."
+            text = "Select firmware.bin, manifest.json, manifest.payload, and manifest.sig from the Nightglass release packager. The phone validates the package; the watch independently verifies its signature and writes only the inactive OTA slot."
         })
         otaStatus = TextView(this).apply { text = "No update selected" }
         root.addView(otaStatus)
@@ -159,8 +220,21 @@ class MainActivity : AppCompatActivity() {
             }
         })
         setContentView(ScrollView(this).apply { addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)) })
+        NightglassConnectionService.lastStatus(this)?.let { status ->
+            renderLinkStatus(status.text, status.statusClass, status.updatedAtMs)
+        }
     }
     private fun field(hintText: String) = EditText(this).apply { hint = hintText; setSingleLine(true) }
+    private fun launchPackage(packageName: String) {
+        val intent = packageManager.getLaunchIntentForPackage(packageName)
+            ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (intent == null) {
+            Toast.makeText(this, "App is not installed", Toast.LENGTH_SHORT).show()
+            return
+        }
+        runCatching { startActivity(intent) }
+            .onFailure { Toast.makeText(this, "Unable to open app", Toast.LENGTH_SHORT).show() }
+    }
     private fun scanOpenClawVoiceSetup() {
         val options = GmsBarcodeScannerOptions.Builder()
             .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
@@ -216,6 +290,15 @@ class MainActivity : AppCompatActivity() {
                 ContextCompat.RECEIVER_NOT_EXPORTED)
             voiceConversationReceiverRegistered = true
         }
+        if (!statusReceiverRegistered) {
+            ContextCompat.registerReceiver(this, statusReceiver,
+                IntentFilter(NightglassConnectionService.ACTION_STATUS),
+                ContextCompat.RECEIVER_NOT_EXPORTED)
+            statusReceiverRegistered = true
+        }
+        NightglassConnectionService.lastStatus(this)?.let { status ->
+            renderLinkStatus(status.text, status.statusClass, status.updatedAtMs)
+        }
     }
     override fun onStop() {
         if (resetReceiverRegistered) {
@@ -230,7 +313,36 @@ class MainActivity : AppCompatActivity() {
             unregisterReceiver(voiceConversationReceiver)
             voiceConversationReceiverRegistered = false
         }
+        if (statusReceiverRegistered) {
+            unregisterReceiver(statusReceiver)
+            statusReceiverRegistered = false
+        }
         super.onStop()
+    }
+    private fun renderLinkStatus(text: String, statusClass: String, updatedAtMs: Long) {
+        if (!::linkStatus.isInitialized || !::linkStatusDetail.isInitialized) return
+        val ageMs = if (updatedAtMs > 0L)
+            (System.currentTimeMillis() - updatedAtMs).coerceAtLeast(0L) else Long.MAX_VALUE
+        val stale = ageMs > 2 * 60_000L && statusClass == "connected"
+        linkStatus.text = if (stale) "LAST KNOWN — $text" else text
+        linkStatus.setTextColor(when {
+            stale -> Color.rgb(180, 110, 0)
+            statusClass == "connected" -> Color.rgb(0, 125, 70)
+            statusClass in setOf("connecting", "securing", "pairing") -> Color.rgb(30, 90, 170)
+            statusClass in setOf("disconnected", "not_found", "authorization", "bluetooth") -> Color.rgb(170, 35, 45)
+            else -> Color.DKGRAY
+        })
+        val age = if (ageMs == Long.MAX_VALUE) ""
+        else " · updated ${ageMs / 1000L}s ago"
+        linkStatusDetail.text = when {
+            stale -> "The link may have gone stale; tap Reconnect now$age"
+            statusClass == "connected" -> "Secure, encrypted, pinned link ready$age"
+            statusClass == "pairing" -> "Accept Android's pairing prompt on the phone$age"
+            statusClass == "authorization" -> "The watch did not authorize this phone; re-pair if needed$age"
+            statusClass in setOf("disconnected", "not_found", "bluetooth") -> "The companion will retry automatically$age"
+            statusClass in setOf("connecting", "securing") -> "Negotiating the secure watch link$age"
+            else -> "Connection state is being refreshed$age"
+        }
     }
     private fun confirmResetPinnedWatch() {
         android.app.AlertDialog.Builder(this)
@@ -253,7 +365,7 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.READ_PHONE_STATE, Manifest.permission.ANSWER_PHONE_CALLS)
         permissionRequest.launch(permissions.toTypedArray())
     }
-    private fun inspectAndConfirmPackage(uris: List<Uri>) {
+    private fun inspectAndStartPackage(uris: List<Uri>) {
         otaStatus.text = "Validating selected package…"
         Thread {
             val result = runCatching { OtaPackageLoader.load(contentResolver, uris) }
@@ -263,23 +375,20 @@ class MainActivity : AppCompatActivity() {
                     otaStatus.text = "Package rejected: ${result.exceptionOrNull()?.message ?: "invalid package"}"
                     return@runOnUiThread
                 }
-                android.app.AlertDialog.Builder(this)
-                    .setTitle("Install signed Nightglass update?")
-                    .setMessage("Version: ${pkg.manifest.appVersion}\nSize: ${pkg.manifest.imageSize} bytes\n\nKeep the phone and watch nearby until validation reaches 100%.")
-                    .setNegativeButton("Cancel", null)
-                    .setPositiveButton("Transfer update") { _, _ ->
-                        uris.forEach { uri -> runCatching {
-                            contentResolver.takePersistableUriPermission(uri,
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        } }
-                        ContextCompat.startForegroundService(this,
-                            Intent(this, NightglassConnectionService::class.java)
-                                .setAction(NightglassConnectionService.ACTION_START_OTA)
-                                .putStringArrayListExtra(
-                                    NightglassConnectionService.EXTRA_OTA_URIS,
-                                    ArrayList(uris.map(Uri::toString))))
-                    }
-                    .show()
+                // Selecting a package is the owner's explicit install request. The
+                // phone still validates all four signed-package files before the
+                // authenticated transport starts; no redundant second prompt is
+                // needed here.
+                uris.forEach { uri -> runCatching {
+                    contentResolver.takePersistableUriPermission(uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                } }
+                ContextCompat.startForegroundService(this,
+                    Intent(this, NightglassConnectionService::class.java)
+                        .setAction(NightglassConnectionService.ACTION_START_OTA)
+                        .putStringArrayListExtra(
+                            NightglassConnectionService.EXTRA_OTA_URIS,
+                            ArrayList(uris.map(Uri::toString))))
             }
         }.start()
     }

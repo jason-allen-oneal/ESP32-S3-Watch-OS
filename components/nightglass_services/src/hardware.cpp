@@ -1,5 +1,6 @@
 #include "nightglass/services/hardware.hpp"
 
+#include <atomic>
 #include <cstring>
 
 #include "driver/gpio.h"
@@ -8,8 +9,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "nightglass/bsp/touch_bus_diagnostic.hpp"
 #include "nightglass/core/health.hpp"
+#include "nightglass/services/activity.hpp"
+#include "nightglass/services/audio.hpp"
 #include "nightglass/services/gyro_processor.hpp"
+#include "nightglass/services/power.hpp"
 
 namespace nightglass::services {
 namespace {
@@ -31,8 +36,14 @@ constexpr std::uint8_t kImuAddress = 0x6B;
 constexpr std::uint8_t kImuChipId = 0x05;
 constexpr gpio_num_t kHapticGpio = GPIO_NUM_18;
 constexpr std::int64_t kHapticDebounceUs = 1'000'000;
-constexpr TickType_t kPollTicks = pdMS_TO_TICKS(40);
+constexpr TickType_t kActivePollTicks = pdMS_TO_TICKS(40);
+constexpr TickType_t kBlankPollTicks = pdMS_TO_TICKS(100);
 constexpr int kI2cTimeoutMs = 20;
+constexpr std::uint32_t kHardwareTaskStackBytes = 8192;
+constexpr UBaseType_t kHardwareMinimumStackReserveBytes = 2048;
+constexpr std::int64_t kGyroWarningIntervalUs = 5'000'000;
+static_assert(kHardwareTaskStackBytes >= 8192,
+              "hardware sampling and log paths require an 8 KiB stack");
 
 struct HapticCommand {
     std::uint16_t duration_ms;
@@ -52,9 +63,32 @@ bool haptic_supply_cleanup_verified = true;
 esp_timer_handle_t haptic_timer = nullptr;
 GyroProcessor gyro_processor;
 bool gyro_calibration_announced = false;
+std::int64_t last_gyro_warning_us = -kGyroWarningIntervalUs;
+std::uint32_t suppressed_gyro_warnings = 0;
 bool stable_moving = false;
 bool pending_moving = false;
 std::int64_t pending_motion_since_us = 0;
+std::atomic_bool diagnostics_gyro_requested{false};
+std::atomic_bool gyro_enabled{false};
+std::int64_t last_gyro_policy_attempt_us = -1'000'000;
+
+// Diagnostic-candidate instrumentation. These helpers and this observation
+// are owned exclusively by hardware_task, not by the I2C driver's bus lock.
+struct HardwareBusObservation {
+    std::uint32_t sequence{0};
+    std::uint8_t address{0};
+    esp_err_t result{ESP_OK};
+    std::int64_t completed_us{0};
+};
+HardwareBusObservation hardware_bus_observation{};
+
+void record_hardware_bus_transaction(i2c_master_dev_handle_t device, esp_err_t result) {
+    ++hardware_bus_observation.sequence;
+    hardware_bus_observation.address = device == rtc_device ? kRtcAddress
+        : device == pmic_device ? kPmicAddress : device == imu_device ? kImuAddress : 0;
+    hardware_bus_observation.result = result;
+    hardware_bus_observation.completed_us = esp_timer_get_time();
+}
 
 std::uint8_t from_bcd(std::uint8_t value) {
     return static_cast<std::uint8_t>(((value >> 4U) * 10U) + (value & 0x0FU));
@@ -62,13 +96,114 @@ std::uint8_t from_bcd(std::uint8_t value) {
 
 esp_err_t read_register(i2c_master_dev_handle_t device, std::uint8_t reg,
                         std::uint8_t *data, std::size_t length) {
-    return i2c_master_transmit_receive(device, &reg, 1, data, length, kI2cTimeoutMs);
+    const auto result = i2c_master_transmit_receive(device, &reg, 1, data, length, kI2cTimeoutMs);
+    record_hardware_bus_transaction(device, result);
+    return result;
 }
 
 esp_err_t write_register(i2c_master_dev_handle_t device, std::uint8_t reg,
                          std::uint8_t value) {
     const std::uint8_t payload[] = {reg, value};
-    return i2c_master_transmit(device, payload, sizeof(payload), kI2cTimeoutMs);
+    const auto result = i2c_master_transmit(device, payload, sizeof(payload), kI2cTimeoutMs);
+    record_hardware_bus_transaction(device, result);
+    return result;
+}
+
+void run_touch_bus_recovery() {
+    if (!nightglass::bsp::take_touch_bus_quiet_request()) return;
+    const auto audio = audio_service().snapshot();
+    if (audio.hardware_active || audio.operation_pending) {
+        ESP_LOGI(kTag, "TOUCH_BUS_RECOVERY_SKIPPED reason=audio_activity");
+        return;
+    }
+
+    // FT3168 can auto-enter Monitor, where other-slave traffic blocks its
+    // I2C state machine. A measured quiet window exposed readable A5=1.
+    // Wait boundedly for a readable state, use only the documented 1->0
+    // transition, then require a REAL read on the LVGL task. Neither these
+    // raw diagnostics nor mode writes can create health evidence.
+    constexpr std::int64_t kQuietWindowUs = 4'000'000;
+    const auto started_us = esp_timer_get_time();
+    const auto deadline_us = started_us + kQuietWindowUs;
+    const auto before = hardware_bus_observation;
+    const auto initial_irq_sequence = nightglass::bsp::touch_irq_sequence();
+    ESP_LOGI(kTag,
+             "TOUCH_BUS_RECOVERY_BEGIN coverage=hardware_task_only budget_us=%lld hw_sequence=%lu last_address=0x%02x last_result=%s last_completed_us=%lld irq_sequence=%lu",
+             static_cast<long long>(kQuietWindowUs),
+             static_cast<unsigned long>(before.sequence), before.address,
+             esp_err_to_name(before.result), static_cast<long long>(before.completed_us),
+             static_cast<unsigned long>(initial_irq_sequence));
+    const char *reason = "deadline";
+    std::uint32_t samples = 0;
+    while (esp_timer_get_time() < deadline_us) {
+        const auto current_audio = audio_service().snapshot();
+        if (current_audio.hardware_active || current_audio.operation_pending) {
+            reason = "audio_activity";
+            break;
+        }
+        if (nightglass::bsp::touch_irq_sequence() != initial_irq_sequence) {
+            reason = "irq_activity";
+            break;
+        }
+        const auto sample = nightglass::bsp::sample_touch_bus_quiet_diagnostic();
+        ++samples;
+        if (sample.irq_sequence != initial_irq_sequence ||
+                (sample.point_count > 0 && sample.count_result == ESP_OK)) {
+            reason = "irq_or_reported_contact";
+            break;
+        }
+        if (sample.mode_result == ESP_OK && sample.power_mode <= 1) {
+            const auto activation = nightglass::bsp::activate_touch_from_monitor();
+            ESP_LOGI(kTag, "TOUCH_BUS_RECOVERY_ACTIVATE observed_mode=%u result=%s",
+                     sample.power_mode, esp_err_to_name(activation));
+            if (activation != ESP_OK) {
+                reason = "activation_failed";
+                break;
+            }
+            // Vendor mode-settling delay, OUTSIDE the LVGL mutex.
+            vTaskDelay(pdMS_TO_TICKS(20));
+            const auto active = nightglass::bsp::sample_touch_bus_quiet_diagnostic();
+            if (active.mode_result != ESP_OK || active.power_mode != 0) {
+                reason = "active_readback_failed";
+                break;
+            }
+            if (active.irq_sequence != initial_irq_sequence ||
+                    (active.count_result == ESP_OK && active.point_count > 0)) {
+                reason = "irq_or_reported_contact";
+                break;
+            }
+            const auto prior_read = nightglass::bsp::touch_read_evidence();
+            nightglass::bsp::request_touch_read();
+            const auto read_deadline = esp_timer_get_time() + 250'000;
+            reason = "normal_read_timeout";
+            while (esp_timer_get_time() < read_deadline) {
+                const auto actual = nightglass::bsp::touch_read_evidence();
+                if (actual.sequence != prior_read.sequence) {
+                    reason = actual.result == ESP_OK ? "normal_read_ok" : "normal_read_failed";
+                    ESP_LOGI(kTag,
+                             "TOUCH_BUS_RECOVERY_READ sequence=%lu result=%s completed_us=%lld source=lvgl_normal_read",
+                             static_cast<unsigned long>(actual.sequence),
+                             esp_err_to_name(actual.result),
+                             static_cast<long long>(actual.completed_us));
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            break;
+        }
+        const auto remaining_us = deadline_us - esp_timer_get_time();
+        if (remaining_us <= 0) break;
+        const auto delay_us = remaining_us < 100'000 ? remaining_us : 100'000;
+        auto delay_ticks = pdMS_TO_TICKS(static_cast<std::uint32_t>(delay_us / 1000));
+        if (delay_ticks == 0) delay_ticks = 1;
+        vTaskDelay(delay_ticks);
+    }
+    ESP_LOGI(kTag,
+             "TOUCH_BUS_RECOVERY_END reason=%s elapsed_us=%lld samples=%lu hw_sequence_before=%lu hw_sequence_after=%lu irq_sequence=%lu resume_hardware_polling=1",
+             reason, static_cast<long long>(esp_timer_get_time() - started_us),
+             static_cast<unsigned long>(samples), static_cast<unsigned long>(before.sequence),
+             static_cast<unsigned long>(hardware_bus_observation.sequence),
+             static_cast<unsigned long>(nightglass::bsp::touch_irq_sequence()));
 }
 
 bool add_i2c_device(i2c_master_bus_handle_t bus, std::uint16_t address,
@@ -81,6 +216,65 @@ bool add_i2c_device(i2c_master_bus_handle_t bus, std::uint16_t address,
         .flags = {.disable_ack_check = false},
     };
     return i2c_master_bus_add_device(bus, &config, device) == ESP_OK;
+}
+
+void clear_gyro_snapshot() {
+    portENTER_CRITICAL(&snapshot_mux);
+    current.motion.gyro_calibrated = false;
+    current.motion.gyro_calibration_samples = 0;
+    current.motion.gyro_calibration_required = 0;
+    current.motion.gyro_calibration_restarts = 0;
+    current.motion.gyro_x_dps = 0.0F;
+    current.motion.gyro_y_dps = 0.0F;
+    current.motion.gyro_z_dps = 0.0F;
+    current.motion.gyro_raw_x_dps = 0.0F;
+    current.motion.gyro_raw_y_dps = 0.0F;
+    current.motion.gyro_raw_z_dps = 0.0F;
+    current.motion.gyro_corrected_x_dps = 0.0F;
+    current.motion.gyro_corrected_y_dps = 0.0F;
+    current.motion.gyro_corrected_z_dps = 0.0F;
+    current.motion.gyro_bias_x_dps = 0.0F;
+    current.motion.gyro_bias_y_dps = 0.0F;
+    current.motion.gyro_bias_z_dps = 0.0F;
+    ++current.sequence;
+    portEXIT_CRITICAL(&snapshot_mux);
+}
+
+bool apply_gyro_policy(bool enabled) {
+    if (!imu_ready || !imu_device) return false;
+    std::uint8_t control = 0;
+    if (read_register(imu_device, 0x08, &control, 1) != ESP_OK) return false;
+    const auto updated = static_cast<std::uint8_t>(
+        enabled ? (control | 0x03U) : ((control | 0x01U) & ~0x02U));
+    if (updated != control && write_register(imu_device, 0x08, updated) != ESP_OK) {
+        return false;
+    }
+
+    // Power-gating the gyro must not discard a good zero-rate bias learned by
+    // the guided flow. If calibration was incomplete, restart cleanly rather
+    // than combining samples from two separated power sessions.
+    const bool retain_calibration = gyro_processor.calibrated();
+    gyro_enabled.store(enabled);
+    if (!retain_calibration) gyro_processor.reset();
+    gyro_calibration_announced = false;
+    last_gyro_warning_us = -kGyroWarningIntervalUs;
+    suppressed_gyro_warnings = 0;
+    clear_gyro_snapshot();
+    nightglass::core::health_registry().set(
+        "imu", enabled ? nightglass::core::HealthState::degraded
+                       : nightglass::core::HealthState::ok,
+        enabled ? "QMI8658 gyro enabled; calibration pending"
+                : "QMI8658 accelerometer streaming; gyro power-gated");
+    ESP_LOGI(kTag, "QMI8658 gyro %s", enabled ? "enabled" : "disabled");
+    return true;
+}
+
+bool gestures_require_gyro() {
+    const auto activity = activity_service().snapshot();
+    const auto settings = activity.settings;
+    return settings.raise_to_wake || settings.double_twist_quick_settings ||
+           settings.shake_notifications || settings.flick_media_next ||
+           gesture_calibration_active(activity.gesture_calibration);
 }
 
 void publish_rtc() {
@@ -144,61 +338,87 @@ void publish_motion() {
     next.present = imu_ready;
     next.sampled_at_us = esp_timer_get_time();
     if (imu_ready) {
+        const bool gyro_active = gyro_enabled.load();
         std::uint8_t status = 0;
         std::uint8_t data[12]{};
-        // STATUS0 bit 1 is the vendor-defined gyro-data-available flag. Only
-        // successful fresh frames may advance the boot calibration.
+        // STATUS0 bit 0 reports accelerometer data and bit 1 reports gyro data.
+        // Avoid reading the powered-down gyro register bank in accel-only mode.
+        const std::uint8_t ready_mask = gyro_active ? 0x02U : 0x01U;
+        const std::size_t data_size = gyro_active ? sizeof(data) : 6U;
         if (read_register(imu_device, 0x2E, &status, 1) == ESP_OK &&
-            (status & 0x02U) != 0 &&
-            read_register(imu_device, 0x35, data, sizeof(data)) == ESP_OK) {
+            (status & ready_mask) != 0 &&
+            read_register(imu_device, 0x35, data, data_size) == ESP_OK) {
             const auto raw_ax = static_cast<std::int16_t>((data[1] << 8U) | data[0]);
             const auto raw_ay = static_cast<std::int16_t>((data[3] << 8U) | data[2]);
             const auto raw_az = static_cast<std::int16_t>((data[5] << 8U) | data[4]);
-            const auto raw_gx = static_cast<std::int16_t>((data[7] << 8U) | data[6]);
-            const auto raw_gy = static_cast<std::int16_t>((data[9] << 8U) | data[8]);
-            const auto raw_gz = static_cast<std::int16_t>((data[11] << 8U) | data[10]);
             next.valid = true;
             next.accel_x_g = static_cast<float>(raw_ax) / 4096.0F;
             next.accel_y_g = static_cast<float>(raw_ay) / 4096.0F;
             next.accel_z_g = static_cast<float>(raw_az) / 4096.0F;
-            next.gyro_raw_x_dps = static_cast<float>(raw_gx) / 64.0F;
-            next.gyro_raw_y_dps = static_cast<float>(raw_gy) / 64.0F;
-            next.gyro_raw_z_dps = static_cast<float>(raw_gz) / 64.0F;
-            const auto gyro = gyro_processor.process({
-                .x_dps = next.gyro_raw_x_dps,
-                .y_dps = next.gyro_raw_y_dps,
-                .z_dps = next.gyro_raw_z_dps,
-                .accel_x_g = next.accel_x_g,
-                .accel_y_g = next.accel_y_g,
-                .accel_z_g = next.accel_z_g,
-            });
-            next.gyro_calibrated = gyro.calibrated;
-            next.gyro_calibration_samples = gyro.calibration_samples;
-            next.gyro_calibration_required = gyro.calibration_required;
-            next.gyro_calibration_restarts = gyro.calibration_restarts;
-            next.gyro_x_dps = gyro.display_x_dps;
-            next.gyro_y_dps = gyro.display_y_dps;
-            next.gyro_z_dps = gyro.display_z_dps;
-            next.gyro_corrected_x_dps = gyro.corrected_x_dps;
-            next.gyro_corrected_y_dps = gyro.corrected_y_dps;
-            next.gyro_corrected_z_dps = gyro.corrected_z_dps;
-            next.gyro_bias_x_dps = gyro.bias_x_dps;
-            next.gyro_bias_y_dps = gyro.bias_y_dps;
-            next.gyro_bias_z_dps = gyro.bias_z_dps;
-            next.sample_sequence = current.motion.sample_sequence + 1U;
+            GyroOutput gyro{};
+            if (gyro_active) {
+                const auto raw_gx = static_cast<std::int16_t>((data[7] << 8U) | data[6]);
+                const auto raw_gy = static_cast<std::int16_t>((data[9] << 8U) | data[8]);
+                const auto raw_gz = static_cast<std::int16_t>((data[11] << 8U) | data[10]);
+                next.gyro_raw_x_dps = static_cast<float>(raw_gx) / 64.0F;
+                next.gyro_raw_y_dps = static_cast<float>(raw_gy) / 64.0F;
+                next.gyro_raw_z_dps = static_cast<float>(raw_gz) / 64.0F;
+                gyro = gyro_processor.process({
+                    .x_dps = next.gyro_raw_x_dps,
+                    .y_dps = next.gyro_raw_y_dps,
+                    .z_dps = next.gyro_raw_z_dps,
+                    .accel_x_g = next.accel_x_g,
+                    .accel_y_g = next.accel_y_g,
+                    .accel_z_g = next.accel_z_g,
+                });
+                next.gyro_calibrated = gyro.calibrated;
+                next.gyro_calibration_samples = gyro.calibration_samples;
+                next.gyro_calibration_required = gyro.calibration_required;
+                next.gyro_calibration_restarts = gyro.calibration_restarts;
+                next.gyro_x_dps = gyro.display_x_dps;
+                next.gyro_y_dps = gyro.display_y_dps;
+                next.gyro_z_dps = gyro.display_z_dps;
+                next.gyro_corrected_x_dps = gyro.corrected_x_dps;
+                next.gyro_corrected_y_dps = gyro.corrected_y_dps;
+                next.gyro_corrected_z_dps = gyro.corrected_z_dps;
+                next.gyro_bias_x_dps = gyro.bias_x_dps;
+                next.gyro_bias_y_dps = gyro.bias_y_dps;
+                next.gyro_bias_z_dps = gyro.bias_z_dps;
 
-            if (gyro.calibration_restarted) {
-                ESP_LOGW(kTag, "Gyro calibration restarted: keep watch stationary");
+                if (gyro.calibration_restarted) {
+                    ++suppressed_gyro_warnings;
+                    if (next.sampled_at_us - last_gyro_warning_us >=
+                        kGyroWarningIntervalUs) {
+                        ESP_LOGW(kTag,
+                                 "Gyro zero unstable: restarts=%lu events=%lu; "
+                                 "place watch on a firm surface",
+                                 static_cast<unsigned long>(gyro.calibration_restarts),
+                                 static_cast<unsigned long>(suppressed_gyro_warnings));
+                        last_gyro_warning_us = next.sampled_at_us;
+                        suppressed_gyro_warnings = 0;
+                    }
+                }
+                if (gyro.calibrated && !gyro_calibration_announced) {
+                    gyro_calibration_announced = true;
+                    const auto stack_reserve = uxTaskGetStackHighWaterMark(nullptr);
+                    ESP_LOGI(kTag,
+                             "Gyro calibration complete: samples=%u bias=%+.3f,%+.3f,%+.3f "
+                             "dps stack_free=%u",
+                             gyro.calibration_samples, gyro.bias_x_dps, gyro.bias_y_dps,
+                             gyro.bias_z_dps, static_cast<unsigned>(stack_reserve));
+                    if (stack_reserve < kHardwareMinimumStackReserveBytes) {
+                        ESP_LOGE(kTag, "Hardware task stack reserve low: bytes=%u",
+                                 static_cast<unsigned>(stack_reserve));
+                    }
+                    nightglass::core::health_registry().set(
+                        "imu", nightglass::core::HealthState::ok,
+                        "QMI8658 calibrated and streaming filtered motion");
+                }
             }
-            if (gyro.calibrated && !gyro_calibration_announced) {
-                gyro_calibration_announced = true;
-                ESP_LOGI(kTag, "Gyro calibration complete: samples=%u bias=%+.3f,%+.3f,%+.3f dps",
-                         gyro.calibration_samples, gyro.bias_x_dps, gyro.bias_y_dps,
-                         gyro.bias_z_dps);
-                nightglass::core::health_registry().set(
-                    "imu", nightglass::core::HealthState::ok,
-                    "QMI8658 calibrated and streaming filtered motion");
-            }
+
+            portENTER_CRITICAL(&snapshot_mux);
+            next.sample_sequence = current.motion.sample_sequence + 1U;
+            portEXIT_CRITICAL(&snapshot_mux);
 
             const float accel_energy = next.accel_x_g * next.accel_x_g +
                                        next.accel_y_g * next.accel_y_g +
@@ -280,7 +500,7 @@ bool disable_haptic_supply(std::uint8_t cached_enable, bool cached_valid) {
         std::uint8_t enable = cached_enable;
         if (!cached_valid &&
             read_register(pmic_device, kPmicLdoOnOff0, &enable, 1) != ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(1));
+            vTaskDelay(1);
             continue;
         }
 
@@ -294,7 +514,7 @@ bool disable_haptic_supply(std::uint8_t cached_enable, bool cached_valid) {
         }
 
         cached_valid = false;
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(1);
     }
 
     publish_haptic_supply(false, false, 0);
@@ -433,21 +653,22 @@ void probe_devices(i2c_master_bus_handle_t bus_handle) {
                 imu_id == kImuChipId;
     if (imu_ready) {
         // CTRL1: little-endian with address auto-increment. CTRL2: 8 g at
-        // 31.25 Hz. CTRL3: 512 dps at 28.025 Hz.
-        // CTRL7 enables accelerometer and gyro for this explicit diagnostics screen.
+        // 31.25 Hz. CTRL3: 512 dps at 28.025 Hz. CTRL7 starts in
+        // accelerometer-only mode; diagnostics or enabled gestures opt into gyro.
         imu_ready = write_register(imu_device, 0x02, 0x40) == ESP_OK &&
                     write_register(imu_device, 0x03, 0x28) == ESP_OK &&
                     write_register(imu_device, 0x04, 0x58) == ESP_OK &&
-                    write_register(imu_device, 0x08, 0x03) == ESP_OK;
+                    write_register(imu_device, 0x08, 0x01) == ESP_OK;
+        gyro_enabled.store(false);
         gyro_processor.reset();
         gyro_calibration_announced = false;
         stable_moving = false;
         pending_moving = false;
         pending_motion_since_us = 0;
     }
-    nightglass::core::health_registry().set("imu", imu_ready ? nightglass::core::HealthState::degraded
+    nightglass::core::health_registry().set("imu", imu_ready ? nightglass::core::HealthState::ok
                                                          : nightglass::core::HealthState::failed,
-                                       imu_ready ? "QMI8658 identified; gyro calibration pending"
+                                       imu_ready ? "QMI8658 accelerometer streaming; gyro power-gated"
                                                  : "QMI8658 initialization failed");
 
     ESP_LOGI(kTag, "Hardware probes: rtc=%d pmic=%d imu=%d", rtc_added,
@@ -458,10 +679,20 @@ void hardware_task(void *context) {
     probe_devices(static_cast<i2c_master_bus_handle_t>(context));
     std::int64_t last_rtc_us = -1'000'000;
     std::int64_t last_battery_us = -2'000'000;
-    TickType_t last_wake_tick = xTaskGetTickCount();
-
     while (true) {
+        run_touch_bus_recovery();
         const std::int64_t now = esp_timer_get_time();
+        const bool desired_gyro = diagnostics_gyro_requested.load() ||
+                                  gestures_require_gyro();
+        if (desired_gyro != gyro_enabled.load() &&
+            now - last_gyro_policy_attempt_us >= 1'000'000) {
+            last_gyro_policy_attempt_us = now;
+            if (!apply_gyro_policy(desired_gyro) && imu_ready) {
+                nightglass::core::health_registry().set(
+                    "imu", nightglass::core::HealthState::degraded,
+                    "QMI8658 gyro power policy update failed");
+            }
+        }
         HapticCommand command{};
         if (haptic_queue && xQueueReceive(haptic_queue, &command, 0) == pdTRUE) {
             esp_timer_stop(haptic_timer);
@@ -487,7 +718,12 @@ void hardware_task(void *context) {
             publish_battery();
             last_battery_us = now;
         }
-        vTaskDelayUntil(&last_wake_tick, kPollTicks);
+        const auto power_state = power_service().snapshot().state;
+        const auto poll_ticks = power_state == nightglass::core::PowerState::screen_blank ||
+                                        power_state == nightglass::core::PowerState::light_sleep
+                                    ? kBlankPollTicks
+                                    : kActivePollTicks;
+        ulTaskNotifyTake(pdTRUE, poll_ticks);
     }
 }
 
@@ -525,7 +761,8 @@ nightglass::core::Status HardwareService::start(i2c_master_bus_handle_t bus_hand
         haptic_output_ready ? "GPIO18 ready; ALDO3 probe pending"
                             : "Haptic output initialization failed");
 
-    if (xTaskCreatePinnedToCore(hardware_task, "hardware_service", 6144, bus_handle,
+    if (xTaskCreatePinnedToCore(hardware_task, "hardware_service", kHardwareTaskStackBytes,
+                               bus_handle,
                                4, &service_task, 0) != pdPASS) {
         service_task = nullptr;
         gpio_set_level(kHapticGpio, 0);
@@ -543,6 +780,12 @@ HardwareSnapshot HardwareService::snapshot() const {
     return copy;
 }
 
+bool HardwareService::set_gyro_enabled(bool enabled) {
+    const bool changed = diagnostics_gyro_requested.exchange(enabled) != enabled;
+    if (changed && service_task) xTaskNotifyGive(service_task);
+    return service_task != nullptr;
+}
+
 bool HardwareService::request_haptic(std::uint16_t duration_ms) {
     if (!haptic_queue || duration_ms < 20 || duration_ms > 250) return false;
     const auto state = snapshot().haptic;
@@ -551,7 +794,9 @@ bool HardwareService::request_haptic(std::uint16_t duration_ms) {
         return false;
     }
     const HapticCommand command{duration_ms};
-    return xQueueSend(haptic_queue, &command, 0) == pdTRUE;
+    const bool queued = xQueueSend(haptic_queue, &command, 0) == pdTRUE;
+    if (queued && service_task) xTaskNotifyGive(service_task);
+    return queued;
 }
 
 HardwareService &hardware_service() { return instance; }

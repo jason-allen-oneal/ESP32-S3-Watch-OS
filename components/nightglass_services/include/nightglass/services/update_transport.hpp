@@ -14,6 +14,7 @@ using UpdateStatusSink = bool (*)(const std::uint8_t *, std::size_t);
 struct UpdateTransportSnapshot {
     std::uint32_t sequence{0};
     std::uint64_t session{0};
+    UpdateTransportLink link{UpdateTransportLink::none};
     bool awaiting_confirmation{false};
     bool ready_to_reboot{false};
     std::array<char, 32> target_version{};
@@ -21,13 +22,11 @@ struct UpdateTransportSnapshot {
 
 class UpdateTransport {
 public:
-    nightglass::core::Status start(UpdateStatusSink sink);
+    nightglass::core::Status start(UpdateTransportLink link, UpdateStatusSink sink);
     [[nodiscard]] bool enqueue(const UpdateTransportCommand &command) noexcept;
-    [[nodiscard]] bool confirm() noexcept;
     [[nodiscard]] bool abort() noexcept;
-    [[nodiscard]] bool restart() noexcept;
-    void link_ready() noexcept;
-    void link_lost() noexcept;
+    void link_ready(UpdateTransportLink link) noexcept;
+    void link_lost(UpdateTransportLink link) noexcept;
     [[nodiscard]] UpdateTransportSnapshot snapshot() const noexcept;
 };
 

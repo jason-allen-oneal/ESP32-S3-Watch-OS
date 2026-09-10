@@ -1,5 +1,7 @@
 #include "nightglass/services/power.hpp"
 
+#include <algorithm>
+
 #include "driver/gpio.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
@@ -15,6 +17,8 @@
 #include "nightglass/services/activity.hpp"
 #include "nightglass/services/network_weather.hpp"
 #include "nightglass/services/connectivity.hpp"
+#include "nightglass/services/premium.hpp"
+#include "nightglass/services/hardware.hpp"
 
 namespace nightglass::services {
 namespace {
@@ -22,23 +26,45 @@ namespace {
 constexpr char kTag[] = "nightglass_power";
 constexpr gpio_num_t kSideKeyGpio = GPIO_NUM_10;
 constexpr gpio_num_t kTouchInterruptGpio = GPIO_NUM_38;
-// Human-scale screen policy does not need a 50 Hz polling loop. A 50 ms cadence
-// keeps the side key responsive while leaving longer idle windows for DFS and
-// automatic light sleep between BLE connection events.
-constexpr TickType_t kSupervisorPeriod = pdMS_TO_TICKS(50);
-constexpr std::uint8_t kDebounceSamples = 2;
+constexpr std::int64_t kSideKeyDebounceUs = 20'000;
+constexpr std::int64_t kSleepRetryUs = 1'000'000;
+// A state transition synchronously quiesces the LVGL pipeline through the UI
+// observer. Keep enough headroom for that cross-service call chain; the former
+// 4 KiB stack overflowed at the first screen-blank transition on hardware.
+constexpr std::uint32_t kSupervisorStackBytes = 8192;
 constexpr char kNvsNamespace[] = "ng_power";
 
 PowerService instance;
 TaskHandle_t supervisor_task = nullptr;
 portMUX_TYPE snapshot_mux = portMUX_INITIALIZER_UNLOCKED;
 PowerSnapshot current{};
+portMUX_TYPE observer_mux = portMUX_INITIALIZER_UNLOCKED;
+PowerStateObserver state_observer = nullptr;
+void *state_observer_context = nullptr;
+
+void IRAM_ATTR side_key_interrupt(void *) {
+    if (!supervisor_task) return;
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    vTaskNotifyGiveFromISR(supervisor_task, &higher_priority_task_woken);
+    if (higher_priority_task_woken == pdTRUE) portYIELD_FROM_ISR();
+}
+
+void notify_state_observer(nightglass::core::PowerState state) {
+    PowerStateObserver observer = nullptr;
+    void *context = nullptr;
+    portENTER_CRITICAL(&observer_mux);
+    observer = state_observer;
+    context = state_observer_context;
+    portEXIT_CRITICAL(&observer_mux);
+    if (observer) observer(state, context);
+}
 
 std::uint8_t brightness_for(nightglass::core::PowerState state,
                             const PowerSettings &settings) {
     switch (state) {
         case nightglass::core::PowerState::active: return settings.active_brightness;
         case nightglass::core::PowerState::dim: return settings.dim_brightness;
+        case nightglass::core::PowerState::ambient: return 2;
         case nightglass::core::PowerState::screen_blank: return 0;
         default: return 0;
     }
@@ -54,10 +80,16 @@ bool valid_settings(const PowerSettings &settings) {
            settings.sleep_after_blank_seconds <= 3600;
 }
 
-bool enable_automatic_light_sleep() {
+bool disable_automatic_light_sleep() {
     esp_pm_config_t config{};
     if (esp_pm_get_configuration(&config) != ESP_OK) return false;
-    config.light_sleep_enable = true;
+    // GPIO38 is normally a falling-edge FT5x06 interrupt. ESP-IDF's
+    // gpio_wakeup_enable() requires a level trigger and also replaces the
+    // pin's normal interrupt type. Until that level/edge hand-off passes a
+    // repeated hardware wake test, automatic light sleep can miss the touch
+    // edge and strand a blank watch. Keep DFS and explicit, bracketed light
+    // sleep, but never enter automatic light sleep with an unarmed touch IRQ.
+    config.light_sleep_enable = false;
     return esp_pm_configure(&config) == ESP_OK;
 }
 
@@ -152,6 +184,7 @@ void apply_state(nightglass::core::PowerState target, std::int64_t observed_acti
     current.requested_brightness = brightness;
     ++current.sequence;
     portEXIT_CRITICAL(&snapshot_mux);
+    notify_state_observer(target);
     ESP_LOGI(kTag, "Display policy state=%u brightness=%u",
              static_cast<unsigned>(target), brightness);
 }
@@ -260,7 +293,11 @@ void enter_light_sleep(std::int64_t observed_activity_us) {
     current.sleeping = false;
     current.last_wake = wake_reason;
     current.wake_touch_pending = wake_reason == nightglass::core::WakeReason::touch;
-    current.last_activity_us = woke_us;
+    if (wake_reason == nightglass::core::WakeReason::touch ||
+        wake_reason == nightglass::core::WakeReason::button) {
+        current.last_activity_us = woke_us;
+        current.last_physical_input_us = woke_us;
+    }
     ++current.sleep_count;
     current.last_sleep_ms = static_cast<std::uint32_t>((woke_us - started_us) / 1000);
     ++current.sequence;
@@ -268,24 +305,29 @@ void enter_light_sleep(std::int64_t observed_activity_us) {
     ESP_LOGI(kTag, "Light sleep returned status=%s cause=%u duration=%lums",
              esp_err_to_name(result), static_cast<unsigned>(cause),
              static_cast<unsigned long>((woke_us - started_us) / 1000));
+    // Re-evaluate immediately: a physical wake must restore the display,
+    // while a background wake should retain the blank state and old activity
+    // deadline.
+    if (supervisor_task) xTaskNotifyGive(supervisor_task);
 }
 
 void supervisor(void *) {
     bool debounced_key = gpio_get_level(kSideKeyGpio) > 0;
     bool candidate_key = debounced_key;
     bool usb_sleep_inhibited = false;
-    std::uint8_t stable_samples = kDebounceSamples;
+    std::int64_t candidate_since_us = esp_timer_get_time();
+    std::int64_t next_sleep_attempt_us = 0;
+    TickType_t timeout_ticks = 1;
     while (true) {
-        ulTaskNotifyTake(pdTRUE, kSupervisorPeriod);
+        ulTaskNotifyTake(pdTRUE, timeout_ticks);
         const auto now = esp_timer_get_time();
         const bool raw_key = gpio_get_level(kSideKeyGpio) > 0;
         if (raw_key != candidate_key) {
             candidate_key = raw_key;
-            stable_samples = 1;
-        } else if (stable_samples < kDebounceSamples) {
-            ++stable_samples;
+            candidate_since_us = now;
         }
-        if (stable_samples >= kDebounceSamples && candidate_key != debounced_key) {
+        if (candidate_key != debounced_key &&
+            now - candidate_since_us >= kSideKeyDebounceUs) {
             debounced_key = candidate_key;
             publish_key(true, debounced_key);
             if (debounced_key) publish_activity(now, nightglass::core::WakeReason::button);
@@ -306,31 +348,95 @@ void supervisor(void *) {
         const auto dim_after_us = static_cast<std::int64_t>(snapshot.settings.dim_after_seconds) * 1'000'000;
         const auto blank_after_us = static_cast<std::int64_t>(snapshot.settings.blank_after_seconds) * 1'000'000;
         const auto sleep_after_us = static_cast<std::int64_t>(snapshot.settings.sleep_after_blank_seconds) * 1'000'000;
+        const auto battery = hardware_service().snapshot().battery;
+        const bool always_on = premium_aod_allowed(premium_service().profile().flags & kPremiumAlwaysOn,
+            battery.battery_present, battery.percent_valid, battery.percent, now - battery.sampled_at_us);
+        const auto resting_state = always_on ? nightglass::core::PowerState::ambient
+                                             : nightglass::core::PowerState::screen_blank;
         const auto target = inactive_us >= blank_after_us
-            ? nightglass::core::PowerState::screen_blank
+            ? resting_state
             : inactive_us >= dim_after_us ? nightglass::core::PowerState::dim
                                           : nightglass::core::PowerState::active;
         apply_state(target, snapshot.last_activity_us);
-        if (snapshot.settings.sleep_after_blank_seconds > 0 &&
+        if (!always_on && snapshot.settings.sleep_after_blank_seconds > 0 &&
             inactive_us >= blank_after_us + sleep_after_us) {
             if (usb_serial_jtag_is_connected()) {
                 if (!usb_sleep_inhibited) {
                     ESP_LOGI(kTag, "USB host connected; light sleep inhibited");
                     usb_sleep_inhibited = true;
                 }
+                next_sleep_attempt_us = now + kSleepRetryUs;
             } else {
                 if (usb_sleep_inhibited) {
                     ESP_LOGI(kTag, "USB host disconnected; light sleep restored");
                     usb_sleep_inhibited = false;
                 }
-                PowerSnapshot latest{};
-                portENTER_CRITICAL(&snapshot_mux);
-                latest = current;
-                portEXIT_CRITICAL(&snapshot_mux);
-                enter_light_sleep(latest.last_activity_us);
+                if (now >= next_sleep_attempt_us) {
+                    PowerSnapshot latest{};
+                    portENTER_CRITICAL(&snapshot_mux);
+                    latest = current;
+                    portEXIT_CRITICAL(&snapshot_mux);
+                    enter_light_sleep(latest.last_activity_us);
+                    next_sleep_attempt_us = esp_timer_get_time() + kSleepRetryUs;
+                }
             }
         } else {
             usb_sleep_inhibited = false;
+        }
+
+        portENTER_CRITICAL(&snapshot_mux);
+        snapshot = current;
+        portEXIT_CRITICAL(&snapshot_mux);
+        const auto after_us = esp_timer_get_time();
+        const auto after_inactive_us = after_us - snapshot.last_activity_us;
+        const auto after_dim_us = static_cast<std::int64_t>(
+            snapshot.settings.dim_after_seconds) * 1'000'000;
+        const auto after_blank_us = static_cast<std::int64_t>(
+            snapshot.settings.blank_after_seconds) * 1'000'000;
+        const auto expected_state = after_inactive_us >= after_blank_us
+            ? resting_state
+            : after_inactive_us >= after_dim_us ? nightglass::core::PowerState::dim
+                                                : nightglass::core::PowerState::active;
+
+        std::int64_t next_deadline_us = 0;
+        if (snapshot.state != expected_state) {
+            next_deadline_us = after_us;
+        } else if (after_inactive_us < after_dim_us) {
+            next_deadline_us = snapshot.last_activity_us + after_dim_us;
+        } else if (after_inactive_us < after_blank_us) {
+            next_deadline_us = snapshot.last_activity_us + after_blank_us;
+        } else if (always_on) {
+            // Recheck battery freshness even with no input. AOD never prevents
+            // a depleted or unreadable battery from returning to normal sleep.
+            next_deadline_us = after_us + 5'000'000;
+        } else if (snapshot.settings.sleep_after_blank_seconds > 0) {
+            const auto sleep_deadline_us = snapshot.last_activity_us + after_blank_us +
+                static_cast<std::int64_t>(snapshot.settings.sleep_after_blank_seconds) *
+                    1'000'000;
+            next_deadline_us = sleep_deadline_us > after_us
+                                   ? sleep_deadline_us
+                                   : std::max(next_sleep_attempt_us, after_us);
+        }
+        if (snapshot.wake_touch_pending) {
+            const auto touch_deadline_us = snapshot.last_activity_us + 1'000'000;
+            if (next_deadline_us == 0 || touch_deadline_us < next_deadline_us) {
+                next_deadline_us = touch_deadline_us;
+            }
+        }
+        if (candidate_key != debounced_key) {
+            const auto debounce_deadline_us = candidate_since_us + kSideKeyDebounceUs;
+            if (next_deadline_us == 0 || debounce_deadline_us < next_deadline_us) {
+                next_deadline_us = debounce_deadline_us;
+            }
+        }
+        if (next_deadline_us == 0) {
+            timeout_ticks = portMAX_DELAY;
+        } else {
+            const auto remaining_us = std::max<std::int64_t>(0, next_deadline_us - after_us);
+            const auto remaining_ms = static_cast<std::uint64_t>(
+                (remaining_us + 999) / 1000);
+            timeout_ticks = std::max<TickType_t>(
+                1, pdMS_TO_TICKS(remaining_ms));
         }
     }
 }
@@ -345,7 +451,7 @@ nightglass::core::Status PowerService::start() {
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type = GPIO_INTR_ANYEDGE,
     };
     if (gpio_config(&side_key_config) != ESP_OK) {
         nightglass::core::health_registry().set("power", nightglass::core::HealthState::failed,
@@ -362,7 +468,14 @@ nightglass::core::Status PowerService::start() {
     }
 
     const auto settings = load_settings();
-    const bool automatic_light_sleep_enabled = enable_automatic_light_sleep();
+    if (!disable_automatic_light_sleep()) {
+        nightglass::core::health_registry().set(
+            "power", nightglass::core::HealthState::failed,
+            "Could not disable unsafe automatic light sleep");
+        return {nightglass::core::StatusCode::io_error,
+                "automatic light-sleep safety setup failed"};
+    }
+    constexpr bool automatic_light_sleep_enabled = false;
     const auto now = esp_timer_get_time();
     const bool side_key_pressed = gpio_get_level(kSideKeyGpio) > 0;
     portENTER_CRITICAL(&snapshot_mux);
@@ -380,7 +493,8 @@ nightglass::core::Status PowerService::start() {
     ++current.sequence;
     portEXIT_CRITICAL(&snapshot_mux);
 
-    if (xTaskCreatePinnedToCore(supervisor, "nightglass_power", 4096, nullptr, 5,
+    if (xTaskCreatePinnedToCore(supervisor, "nightglass_power", kSupervisorStackBytes,
+                                nullptr, 5,
                                 &supervisor_task, 0) != pdPASS) {
         supervisor_task = nullptr;
         portENTER_CRITICAL(&snapshot_mux);
@@ -392,12 +506,24 @@ nightglass::core::Status PowerService::start() {
         return {nightglass::core::StatusCode::no_memory, "power task creation failed"};
     }
 
+    const esp_err_t isr_service = gpio_install_isr_service(0);
+    if ((isr_service != ESP_OK && isr_service != ESP_ERR_INVALID_STATE) ||
+        gpio_isr_handler_add(kSideKeyGpio, side_key_interrupt, nullptr) != ESP_OK) {
+        vTaskDelete(supervisor_task);
+        supervisor_task = nullptr;
+        portENTER_CRITICAL(&snapshot_mux);
+        current.side_key_ready = false;
+        ++current.sequence;
+        portEXIT_CRITICAL(&snapshot_mux);
+        nightglass::core::health_registry().set("power", nightglass::core::HealthState::failed,
+                                               "GPIO10 side key interrupt setup failed");
+        return {nightglass::core::StatusCode::io_error,
+                "side key interrupt setup failed"};
+    }
+
     nightglass::core::health_registry().set(
-        "power", automatic_light_sleep_enabled ? nightglass::core::HealthState::ok
-                                                : nightglass::core::HealthState::degraded,
-        automatic_light_sleep_enabled
-            ? "DFS, automatic light sleep, and GPIO wake active"
-            : "GPIO wake active; automatic light sleep unavailable");
+        "power", nightglass::core::HealthState::ok,
+        "DFS and guarded GPIO light-sleep wake active");
     ESP_LOGI(kTag,
              "Power supervisor active: dim=%us blank=%us sleep=%us auto_light_sleep=%d GPIO10=%d",
              settings.dim_after_seconds, settings.blank_after_seconds,
@@ -428,6 +554,13 @@ nightglass::core::Status PowerService::update_settings(const PowerSettings &sett
 void PowerService::note_activity(nightglass::core::WakeReason reason) {
     publish_activity(esp_timer_get_time(), reason);
     if (supervisor_task) xTaskNotifyGive(supervisor_task);
+}
+
+void PowerService::set_state_observer(PowerStateObserver observer, void *context) {
+    portENTER_CRITICAL(&observer_mux);
+    state_observer = observer;
+    state_observer_context = context;
+    portEXIT_CRITICAL(&observer_mux);
 }
 
 PowerSnapshot PowerService::snapshot() const {

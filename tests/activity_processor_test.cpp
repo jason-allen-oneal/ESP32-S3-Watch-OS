@@ -48,6 +48,23 @@ int main() {
     }
     assert(steps >= 6 && steps <= 8);
 
+    // Blanked-mode hardware polling runs at 10 Hz. Preserve one detected step
+    // per walking waveform at that cadence so power throttling cannot silently
+    // disable the accelerometer-only activity path.
+    timestamp = 0;
+    ActivityProcessor blanked;
+    for (std::uint16_t index = 0; index < ActivityProcessor::kWarmupSamples; ++index) {
+        sample(blanked, 1.0F, 100'000);
+    }
+    int blanked_steps = 0;
+    for (int cycle = 0; cycle < 8; ++cycle) {
+        for (int frame = 0; frame < 8; ++frame) {
+            const float values[]{1.0F, 1.14F, 1.34F, 1.18F, 0.96F, 0.88F, 0.98F, 1.0F};
+            if (sample(blanked, values[frame], 100'000).step_detected) ++blanked_steps;
+        }
+    }
+    assert(blanked_steps >= 6 && blanked_steps <= 8);
+
     timestamp = 0;
     ActivityProcessor quiet;
     warm_up(quiet);

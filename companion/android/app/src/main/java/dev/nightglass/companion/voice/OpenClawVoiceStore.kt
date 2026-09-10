@@ -3,6 +3,7 @@ package dev.nightglass.companion.voice
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Log
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -103,7 +104,12 @@ class OpenClawVoiceStore(context: Context) {
 
     fun load(): OpenClawVoiceCredential? = synchronized(STORE_LOCK) {
         val packed = prefs.getString(KEY, null) ?: return null
-        val clear = runCatching { decrypt(Base64.getDecoder().decode(packed)) }.getOrNull() ?: return null
+        val clear = try {
+            decrypt(Base64.getDecoder().decode(packed))
+        } catch (error: Throwable) {
+            Log.w("NightglassLink", "OpenClaw credential decrypt failed: ${error.javaClass.simpleName}")
+            return null
+        }
         try {
             val root = json.parseToJsonElement(clear.toString(Charsets.UTF_8)).jsonObject
             val publicKey = Base64.getDecoder().decode(root.getValue("publicKey").jsonPrimitive.content)
@@ -123,7 +129,8 @@ class OpenClawVoiceStore(context: Context) {
                 privateKeyPkcs8 = privateKey,
                 sessionKey = sessionKey.takeIf { it.isNotEmpty() },
             )
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
+            Log.w("NightglassLink", "OpenClaw credential parse failed: ${error.javaClass.simpleName}")
             null
         } finally {
             clear.fill(0)

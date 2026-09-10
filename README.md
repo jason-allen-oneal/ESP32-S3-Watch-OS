@@ -41,16 +41,33 @@ checks before any device write.
 ## Build and release gate
 
 ```bash
-./scripts/build.sh
-./scripts/verify-release.sh
+export NIGHTGLASS_PROJECT_VERSION=0.2.4
+export NIGHTGLASS_SECURE_VERSION=4
+./scripts/verify-signed-release.sh build/update-package-0.2.4
 ```
 
 The release gate requires a clean tree, performs a deterministic double build,
 validates the partition and ESP32-S3 image formats, enforces the OTA-slot size
 boundary, and prints the exact flash-artifact hashes.
 
-The runtime inactive-slot backend, fail-closed signature interface, rollback
-health gate, safe-mode policy, and unsigned package tooling are documented in
-[`docs/UPDATE_RECOVERY.md`](docs/UPDATE_RECOVERY.md). No update transport or
-production signing key/verifier is included yet, so default firmware refuses
-OTA installation rather than treating unsigned images as signed.
+The runtime inactive-slot backend, provisioned P-256 verifier, rollback health
+gate, safe-mode policy, native USB installer, and encrypted companion OTA are
+documented in [`docs/UPDATE_RECOVERY.md`](docs/UPDATE_RECOVERY.md). Both install
+paths accept the same four-file signed package and reject unsigned, same-version,
+or rollback-ineligible images before the inactive slot is erased.
+
+Direct watch-cable installation does not use the ROM flasher or the phone:
+
+```bash
+python3 scripts/nightglass-usb-update.py build/update-package-0.2.4 \
+  --device /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_...
+```
+
+Phone OTA remains available through the Nightglass companion's signed-package
+picker. Generic ESP-IDF flash and erase targets stay blocked because they can
+overwrite the wrong slot or destroy rollback metadata.
+
+An existing 0.2.2 watch needs a one-time migration before it can receive native
+USB updates. `scripts/nightglass-rom-bootstrap.py` installs signed 0.2.4 through
+the watch cable while preserving NVS and the valid rollback image; see
+[`docs/USB_RELEASE.md`](docs/USB_RELEASE.md) for its exact prerequisites.

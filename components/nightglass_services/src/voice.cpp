@@ -26,6 +26,7 @@ namespace {
 constexpr char kTag[] = "nightglass_voice";
 constexpr char kVoiceNvsNamespace[] = "ng_voice";
 constexpr char kVoiceSettingsKey[] = "settings";
+constexpr char kVoiceSpokenRepliesKey[] = "spoken_replies";
 constexpr std::uint32_t kAckTimeoutMs = 2500;
 constexpr std::uint8_t kMaximumRetries = 2;
 // The transport worker performs CRC calculation, credit-window framing, and
@@ -117,10 +118,20 @@ std::atomic_bool cancel_requested{false};
 std::uint32_t acknowledged_offset{};
 std::uint8_t available_credits{};
 VoiceStatus acknowledgement_status{VoiceStatus::ok};
+bool spoken_replies_setting{false};
+bool spoken_replies_requested{false};
+bool spoken_audio_claimed{false};
+bool discord_reply_requested{false};
 std::uint32_t response_id{};
 std::uint32_t response_crc{};
 std::uint16_t response_expected{};
 std::uint16_t response_received{};
+std::uint8_t *audio_response_buffer{nullptr};
+std::uint32_t audio_response_id{};
+std::uint32_t audio_response_crc{};
+std::uint32_t audio_response_expected{};
+std::uint32_t audio_response_received{};
+bool audio_playback_active{false};
 std::int64_t recording_started_us{};
 std::int64_t upload_deadline_us{};
 std::int64_t processing_deadline_us{};
@@ -134,9 +145,28 @@ std::atomic_bool update_blocked{false};
 StaticSemaphore_t response_mutex_state{};
 SemaphoreHandle_t response_mutex{nullptr};
 
+struct VoicePlaybackContext {
+    std::uint32_t session_id{0};
+    std::uint8_t *buffer{nullptr};
+    std::size_t bytes{0};
+};
+VoicePlaybackContext playback_context{};
+
 void secure_wipe(void *memory, std::size_t length) {
     auto *bytes = static_cast<volatile std::uint8_t *>(memory);
     while (length--) *bytes++ = 0;
+}
+
+void clear_audio_response_locked() {
+    if (audio_response_buffer != nullptr) {
+        secure_wipe(audio_response_buffer, audio_response_expected);
+        heap_caps_free(audio_response_buffer);
+    }
+    audio_response_buffer = nullptr;
+    audio_response_id = 0;
+    audio_response_crc = 0;
+    audio_response_expected = 0;
+    audio_response_received = 0;
 }
 
 void wipe_response() {
@@ -216,6 +246,25 @@ esp_err_t save_voice_settings(const VoiceSettings &settings) {
     return status;
 }
 
+bool load_spoken_reply_setting() {
+    nvs_handle_t handle{};
+    if (nvs_open(kVoiceNvsNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
+    std::uint8_t value{};
+    const auto status = nvs_get_u8(handle, kVoiceSpokenRepliesKey, &value);
+    nvs_close(handle);
+    return status == ESP_OK && value != 0;
+}
+
+esp_err_t save_spoken_reply_setting(bool enabled) {
+    nvs_handle_t handle{};
+    auto status = nvs_open(kVoiceNvsNamespace, NVS_READWRITE, &handle);
+    if (status == ESP_OK) status = nvs_set_u8(handle, kVoiceSpokenRepliesKey,
+                                               enabled ? 1 : 0);
+    if (status == ESP_OK) status = nvs_commit(handle);
+    if (handle != 0) nvs_close(handle);
+    return status;
+}
+
 std::uint32_t upload_deadline_ms(std::size_t bytes) {
     const auto transfer_ms = static_cast<std::uint64_t>(bytes) * 1000U /
                              kConservativeUploadBytesPerSecond;
@@ -248,7 +297,8 @@ bool wait_for_notification() {
     const auto remaining_ms = static_cast<std::uint32_t>(std::max<std::int64_t>(
         1, (upload_deadline_us - esp_timer_get_time()) / 1000));
     const auto wait_ms = std::min(kAckTimeoutMs, remaining_ms);
-    (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
+    (void)ulTaskNotifyTake(pdTRUE,
+                           std::max<TickType_t>(1, pdMS_TO_TICKS(wait_ms)));
     return !cancel_requested.load(std::memory_order_acquire) && !upload_expired();
 }
 
@@ -257,7 +307,13 @@ bool upload_request() {
     const auto total = static_cast<std::uint32_t>(request_pages.size);
     if (session == 0 || total == 0 || total > kVoiceMaximumEncodedBytes) return false;
     const auto crc = request_crc32();
-    auto begin = encode_voice_begin(session, total, crc);
+    bool spoken_replies = false;
+    bool discord_reply = false;
+    portENTER_CRITICAL(&voice_lock);
+    discord_reply = discord_reply_requested;
+    spoken_replies = spoken_replies_setting && !discord_reply;
+    portEXIT_CRITICAL(&voice_lock);
+    auto begin = encode_voice_begin(session, total, crc, spoken_replies, discord_reply);
     if (begin.size == 0) return false;
     VoiceRetryWindow begin_retry{};
     bool begin_accepted = false;
@@ -318,7 +374,7 @@ bool upload_request() {
             }
             sent_any = true;
             send_offset += static_cast<std::uint32_t>(payload_size);
-            vTaskDelay(pdMS_TO_TICKS(8));
+            vTaskDelay(std::max<TickType_t>(1, pdMS_TO_TICKS(8)));
         }
         if (sent_any && !wait_for_notification() &&
             (cancel_requested.load(std::memory_order_acquire) || upload_expired())) {
@@ -471,6 +527,29 @@ void capture_complete(void *context, const VoiceCaptureResult &result) {
     if (voice_worker != nullptr) xTaskNotifyGive(voice_worker);
 }
 
+void voice_playback_complete(void *context, const VoicePlaybackResult &result) {
+    auto *playback = static_cast<VoicePlaybackContext *>(context);
+    if (playback == nullptr) return;
+    if (playback->buffer != nullptr) {
+        secure_wipe(playback->buffer, playback->bytes);
+        heap_caps_free(playback->buffer);
+        playback->buffer = nullptr;
+        playback->bytes = 0;
+    }
+    portENTER_CRITICAL(&voice_lock);
+    if (audio_playback_active && current.session_id == playback->session_id) {
+        audio_playback_active = false;
+        if (current.state == VoiceTurnState::speaking) {
+            current.state = VoiceTurnState::complete;
+            current.status = result.status == nightglass::core::StatusCode::ok
+                                 ? VoiceStatus::ok
+                                 : VoiceStatus::processing_failed;
+            ++current.sequence;
+        }
+    }
+    portEXIT_CRITICAL(&voice_lock);
+}
+
 }  // namespace
 
 nightglass::core::Status VoiceService::start() {
@@ -480,6 +559,17 @@ nightglass::core::Status VoiceService::start() {
     current.health_sequence = 0;
     health_updated_us = 0;
     current.settings = load_voice_settings();
+    spoken_replies_setting = load_spoken_reply_setting();
+    spoken_replies_requested = false;
+    spoken_audio_claimed = false;
+    discord_reply_requested = false;
+    audio_response_buffer = nullptr;
+    audio_response_id = 0;
+    audio_response_crc = 0;
+    audio_response_expected = 0;
+    audio_response_received = 0;
+    audio_playback_active = false;
+    playback_context = {};
     lifecycle = {};
     update_blocked.store(false, std::memory_order_release);
     response_mutex = xSemaphoreCreateMutexStatic(&response_mutex_state);
@@ -499,7 +589,7 @@ nightglass::core::Status VoiceService::start() {
     return nightglass::core::Status::Ok();
 }
 
-nightglass::core::Status VoiceService::begin_capture() {
+nightglass::core::Status VoiceService::begin_capture(VoiceDestination destination) {
     const auto link = connectivity_service().snapshot();
     if (link.state != CompanionLinkState::connected_encrypted ||
         !link.encrypted || !link.bonded || !link.peer_identity_pinned ||
@@ -510,16 +600,18 @@ nightglass::core::Status VoiceService::begin_capture() {
     }
     portENTER_CRITICAL(&voice_lock);
     const bool update_active = update_blocked.load(std::memory_order_acquire);
-    const auto generation = update_active ? 0U : voice_reserve_begin(lifecycle);
+    const bool speech_active = audio_playback_active;
+    const auto generation = update_active || speech_active ? 0U : voice_reserve_begin(lifecycle);
     portEXIT_CRITICAL(&voice_lock);
     if (generation == 0) {
         // Preserve a turn already recording/uploading/processing. Repeated
         // press events must not replace the real turn state with a synthetic
         // busy error. An OTA block is quiescent and should remain visible.
-        if (update_active) publish_failure(VoiceStatus::busy);
-        return update_active
+        if (update_active || speech_active) publish_failure(VoiceStatus::busy);
+        return update_active || speech_active
                    ? nightglass::core::Status{nightglass::core::StatusCode::unavailable,
-                                              "firmware update is active"}
+                                              update_active ? "firmware update is active"
+                                                            : "watch is speaking"}
                    : nightglass::core::Status{nightglass::core::StatusCode::invalid_state,
                                               "voice turn is not quiescent"};
     }
@@ -536,8 +628,13 @@ nightglass::core::Status VoiceService::begin_capture() {
     portENTER_CRITICAL(&voice_lock);
     settings = current.settings;
     portEXIT_CRITICAL(&voice_lock);
-    const auto request_capacity = voice_encoded_capacity(
-        settings.maximum_duration_seconds);
+    const bool discord_reply = destination == VoiceDestination::discord_voice_note;
+    const auto maximum_duration = discord_reply
+                                      ? std::min<std::uint16_t>(
+                                            settings.maximum_duration_seconds,
+                                            kVoiceMaximumDiscordReplySeconds)
+                                      : settings.maximum_duration_seconds;
+    const auto request_capacity = voice_encoded_capacity(maximum_duration);
     if (!request_pages.begin(request_capacity)) {
         portENTER_CRITICAL(&voice_lock);
         voice_begin_failed(lifecycle, generation);
@@ -567,6 +664,10 @@ nightglass::core::Status VoiceService::begin_capture() {
     response_expected = 0;
     response_received = 0;
     response_crc = 0;
+    discord_reply_requested = discord_reply;
+    spoken_replies_requested = spoken_replies_setting && !discord_reply;
+    spoken_audio_claimed = false;
+    current.discord_reply = discord_reply;
     recording_started_us = esp_timer_get_time();
     capture_context.generation = generation;
     const bool capture_reserved = voice_capture_queued(lifecycle, generation);
@@ -579,7 +680,7 @@ nightglass::core::Status VoiceService::begin_capture() {
     }
     ESP_LOGI(kTag, "Voice capture started: session=%lu limit_s=%u",
              static_cast<unsigned long>(session),
-             static_cast<unsigned>(settings.maximum_duration_seconds));
+             static_cast<unsigned>(maximum_duration));
     const auto status = audio_service().request_voice_capture(
         request_capacity, append_capture_page, capture_complete, &capture_context);
     if (!status.is_ok()) {
@@ -607,10 +708,12 @@ void VoiceService::finish_capture() {
 
 void VoiceService::cancel() {
     cancel_requested.store(true, std::memory_order_release);
+    bool stop_playback = false;
     portENTER_CRITICAL(&voice_lock);
     const auto session = current.session_id;
     const auto owner = lifecycle.owner;
     const bool active = voice_request_cancel(lifecycle);
+    stop_playback = audio_playback_active;
     if (active) {
         current.state = owner == VoiceBufferOwner::none
                             ? VoiceTurnState::cancelled
@@ -618,9 +721,15 @@ void VoiceService::cancel() {
         current.status = VoiceStatus::cancelled;
         ++current.sequence;
     }
+    if (stop_playback) {
+        current.state = VoiceTurnState::cancelled;
+        current.status = VoiceStatus::cancelled;
+        ++current.sequence;
+    }
     portEXIT_CRITICAL(&voice_lock);
     if (owner == VoiceBufferOwner::audio) audio_service().stop_voice_capture(true);
-    if (active && session != 0) {
+    if (stop_playback) audio_service().stop_voice_playback();
+    if ((active || stop_playback) && session != 0) {
         const auto frame = encode_voice_cancel(session, VoiceStatus::cancelled);
         if (frame.size != 0) {
             (void)connectivity_service().send_voice_frame(
@@ -629,6 +738,11 @@ void VoiceService::cancel() {
     }
     if (voice_worker != nullptr && owner != VoiceBufferOwner::audio) xTaskNotifyGive(voice_worker);
     wipe_response();
+    if (response_mutex != nullptr &&
+        xSemaphoreTake(response_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        clear_audio_response_locked();
+        xSemaphoreGive(response_mutex);
+    }
 }
 
 void VoiceService::link_lost() {
@@ -662,7 +776,7 @@ void VoiceService::update_finished() {
 bool VoiceService::quiescent() const {
     portENTER_CRITICAL(&voice_lock);
     const bool value = voice_is_quiescent(lifecycle) && request_pages.size == 0 &&
-                       request_pages.limit == 0;
+                       request_pages.limit == 0 && !audio_playback_active;
     portEXIT_CRITICAL(&voice_lock);
     return value;
 }
@@ -691,6 +805,25 @@ nightglass::core::Status VoiceService::update_settings(
     return nightglass::core::Status::Ok();
 }
 
+nightglass::core::Status VoiceService::update_spoken_replies(bool enabled) {
+    portENTER_CRITICAL(&voice_lock);
+    const bool busy = !voice_is_quiescent(lifecycle) || audio_playback_active;
+    portEXIT_CRITICAL(&voice_lock);
+    if (busy) {
+        return {nightglass::core::StatusCode::unavailable,
+                "finish the current voice turn first"};
+    }
+    if (save_spoken_reply_setting(enabled) != ESP_OK) {
+        return {nightglass::core::StatusCode::io_error,
+                "spoken reply setting could not be saved"};
+    }
+    portENTER_CRITICAL(&voice_lock);
+    spoken_replies_setting = enabled;
+    ++current.sequence;
+    portEXIT_CRITICAL(&voice_lock);
+    return nightglass::core::Status::Ok();
+}
+
 bool VoiceService::accept_frame(const VoiceFrame &frame) {
     if (frame.kind == VoiceFrameKind::health) {
         portENTER_CRITICAL(&voice_lock);
@@ -712,7 +845,10 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
     }
     const bool response_payload = frame.kind == VoiceFrameKind::response_begin ||
                                   frame.kind == VoiceFrameKind::response_data ||
-                                  frame.kind == VoiceFrameKind::response_end;
+                                  frame.kind == VoiceFrameKind::response_end ||
+                                  frame.kind == VoiceFrameKind::response_audio_begin ||
+                                  frame.kind == VoiceFrameKind::response_audio_data ||
+                                  frame.kind == VoiceFrameKind::response_audio_end;
     if (response_payload &&
         (response_mutex == nullptr ||
          xSemaphoreTake(response_mutex, pdMS_TO_TICKS(10)) != pdTRUE)) {
@@ -726,6 +862,10 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
     }
     bool accepted = false;
     bool clear_response = false;
+    bool clear_audio_response = false;
+    bool start_playback = false;
+    std::uint8_t *playback_buffer = nullptr;
+    std::size_t playback_bytes = 0;
     if (frame.kind == VoiceFrameKind::request_ack &&
         (current.state == VoiceTurnState::uploading ||
          current.state == VoiceTurnState::processing) &&
@@ -780,6 +920,72 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
             ++current.sequence;
             accepted = true;
         }
+    } else if (frame.kind == VoiceFrameKind::response_audio_begin &&
+               current.state == VoiceTurnState::complete &&
+               spoken_replies_requested && !spoken_audio_claimed &&
+               audio_response_buffer == nullptr && !audio_playback_active &&
+               frame.codec == 1 && frame.sample_rate_khz == 8 &&
+               frame.total_bytes <= kVoiceMaximumSpokenReplyBytes) {
+        audio_response_buffer = static_cast<std::uint8_t *>(heap_caps_malloc(
+            frame.total_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (audio_response_buffer != nullptr) {
+            audio_response_id = frame.response_id;
+            audio_response_expected = frame.total_bytes;
+            audio_response_received = 0;
+            audio_response_crc = frame.crc32;
+            spoken_audio_claimed = true;
+            accepted = true;
+        }
+    } else if (frame.kind == VoiceFrameKind::response_audio_data &&
+               current.state == VoiceTurnState::complete &&
+               audio_response_buffer != nullptr &&
+               frame.response_id == audio_response_id &&
+               audio_response_received <= audio_response_expected &&
+               frame.offset == audio_response_received &&
+               frame.payload.size() <= audio_response_expected - audio_response_received) {
+        std::copy(frame.payload.begin(), frame.payload.end(),
+                  audio_response_buffer + audio_response_received);
+        audio_response_received += static_cast<std::uint32_t>(frame.payload.size());
+        accepted = true;
+    } else if (frame.kind == VoiceFrameKind::response_audio_end &&
+               current.state == VoiceTurnState::complete &&
+               audio_response_buffer != nullptr &&
+               frame.response_id == audio_response_id &&
+               frame.total_bytes == audio_response_expected &&
+               audio_response_received == audio_response_expected &&
+               frame.crc32 == audio_response_crc) {
+        const auto bytes = audio_response_received;
+        const auto expected_crc = audio_response_crc;
+        portEXIT_CRITICAL(&voice_lock);
+        const bool crc_valid = voice_crc32({audio_response_buffer, bytes}) == expected_crc;
+        portENTER_CRITICAL(&voice_lock);
+        const bool still_current = current.state == VoiceTurnState::complete &&
+                                   frame.response_id == audio_response_id &&
+                                   audio_response_received == bytes &&
+                                   audio_response_crc == expected_crc;
+        if (crc_valid && still_current && !audio_playback_active) {
+            playback_buffer = audio_response_buffer;
+            playback_bytes = bytes;
+            audio_response_buffer = nullptr;
+            audio_response_id = 0;
+            audio_response_crc = 0;
+            audio_response_expected = 0;
+            audio_response_received = 0;
+            playback_context = {current.session_id, playback_buffer, playback_bytes};
+            audio_playback_active = true;
+            current.state = VoiceTurnState::speaking;
+            current.status = VoiceStatus::ok;
+            ++current.sequence;
+            start_playback = true;
+            accepted = true;
+        }
+    } else if (frame.kind == VoiceFrameKind::response_audio_end &&
+               audio_response_buffer != nullptr &&
+               frame.response_id == audio_response_id) {
+        // A malformed or checksum-failing audio response is discarded. The
+        // text leg has already completed and remains the safe fallback.
+        spoken_audio_claimed = true;
+        clear_audio_response = true;
     } else if (frame.kind == VoiceFrameKind::response_status &&
                frame.status != VoiceStatus::ok &&
                voice_terminal_status_allowed(lifecycle)) {
@@ -794,14 +1000,37 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
         response_received = 0;
         response_crc = 0;
         clear_response = true;
+        clear_audio_response = true;
         ++current.sequence;
         accepted = true;
     }
     portEXIT_CRITICAL(&voice_lock);
     if (clear_response) secure_wipe(current.response.data(), current.response.size());
+    if (clear_audio_response) clear_audio_response_locked();
     if (response_payload) xSemaphoreGive(response_mutex);
+    if (start_playback) {
+        const auto status = audio_service().request_voice_playback(
+            playback_buffer, playback_bytes, voice_playback_complete, &playback_context);
+        if (!status.is_ok()) {
+            secure_wipe(playback_buffer, playback_bytes);
+            heap_caps_free(playback_buffer);
+            playback_context = {};
+            portENTER_CRITICAL(&voice_lock);
+            audio_playback_active = false;
+            if (current.state == VoiceTurnState::speaking) {
+                current.state = VoiceTurnState::complete;
+                current.status = VoiceStatus::ok;
+                ++current.sequence;
+            }
+            portEXIT_CRITICAL(&voice_lock);
+        }
+    }
     if (accepted && frame.kind == VoiceFrameKind::response_end) {
         ESP_LOGI(kTag, "Voice response complete: session=%lu bytes=%lu",
+                 static_cast<unsigned long>(frame.session_id),
+                 static_cast<unsigned long>(frame.total_bytes));
+    } else if (accepted && frame.kind == VoiceFrameKind::response_audio_end) {
+        ESP_LOGI(kTag, "Spoken response queued: session=%lu bytes=%lu",
                  static_cast<unsigned long>(frame.session_id),
                  static_cast<unsigned long>(frame.total_bytes));
     } else if (accepted && frame.kind == VoiceFrameKind::response_status) {
@@ -828,6 +1057,8 @@ VoiceSnapshot VoiceService::snapshot() const {
     snapshot.health = current.health;
     snapshot.health_sequence = current.health_sequence;
     sampled_health_updated_us = health_updated_us;
+    snapshot.spoken_replies = spoken_replies_setting;
+    snapshot.discord_reply = discord_reply_requested;
     snapshot.settings = current.settings;
     if (snapshot.state == VoiceTurnState::recording && recording_started_us > 0) {
         const auto elapsed = esp_timer_get_time() - recording_started_us;

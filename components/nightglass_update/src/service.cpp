@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -127,33 +128,57 @@ bool required_health_is_ok() {
     ESP_LOGE(kTag, "OTA_HIL forced essential-health failure");
     return false;
 #endif
-    constexpr std::array<const char *, 7> safe_mode_required{
-        "nvs", "display", "touch", "power", "clock", "ui", "update_crypto"};
-    constexpr std::array<const char *, 9> full_required{
-        "nvs", "display", "touch", "power", "clock", "ui",
-        "update_crypto", "connectivity", "update_transport"};
-    const auto check = [](const char *name) {
+    // Recovery must be able to clear a rapid-reboot streak using only the
+    // services that safe mode actually starts.  Optional update and radio
+    // health remain visible in the registry, but cannot strand the watch in
+    // safe mode (or make an intentionally unprovisioned OTA verifier fatal).
+    constexpr std::array<const char *, 6> essential_required{
+        "nvs", "display", "touch", "power", "clock", "ui"};
+    const auto now_us = esp_timer_get_time();
+    const auto check = [now_us](const char *name) {
         nightglass::core::HealthRecord record{};
-        if (!nightglass::core::health_registry().copy(name, record)) return false;
+        if (!nightglass::core::health_registry().copy(name, record)) {
+            ESP_LOGE(kTag, "OTA_HEALTH_REJECT component=%s reason=missing_record now_us=%lld",
+                     name, static_cast<long long>(now_us));
+            return false;
+        }
         const bool degradation_allowed = std::strcmp(name, "display") == 0 ||
                                          std::strcmp(name, "power") == 0 ||
                                          std::strcmp(name, "clock") == 0;
         if (record.state != nightglass::core::HealthState::ok &&
             !(degradation_allowed && record.state == nightglass::core::HealthState::degraded)) {
+            ESP_LOGE(kTag,
+                     "OTA_HEALTH_REJECT component=%s reason=disallowed_state state=%u "
+                     "failure_count=%lu last_success_us=%lld now_us=%lld max_age_us=%lld",
+                     name, static_cast<unsigned>(record.state),
+                     static_cast<unsigned long>(record.failure_count),
+                     static_cast<long long>(record.last_success_us),
+                     static_cast<long long>(now_us),
+                     static_cast<long long>(std::strcmp(name, "touch") == 0
+                                                ? kTouchHealthMaximumAgeUs : 0));
+            return false;
+        }
+        if (std::strcmp(name, "touch") == 0 &&
+            !health_evidence_fresh(now_us, record.last_success_us,
+                                   kTouchHealthMaximumAgeUs)) {
+            ESP_LOGE(kTag,
+                     "OTA_HEALTH_REJECT component=%s reason=stale_touch_evidence state=%u "
+                     "failure_count=%lu last_success_us=%lld now_us=%lld max_age_us=%lld",
+                     name, static_cast<unsigned>(record.state),
+                     static_cast<unsigned long>(record.failure_count),
+                     static_cast<long long>(record.last_success_us),
+                     static_cast<long long>(now_us),
+                     static_cast<long long>(kTouchHealthMaximumAgeUs));
             return false;
         }
         return true;
     };
-    const auto safe_mode = instance.snapshot().safe_mode;
-    if (safe_mode) {
-        for (const auto *name : safe_mode_required) {
-            if (!check(name)) return false;
-        }
-    } else {
-        for (const auto *name : full_required) {
-            if (!check(name)) return false;
-        }
+    for (const auto *name : essential_required) {
+        if (!check(name)) return false;
     }
+    // A pending release must retain its direct recovery/update receiver.
+    // An already accepted image can still boot with optional services degraded.
+    if (instance.snapshot().pending_verification && !check("usb_update")) return false;
     return true;
 }
 
@@ -175,7 +200,15 @@ void health_gate_task(void *) {
         .pending_verification = snapshot.pending_verification,
         .unhealthy_boots = snapshot.unhealthy_boots,
     };
-    const auto action = evaluate_health_gate(boot, required_health_is_ok());
+    const bool essential_healthy = required_health_is_ok();
+    const auto action = evaluate_health_gate(boot, essential_healthy);
+    ESP_LOGI(kTag,
+             "OTA_HEALTH_GATE essential_ok=%u pending=%u safe_mode=%u bad_boots=%lu action=%u",
+             static_cast<unsigned>(essential_healthy),
+             static_cast<unsigned>(boot.pending_verification),
+             static_cast<unsigned>(boot.safe_mode),
+             static_cast<unsigned long>(boot.unhealthy_boots),
+             static_cast<unsigned>(action));
 
     switch (action) {
         case HealthGateAction::accept_pending_image:
@@ -223,6 +256,9 @@ void health_gate_task(void *) {
                 nightglass::core::health_registry().set(
                     "recovery", nightglass::core::HealthState::ok,
                     "healthy boot recorded after 60-second gate");
+                ESP_LOGI(kTag, "OTA_HEALTHY state=VALID pending=0 bad_boots=0");
+            } else {
+                ESP_LOGE(kTag, "Could not persist healthy boot state");
             }
             break;
         case HealthGateAction::retain_unhealthy:
@@ -314,7 +350,9 @@ nightglass::core::Status UpdateService::begin_boot(bool nvs_available,
     } else {
         nightglass::core::health_registry().set("recovery",
                                                nightglass::core::HealthState::ok,
-                                               "boot health gate awaiting startup");
+                                               pending_verification
+                                                   ? "pending update handoff awaiting health gate"
+                                                   : "boot health gate awaiting startup");
     }
     return nightglass::core::Status::Ok();
 }
@@ -596,7 +634,7 @@ nightglass::core::Status UpdateService::finish() {
     publish(snapshot);
     nightglass::core::health_registry().set(
         "update", nightglass::core::HealthState::ok,
-        "inactive slot validated and selected; reboot not automatic");
+        "inactive slot validated and selected; transport controls reboot policy");
     return nightglass::core::Status::Ok();
 #endif
 }

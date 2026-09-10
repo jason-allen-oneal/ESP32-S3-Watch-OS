@@ -15,6 +15,10 @@ int main() {
     assert(state.route == Route::notifications);
     assert(state.overlay == Overlay::none);
 
+    state = reduce_navigation({}, NavigationAction::open_context_deck);
+    assert(state.route == Route::context_deck);
+    assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
+
     state = reduce_navigation({}, NavigationAction::open_launcher);
     state = reduce_navigation(state, NavigationAction::open_activity);
     assert(state.back_route == Route::launcher);
@@ -43,6 +47,14 @@ int main() {
 
     state = reduce_navigation({}, NavigationAction::open_media);
     assert(state.route == Route::media);
+    assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
+
+    state = reduce_navigation({}, NavigationAction::open_spotify);
+    assert(state.route == Route::spotify);
+    assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
+
+    state = reduce_navigation({}, NavigationAction::open_discord);
+    assert(state.route == Route::discord);
     assert(reduce_navigation(state, NavigationAction::back).route == Route::home);
 
     state = reduce_navigation({}, NavigationAction::open_gestures);

@@ -4,6 +4,12 @@ set -euo pipefail
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 idf_dir="${NIGHTGLASS_IDF_PATH:-${IDF_PATH:-${HOME}/esp/esp-idf-v5.5.5}}"
 
+if [[ -z "${NIGHTGLASS_PROJECT_VERSION:-}" ||
+      -z "${NIGHTGLASS_SECURE_VERSION:-}" ]]; then
+  echo "Release verification requires NIGHTGLASS_PROJECT_VERSION and NIGHTGLASS_SECURE_VERSION" >&2
+  exit 2
+fi
+
 "${project_dir}/scripts/verify-idf.sh" "${idf_dir}"
 python3 "${project_dir}/scripts/verify-partitions.py" "${project_dir}/partitions.csv" >/dev/null
 
@@ -19,9 +25,13 @@ source "${idf_dir}/export.sh" >/dev/null
 "${project_dir}/scripts/test-host.sh" >/dev/null
 "${project_dir}/scripts/build.sh" >/dev/null
 python3 "${project_dir}/scripts/verify-release-config.py" \
-  "${project_dir}/sdkconfig" >/dev/null
+  "${project_dir}/sdkconfig" --secure-version "${NIGHTGLASS_SECURE_VERSION}" >/dev/null
 python3 "${project_dir}/scripts/verify-release-config.py" \
-  "${project_dir}/build/config/sdkconfig.h" >/dev/null
+  "${project_dir}/build/config/sdkconfig.h" \
+  --secure-version "${NIGHTGLASS_SECURE_VERSION}" >/dev/null
+python3 "${project_dir}/scripts/verify-app-image.py" \
+  "${project_dir}/build/nightglass.bin" --version "${NIGHTGLASS_PROJECT_VERSION}" \
+  --secure-version "${NIGHTGLASS_SECURE_VERSION}" >/dev/null
 
 artifacts=(
   "build/bootloader/bootloader.bin"

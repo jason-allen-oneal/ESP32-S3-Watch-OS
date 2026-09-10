@@ -5,6 +5,7 @@
 
 #include "nightglass/core/status.hpp"
 #include "nightglass/services/activity_units.hpp"
+#include "nightglass/services/gesture_calibration.hpp"
 #include "nightglass/services/gesture_processor.hpp"
 
 namespace nightglass::services {
@@ -58,6 +59,8 @@ struct ActivitySnapshot {
     float last_gesture_strength{0.0F};
     bool last_gesture_actionable{false};
     bool last_gesture_screen_inactive{false};
+    GestureProfile gesture_profile{};
+    GestureCalibrationSnapshot gesture_calibration{};
 };
 
 static_assert(std::is_trivially_copyable_v<ActivitySnapshot>);
@@ -68,6 +71,9 @@ public:
     [[nodiscard]] ActivitySnapshot snapshot() const;
     bool update_settings(const ActivitySettings &settings);
     bool reset_today();
+    bool start_gesture_calibration();
+    bool capture_gesture_calibration_sample();
+    bool cancel_gesture_calibration();
 };
 
 ActivityService &activity_service();

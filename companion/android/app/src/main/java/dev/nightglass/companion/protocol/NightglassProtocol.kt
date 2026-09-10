@@ -13,8 +13,13 @@ object NightglassProtocol {
     const val VERSION: Byte = 1
     /** Five minutes of 8 kHz G.711 mu-law audio. */
     const val MAX_VOICE_ENCODED_BYTES = 2_400_000
+    const val MAX_SPOKEN_REPLY_BYTES = 96_000
     const val DEFAULT_VOICE_DURATION_SECONDS = 60
+    const val MAX_DISCORD_VOICE_REPLY_BYTES = DEFAULT_VOICE_DURATION_SECONDS * 8_000
     const val MAX_VOICE_DURATION_SECONDS = 300
+    const val VOICE_REQUEST_FLAG_DISCORD_REPLY = 0x40
+    const val VOICE_REQUEST_FLAG_SPOKEN_REPLIES = 0x80
+    private const val VOICE_REQUEST_CODEC_MASK = 0x3f
 
     fun voiceDurationAllowed(seconds: Int): Boolean =
         seconds == 30 || seconds == 60 || seconds == 120 || seconds == 300
@@ -92,11 +97,14 @@ object NightglassProtocol {
                            val signature: ByteArray)
     data class OtaStatus(val session: ULong, val state: Int, val signatureState: Int,
                          val result: Int, val expectedBytes: Long,
-                         val receivedBytes: Long)
+                         val receivedBytes: Long,
+                         val acknowledgedOpcode: Int = 0)
     sealed interface VoiceRequest {
         val sessionId: UInt
         data class Begin(override val sessionId: UInt, val totalBytes: Int,
-                         val crc32: UInt): VoiceRequest
+                         val crc32: UInt,
+                         val spokenReplies: Boolean = false,
+                         val discordReply: Boolean = false): VoiceRequest
         data class Data(override val sessionId: UInt, val sequence: Int,
                         val offset: Int, val payload: ByteArray): VoiceRequest
         data class End(override val sessionId: UInt, val totalBytes: Int,
@@ -180,7 +188,7 @@ object NightglassProtocol {
         if (frame.size < 2 || frame[0] != VERSION) return null
         return when (frame[1].toInt() and 0xff) {
             0x10 -> if (frame.size == 4 && (frame[2].toInt() and 0xff) != 0 &&
-                (frame[3].toInt() and 0xff) in 1..7)
+                (frame[3].toInt() and 0xff) in 1..9)
                 WatchAction.Media(frame[2].toInt() and 0xff, frame[3].toInt() and 0xff)
                 else null
             0x11, 0x12 -> if (frame.size == 7 && (frame[2].toInt() and 0xff) != 0) {
@@ -218,7 +226,7 @@ object NightglassProtocol {
                     WatchAction.Call(sequence, command, sessionId, generation) else null
             } else null
             0x15 -> if (frame.size == 4 && (frame[2].toInt() and 0xff) != 0 &&
-                (frame[3].toInt() and 0xff) in 1..3)
+                (frame[3].toInt() and 0xff) in 1..5)
                 WatchAction.Phone(frame[2].toInt() and 0xff, frame[3].toInt() and 0xff) else null
             else -> null
         }
@@ -234,10 +242,15 @@ object NightglassProtocol {
             0x40 -> if (frame.size == 16) {
                 val total = input.int.toUInt().toLong()
                 val crc = input.int.toUInt()
-                val codec = input.get().toInt() and 0xff
+                val codecByte = input.get().toInt() and 0xff
+                val codec = codecByte and VOICE_REQUEST_CODEC_MASK
                 val rateKhz = input.get().toInt() and 0xff
-                if (total in 1..MAX_VOICE_ENCODED_BYTES.toLong() && codec == 1 && rateKhz == 8)
-                    VoiceRequest.Begin(session, total.toInt(), crc) else null
+                val spoken = (codecByte and VOICE_REQUEST_FLAG_SPOKEN_REPLIES) != 0
+                val discord = (codecByte and VOICE_REQUEST_FLAG_DISCORD_REPLY) != 0
+                if (total in 1..MAX_VOICE_ENCODED_BYTES.toLong() &&
+                    (!discord || total <= MAX_DISCORD_VOICE_REPLY_BYTES.toLong()) &&
+                    codec == 1 && rateKhz == 8)
+                    VoiceRequest.Begin(session, total.toInt(), crc, spoken, discord) else null
             } else null
             0x41 -> if (frame.size in 13..244) {
                 val sequence = input.short.toInt() and 0xffff
@@ -294,6 +307,34 @@ object NightglassProtocol {
         return ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN)
             .put(VERSION).put(0x47).putInt(session.toInt()).putInt(responseId.toInt())
             .putShort(totalBytes.toShort()).putInt(crc32.toInt()).array()
+    }
+
+    fun voiceAudioResponseBegin(session: UInt, responseId: UInt, totalBytes: Int,
+                                crc32: UInt): ByteArray {
+        require(session != 0u && responseId != 0u &&
+            totalBytes in 1..MAX_SPOKEN_REPLY_BYTES)
+        return ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x4a).putInt(session.toInt()).putInt(responseId.toInt())
+            .putInt(totalBytes).putInt(crc32.toInt()).put(1).put(8).array()
+    }
+
+    fun voiceAudioResponseData(session: UInt, responseId: UInt, offset: Int,
+                               payload: ByteArray): ByteArray {
+        require(session != 0u && responseId != 0u &&
+            offset in 0..MAX_SPOKEN_REPLY_BYTES && payload.isNotEmpty() &&
+            payload.size <= 232 && payload.size <= MAX_SPOKEN_REPLY_BYTES - offset)
+        return ByteBuffer.allocate(14 + payload.size).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x4b).putInt(session.toInt()).putInt(responseId.toInt())
+            .putInt(offset).put(payload).array()
+    }
+
+    fun voiceAudioResponseEnd(session: UInt, responseId: UInt, totalBytes: Int,
+                              crc32: UInt): ByteArray {
+        require(session != 0u && responseId != 0u &&
+            totalBytes in 1..MAX_SPOKEN_REPLY_BYTES)
+        return ByteBuffer.allocate(18).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x4c).putInt(session.toInt()).putInt(responseId.toInt())
+            .putInt(totalBytes).putInt(crc32.toInt()).array()
     }
 
     fun voiceStatus(session: UInt, status: Int): ByteArray {
@@ -374,19 +415,22 @@ object NightglassProtocol {
 
     fun parseOtaStatus(frame: ByteArray): OtaStatus? {
         if (frame.size != 22 || frame[0] != VERSION ||
-            (frame[1].toInt() and 0xff) != 0x35 || frame[13].toInt() != 0) return null
+            (frame[1].toInt() and 0xff) != 0x35) return null
         val input = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN)
         input.position(2)
         val session = input.long.toULong()
         val state = input.get().toInt() and 0xff
         val signatureState = input.get().toInt() and 0xff
         val result = input.get().toInt() and 0xff
-        input.get()
+        val acknowledgedOpcode = input.get().toInt() and 0xff
         val expected = input.int.toUInt().toLong()
         val received = input.int.toUInt().toLong()
         if (session == 0uL || state !in 0..4 || signatureState !in 0..4 ||
-            result !in 0..9 || received > expected) return null
-        return OtaStatus(session, state, signatureState, result, expected, received)
+            result !in 0..9 ||
+            (acknowledgedOpcode != 0 && acknowledgedOpcode !in 0x30..0x34) ||
+            received > expected) return null
+        return OtaStatus(session, state, signatureState, result, expected, received,
+            acknowledgedOpcode)
     }
 
     fun phoneWeather(observedEpochSeconds: Long, metric: Boolean, isDay: Boolean,

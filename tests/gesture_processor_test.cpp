@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdint>
+#include <limits>
 
 #include "nightglass/services/gesture_processor.hpp"
 
@@ -46,6 +47,25 @@ int main() {
         output = processor.process(sample(-0.86F, 4.0F, 0.0F, 0.45F, true, false));
         assert(output.detected == GestureKind::none);
         output = processor.process(sample(-0.88F, 3.0F, 0.0F, 0.42F, true, false));
+        assert(output.detected == GestureKind::raise);
+    }
+    {
+        now_us = 0;
+        GestureProcessor processor;
+        for (int index = 0; index < 8; ++index) {
+            processor.process(sample(-0.45F, 0.0F, 0.0F, 0.89F, true, false));
+        }
+        // Ordinary wrist raises can pause for more than the old 1.2-second
+        // window after arming; the learned finish orientation still gates it.
+        for (int index = 0; index < 28; ++index) {
+            processor.process(sample(-0.45F, 0.0F, 0.0F, 0.89F, true, false));
+        }
+        processor.process(sample(-0.55F, 45.0F, 0.0F, 0.83F, true, false));
+        processor.process(sample(-0.65F, 45.0F, 0.0F, 0.76F, true, false));
+        processor.process(sample(-0.78F, 10.0F, 0.0F, 0.62F, true, false));
+        processor.process(sample(-0.80F, 4.0F, 0.0F, 0.60F, true, false));
+        const auto output =
+            processor.process(sample(-0.82F, 3.0F, 0.0F, 0.57F, true, false));
         assert(output.detected == GestureKind::raise);
     }
     {
@@ -191,6 +211,35 @@ int main() {
         assert(perform_twist().detected == GestureKind::none);
         settle(processor, 40);
         assert(perform_twist().detected == GestureKind::double_twist);
+    }
+    {
+        now_us = 0;
+        auto profile = nightglass::services::default_gesture_profile();
+        profile.twist_peak_dps = 150.0F;
+        GestureProcessor processor(profile);
+        const auto perform_twist = [&processor](float peak) {
+            processor.process(sample(1.0F, peak));
+            processor.process(sample(1.0F, peak + 5.0F));
+            processor.process(sample(1.0F, 15.0F));
+            processor.process(sample(1.0F, 12.0F));
+            processor.process(sample(1.0F, 10.0F));
+            processor.process(sample(1.0F, -peak));
+            processor.process(sample(1.0F, -peak - 5.0F));
+            processor.process(sample(1.0F, 10.0F));
+            processor.process(sample(1.0F, 8.0F));
+            return processor.process(sample(1.0F, 6.0F));
+        };
+        assert(perform_twist(125.0F).detected == GestureKind::none);
+        assert(perform_twist(165.0F).detected == GestureKind::double_twist);
+    }
+    {
+        auto invalid = nightglass::services::default_gesture_profile();
+        invalid.twist_peak_dps = std::numeric_limits<float>::quiet_NaN();
+        GestureProcessor processor(invalid);
+        assert(processor.profile().twist_peak_dps ==
+               nightglass::services::default_gesture_profile().twist_peak_dps);
+        assert(nightglass::services::valid_gesture_profile(
+            nightglass::services::training_gesture_profile()));
     }
     return 0;
 }

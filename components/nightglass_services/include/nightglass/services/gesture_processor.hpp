@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 namespace nightglass::services {
 
@@ -11,6 +12,29 @@ enum class GestureKind : std::uint8_t {
     shake,
     flick,
 };
+
+// A small, versioned sensitivity profile learned by the guided on-watch
+// calibration flow. These are deliberately scalar gates rather than an
+// opaque model: every learned value remains bounded, inspectable, and safe to
+// fall back from when persisted data is missing or malformed.
+struct GestureProfile {
+    static constexpr std::uint32_t kFormatVersion = 1;
+
+    std::uint32_t format_version{kFormatVersion};
+    float raise_face_up_g{0.70F};
+    float twist_peak_dps{100.0F};
+    float shake_peak_g{0.35F};
+    float shake_gyro_dps{70.0F};
+    float flick_peak_dps{180.0F};
+    std::uint8_t calibrated{0};
+    std::uint8_t reserved[3]{};
+};
+
+static_assert(std::is_trivially_copyable_v<GestureProfile>);
+
+[[nodiscard]] GestureProfile default_gesture_profile() noexcept;
+[[nodiscard]] GestureProfile training_gesture_profile() noexcept;
+[[nodiscard]] bool valid_gesture_profile(const GestureProfile &profile) noexcept;
 
 struct GestureSample {
     float accel_x_g{0.0F};
@@ -36,8 +60,12 @@ struct GestureProcessorOutput {
 // emitted as several UI actions.
 class GestureProcessor {
 public:
+    explicit GestureProcessor(
+        const GestureProfile &profile = default_gesture_profile()) noexcept;
     GestureProcessorOutput process(const GestureSample &sample) noexcept;
     void reset() noexcept;
+    void set_profile(const GestureProfile &profile) noexcept;
+    [[nodiscard]] const GestureProfile &profile() const noexcept { return profile_; }
 
 private:
     GestureProcessorOutput emit(GestureKind kind, float strength,
@@ -74,6 +102,7 @@ private:
     std::int64_t rotation_started_us_{0};
     std::int64_t rotation_first_ended_us_{0};
     std::int64_t opposite_started_us_{0};
+    GestureProfile profile_{};
 };
 
 [[nodiscard]] const char *gesture_name(GestureKind kind) noexcept;

@@ -15,6 +15,10 @@ int main() {
     assert(std::strcmp(text, "100 ft") == 0);
     format_activity_distance(text, sizeof(text), 42'000, ActivityUnits::metric);
     assert(std::strcmp(text, "42 m") == 0);
+    format_activity_distance(text, sizeof(text), 1'999'999, ActivityUnits::metric);
+    assert(std::strcmp(text, "2.00 km") == 0);
+    format_activity_distance(text, sizeof(text), 1'601'300, ActivityUnits::imperial);
+    assert(std::strcmp(text, "1.00 mi") == 0);
     format_step_length(text, sizeof(text), 750, ActivityUnits::imperial);
     assert(std::strcmp(text, "STEP LENGTH  29.5 in") == 0);
     format_step_length(text, sizeof(text), 750, ActivityUnits::metric);

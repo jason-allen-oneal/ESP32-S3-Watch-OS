@@ -86,6 +86,7 @@ class HardwareService {
 public:
     nightglass::core::Status start(i2c_master_bus_handle_t bus_handle);
     [[nodiscard]] HardwareSnapshot snapshot() const;
+    bool set_gyro_enabled(bool enabled);
     bool request_haptic(std::uint16_t duration_ms = 120);
 };
 

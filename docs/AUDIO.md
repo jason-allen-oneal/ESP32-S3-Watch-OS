@@ -42,6 +42,20 @@ seconds. Interfaces and I2S DMA channels are owned by Nightglass and released
 after every operation. If PA-low readback or channel release cannot be proven,
 audio locks until reboot rather than asserting a safe state.
 
+The OpenClaw spoken-reply path reuses this owner rather than opening a second
+audio stack. The phone supplies at most 96,000 bytes of 8 kHz G.711 mu-law over
+the authenticated BLE response channel; the watch expands each sample to the
+16 kHz mono I2S rate while streaming through the same bounded PSRAM buffer.
+The temporary stream is wiped after playback, cancellation, disconnect, or a
+cleanup failure. Muted, zero-volume, and active Do Not Disturb settings reject
+spoken playback while preserving the text response.
+
+Discord voice replies use the same bounded watch capture and BLE owner, but do
+not invoke OpenClaw or the speaker. The companion converts the verified upload
+to a transient 8 kHz mono PCM16 WAV, gives it only to Discord's Android share
+composer, and expires the cache file after 15 minutes. The user selects the
+conversation and confirms the send.
+
 ## Hardware uncertainty
 
 The maintained Waveshare 1.0.7 BSP and its example identify ES8311 output and

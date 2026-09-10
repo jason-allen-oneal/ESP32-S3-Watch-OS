@@ -22,7 +22,8 @@ namespace {
 
 constexpr char kTag[] = "nightglass_clock";
 constexpr char kNvsNamespace[] = "ng_clock";
-constexpr TickType_t kPeriod = pdMS_TO_TICKS(100);
+constexpr TickType_t kActiveStopwatchPeriod = pdMS_TO_TICKS(100);
+constexpr TickType_t kIdlePeriod = pdMS_TO_TICKS(1000);
 constexpr std::int64_t kAlertAudioRepeatUs = 4'000'000;
 constexpr std::int64_t kAlertAudioRetryUs = 1'000'000;
 constexpr std::uint32_t kMinTimerSeconds = 60;
@@ -35,6 +36,7 @@ enum class CommandType : std::uint8_t {
     quiet_hours,
     alarm_snooze,
     timer_duration,
+    timer_start_if_idle,
     timer_toggle,
     timer_reset,
     stopwatch_toggle,
@@ -206,7 +208,9 @@ void load_state() {
 }
 
 bool submit(const Command &command) {
-    return command_queue && xQueueSend(command_queue, &command, 0) == pdTRUE;
+    const bool queued = command_queue && xQueueSend(command_queue, &command, 0) == pdTRUE;
+    if (queued && worker_task) xTaskNotifyGive(worker_task);
+    return queued;
 }
 
 void mark_persistence(bool ok) {
@@ -307,6 +311,20 @@ void handle_command(const Command &command, std::int64_t now_us) {
                 persist = true;
             }
             break;
+        case CommandType::timer_start_if_idle:
+            // Atomic worker-side check: a suggestion cannot overwrite a timer
+            // started by another input while its confirmation was on screen.
+            if (!current.timer_running && !current.timer_ringing &&
+                command.value >= kMinTimerSeconds && command.value <= 3600) {
+                current.timer_configured_seconds = command.value;
+                current.timer_remaining_seconds = command.value;
+                current.timer_running = true;
+                timer_deadline_utc = current.time_valid ? current.utc_epoch_seconds + command.value : 0;
+                timer_deadline_mono_us = current.time_valid ? 0 : now_us +
+                    static_cast<std::int64_t>(command.value) * 1'000'000;
+                persist = true;
+            }
+            break;
         case CommandType::timer_toggle:
             if (current.timer_running) {
                 current.timer_running = false;
@@ -377,7 +395,6 @@ void handle_command(const Command &command, std::int64_t now_us) {
 }
 
 void worker(void *) {
-    TickType_t wake = xTaskGetTickCount();
     std::int64_t next_alert_audio_us = 0;
     while (true) {
         Command command{};
@@ -525,7 +542,9 @@ void worker(void *) {
         } else if (!alarm_ringing && !timer_ringing) {
             next_alert_audio_us = 0;
         }
-        vTaskDelayUntil(&wake, kPeriod);
+        ulTaskNotifyTake(pdTRUE, stopwatch_started_us == 0
+                                    ? kIdlePeriod
+                                    : kActiveStopwatchPeriod);
     }
 }
 
@@ -660,6 +679,11 @@ bool ClockService::set_timer_duration(std::uint32_t seconds) {
 }
 
 bool ClockService::toggle_timer() { return submit({CommandType::timer_toggle}); }
+bool ClockService::start_timer_if_idle(std::uint32_t seconds) {
+    if (seconds < 60 || seconds > 3600) return false;
+    Command command{}; command.type = CommandType::timer_start_if_idle; command.value = seconds;
+    return submit(command);
+}
 bool ClockService::reset_timer() { return submit({CommandType::timer_reset}); }
 bool ClockService::toggle_stopwatch() { return submit({CommandType::stopwatch_toggle}); }
 bool ClockService::reset_stopwatch() { return submit({CommandType::stopwatch_reset}); }

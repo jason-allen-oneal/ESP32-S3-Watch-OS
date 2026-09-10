@@ -8,7 +8,7 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 
-CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 CONFIG_PM_ENABLE=y
 CONFIG_PM_DFS_INIT_AUTO=y
 CONFIG_PM_SLP_IRAM_OPT=y
@@ -18,30 +18,44 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y
 CONFIG_SPIRAM_RODATA=y
+CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 # Keep display transfers bounded after activity, Wi-Fi, and BLE tasks allocate
 # their stacks. An 8-row RGB565 chunk is 6,560 bytes; the reserved internal
 # pool keeps that DMA bounce buffer available without starving radio services.
-# BLE modem sleep/PM adds controller bookkeeping in internal RAM. Preserve
-# enough contiguous DMA-capable memory for the 32-row AMOLED bounce buffer
-# after the radio and service tasks start.
+# BLE modem sleep/PM adds controller bookkeeping in internal RAM. Prefer
+# PSRAM for ordinary allocations above 1 KiB; peripheral/DMA allocations
+# still explicitly request internal memory. The default 16 KiB threshold
+# let UI allocations compete with the radio's startup memory.
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
 CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT=8
 
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_APP_REPRODUCIBLE_BUILD=y
-CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_HZ=100
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
+CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y
+CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK=y
 CONFIG_ESP_TASK_WDT_EN=y
 CONFIG_ESP_TASK_WDT_INIT=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# Direct-install health proof is emitted at INFO. Keep both the compiled
+# default and maximum at INFO so release builds cannot silently remove the
+# pending/accepted markers used by the bounded host verifier.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+CONFIG_LOG_MAXIMUM_LEVEL=3
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=n
 CONFIG_NIGHTGLASS_OTA_ENABLED=y
+# Selecting a package in either installer is the approval. Signature
+# verification, inactive-slot writes, and rollback remain required; there is
+# no second watch-side INSTALL/RESTART confirmation.
 # The matching private key is sealed outside the repository. This public SEC1
 # point is intentionally visible and is verified by the release gate.
 CONFIG_NIGHTGLASS_OTA_P256_PUBLIC_KEY_HEX="044e501e8b18a69dcc61a4a32d1e52d0f8ff65aa635986bf144d62d3704466f67f64729c6eda70fd2ee5ba2f2a102d8a8d94ee0a48ba44eca679507a8fdb65e7d0"
@@ -73,8 +87,13 @@ CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_ENCRYPTION=y
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
 CONFIG_BT_CTRL_MODEM_SLEEP=y
 CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1=y
+# Connected BLE requires a clock within 500 ppm. ESP-IDF explicitly excludes
+# the ESP32-S3 internal 136 kHz RC source from connected operation, and HIL
+# showed status-8/133 disconnects about every two minutes with that source.
+# Retain modem sleep but use the stable main crystal for the bonded phone link.
 CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
 CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
+CONFIG_PM_LIGHTSLEEP_RTC_OSC_CAL_INTERVAL=1
 CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY=y
 CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 CONFIG_LV_USE_CLIB_MALLOC=y

@@ -38,6 +38,76 @@ class VoiceTransferReceiverTest {
         assertFalse(receiver.active())
     }
 
+    @Test fun spokenOptInIsForwardedOnlyAfterVerifiedUpload() {
+        var spoken = false
+        var completed = false
+        val audio = byteArrayOf(4, 8, 15, 16)
+        val receiver = VoiceTransferReceiver(
+            {},
+            complete = { _, received ->
+                completed = true
+                received.fill(0)
+            },
+            spokenReplies = { _, enabled -> spoken = enabled },
+        )
+        val crc = VoiceTransferReceiver.crc32(audio)
+        assertTrue(receiver.accept(NightglassProtocol.VoiceRequest.Begin(
+            17u, audio.size, crc, spokenReplies = true)))
+        assertTrue(receiver.accept(NightglassProtocol.VoiceRequest.Data(
+            17u, 1, 0, audio)))
+        assertTrue(receiver.accept(NightglassProtocol.VoiceRequest.End(17u, audio.size, crc)))
+        assertTrue(completed)
+        assertTrue(spoken)
+    }
+
+    @Test fun discordDestinationIsForwardedOnlyAfterVerifiedUpload() {
+        var discord = false
+        var completed = false
+        val audio = byteArrayOf(3, 1, 4, 1, 5)
+        val receiver = VoiceTransferReceiver(
+            {},
+            complete = { _, received ->
+                completed = true
+                received.fill(0)
+            },
+            discordReply = { _, enabled -> discord = enabled },
+        )
+        val crc = VoiceTransferReceiver.crc32(audio)
+        assertTrue(receiver.accept(NightglassProtocol.VoiceRequest.Begin(
+            18u, audio.size, crc, discordReply = true)))
+        assertTrue(receiver.accept(NightglassProtocol.VoiceRequest.Data(
+            18u, 1, 0, audio)))
+        assertTrue(receiver.accept(NightglassProtocol.VoiceRequest.End(18u, audio.size, crc)))
+        assertTrue(completed)
+        assertTrue(discord)
+
+        var failedDestination = false
+        val failed = VoiceTransferReceiver(
+            {},
+            complete = { _, _ -> fail("must not complete") },
+            discordReply = { _, enabled -> failedDestination = enabled },
+        )
+        assertTrue(failed.accept(NightglassProtocol.VoiceRequest.Begin(
+            19u, audio.size, crc + 1u, discordReply = true)))
+        assertTrue(failed.accept(NightglassProtocol.VoiceRequest.Data(
+            19u, 1, 0, audio)))
+        assertFalse(failed.accept(NightglassProtocol.VoiceRequest.End(
+            19u, audio.size, crc + 1u)))
+        assertFalse(failedDestination)
+    }
+
+    @Test fun discordBeginRejectsTheGeneralFiveMinuteBound() {
+        val writes = mutableListOf<ByteArray>()
+        val receiver = VoiceTransferReceiver(writes::add, complete = { _, _ ->
+            fail("oversized Discord turn must not complete")
+        })
+        assertFalse(receiver.accept(NightglassProtocol.VoiceRequest.Begin(
+            20u, NightglassProtocol.MAX_DISCORD_VOICE_REPLY_BYTES + 1,
+            1u, discordReply = true)))
+        assertFalse(receiver.active())
+        assertEquals(3, writes.single()[11].toInt())
+    }
+
     @Test fun codecBuildsStandardEightKhzMonoPcm16Wav() {
         val wav = VoiceAudioCodec.mulaw8kToWav(
             byteArrayOf(0xff.toByte(), 0x80.toByte()))

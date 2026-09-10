@@ -99,4 +99,23 @@ int main(int argc, char **argv) {
     assert(evaluate_health_gate(boot, false) == HealthGateAction::rollback_pending_image);
     boot = evaluate_boot(1, true, true);
     assert(evaluate_health_gate(boot, true) == HealthGateAction::rollback_pending_image);
+
+    // ESP-IDF's one-shot pending state is the handoff signal, including when
+    // upgrading from firmware too old to persist any newer recovery marker.
+    boot = evaluate_boot(kUnhealthyBootLimit, false, true);
+    assert(!boot.safe_mode);
+    assert(evaluate_health_gate(boot, true) == HealthGateAction::accept_pending_image);
+    assert(evaluate_health_gate(boot, false) == HealthGateAction::rollback_pending_image);
+    // The physical recovery button always takes precedence over the handoff.
+    boot = evaluate_boot(kUnhealthyBootLimit, true, true);
+    assert(boot.safe_mode);
+    assert(evaluate_health_gate(boot, true) == HealthGateAction::rollback_pending_image);
+
+    constexpr std::int64_t now_us = 100'000'000;
+    assert(!health_evidence_fresh(now_us, 0, kTouchHealthMaximumAgeUs));
+    assert(!health_evidence_fresh(now_us, now_us + 1, kTouchHealthMaximumAgeUs));
+    assert(health_evidence_fresh(now_us, now_us - kTouchHealthMaximumAgeUs,
+                                 kTouchHealthMaximumAgeUs));
+    assert(!health_evidence_fresh(now_us, now_us - kTouchHealthMaximumAgeUs - 1,
+                                  kTouchHealthMaximumAgeUs));
 }

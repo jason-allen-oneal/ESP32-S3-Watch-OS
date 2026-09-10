@@ -32,8 +32,9 @@ endif()
 
 # ESP-IDF contributes generic erase/full-flash/component-flash targets. Keep
 # them visible for transparency but make their execution fail before esptool.
-# Nightglass release writes require the separately reviewed update/recovery
-# path; ordinary builds do not depend on this blocker.
+# Nightglass release writes use either the native signed USB installer or the
+# encrypted companion OTA path. Both feed the on-device UpdateService; ordinary
+# ROM flasher targets do not and therefore remain blocked.
 add_custom_target(nightglass_block_generic_flash
     COMMAND ${CMAKE_CURRENT_LIST_DIR}/scripts/block-generic-flash.sh
     VERBATIM
@@ -44,6 +45,7 @@ set(NIGHTGLASS_BLOCKED_FLASH_TARGETS
     bootloader-flash encrypted-bootloader-flash
     partition-table-flash partition_table-flash encrypted-partition-table-flash
     otadata-flash encrypted-otadata-flash
+    erase-otadata erase_otadata
     assets-flash encrypted-assets-flash
 )
 

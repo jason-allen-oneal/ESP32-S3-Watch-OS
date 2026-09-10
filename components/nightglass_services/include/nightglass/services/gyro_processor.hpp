@@ -44,6 +44,7 @@ public:
 
     GyroOutput process(const GyroSample &sample);
     void reset();
+    [[nodiscard]] bool calibrated() const noexcept { return calibrated_; }
 
 private:
     void restart_calibration();

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nightglass — quiet shell preview</title>
+<style>
+:root{color-scheme:dark;font-family:Arial,sans-serif;color:#F3F7F4;background:#101311;--accent:#a8ff32;--surface:#080b09;--line:#2a3f0c;--sub:#9ba79f}
+*{box-sizing:border-box}body{margin:0;padding:28px}main{max-width:1310px;margin:auto}h1{margin:6px 0 12px;font-size:30px;font-weight:550;letter-spacing:-.7px}.eyebrow{color:var(--accent);font:12px monospace;letter-spacing:2px}.intro{max-width:800px;color:#b7c1ba;line-height:1.6;font-size:15px;margin:0}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:20px 0 22px}.toggle{min-height:44px;padding:10px 16px;border:1px solid #3c463e;background:#1b211c;color:#F3F7F4;border-radius:9px;font-size:14px;cursor:pointer}.toggle[aria-pressed=true]{border-color:var(--accent);color:var(--accent);background:#1c2813}.toggle:focus-visible{outline:2px solid #fff;outline-offset:4px}.mode-note{font-size:13px;color:var(--sub);line-height:1.5}.gallery{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px}figure{margin:0;min-width:0}.stage{width:100%;max-width:410px;aspect-ratio:410/502;position:relative;border-radius:40px;overflow:hidden;background:#000;box-shadow:0 0 0 1px #323932,0 15px 25px #0005}.face{position:absolute;top:0;left:0;width:410px;height:502px;transform-origin:top left;background:#000;overflow:hidden;color:#F3F7F4}.art{position:absolute;inset:0;width:410px;height:502px;pointer-events:none;user-select:none;opacity:.2509803922}.head-back{left:28px;top:28px;width:56px;height:56px;display:grid;place-items:center;font-size:24px}.native{position:absolute;background:var(--surface);border:1px solid var(--line);border-radius:14px;color:#F3F7F4;font-size:18px;font-weight:400}.title{position:absolute;left:100px;top:39px;width:282px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:26px;font-weight:400;line-height:32px;margin:0}.rail{position:absolute;left:28px;top:91px;width:354px;height:1px;background:var(--accent);opacity:.7}.native-row{left:32px;width:338px;height:64px;display:grid;place-items:center}.timer-card{position:absolute;left:28px;top:112px;width:354px;height:142px;border:1px solid var(--line);border-radius:16px;background:var(--surface);padding:16px}.timer-card small{font-size:14px;color:var(--sub)}.digits{position:absolute;left:16px;top:58px;font-size:32px;font-variant-numeric:tabular-nums}.action{display:grid;place-items:center}.accent{background:var(--accent);color:#000}.hint{position:absolute;color:var(--sub);font-size:14px;line-height:20px}.sample{position:absolute;left:28px;right:28px;bottom:28px;color:#798b7e;font-size:10px;text-align:right;letter-spacing:.5px}.caption{font-size:16px;font-weight:500;margin:16px 0 5px}.detail{font-size:13px;line-height:1.5;color:var(--sub);margin:0;max-width:390px}.footer{margin-top:24px;border-top:1px solid #2c352e;padding-top:16px;display:flex;flex-wrap:wrap;gap:10px 24px;font-size:12px;color:#899b8d}.screen-body{pointer-events:none}
+@media(max-width:1000px){.gallery{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:680px){body{padding:20px 16px}.gallery{grid-template-columns:1fr;justify-items:center;gap:28px}figure{width:100%;max-width:410px}h1{font-size:26px}.mode-note{flex-basis:100%}.stage{border-radius:34px}}
+</style>
+</head>
+<body><main>
+<div class="eyebrow">NIGHTGLASS / REVENANT</div>
+<h1>A quieter frame for everything else.</h1>
+<p class="intro">The home face keeps its skull. App screens get a slim gunmetal edge, dim green corner lights, and an uninterrupted dark center.</p>
+<div class="toolbar" role="group" aria-label="Compare backgrounds">
+<button class="toggle" id="quiet" aria-pressed="true">Quiet frame</button>
+<button class="toggle" id="current" aria-pressed="false">Current background</button>
+<span class="mode-note" id="mode-note" aria-live="polite">Quiet frame · subdued, firmware-compatible opacity</span>
+</div>
+<div class="gallery">
+<figure>
+<div class="stage"><div class="face" data-screen="apps">
+<img class="art" src="revenant-shell-410x502.png" alt="">
+<div class="screen-body">
+<div class="native head-back">&lt;</div><h2 class="title">APPS</h2><div class="rail"></div>
+<div class="native native-row" style="top:100px">ALARM</div>
+<div class="native native-row" style="top:174px">TIMER</div>
+<div class="native native-row" style="top:248px">STOPWATCH</div>
+<div class="native native-row" style="top:322px">SETTINGS</div>
+<div class="native native-row" style="top:396px">ACTIVITY</div>
+</div></div></div>
+<figcaption><h3 class="caption">Apps</h3><p class="detail">No skull competing with the menu. Opaque controls keep the same contrast and spacing.</p></figcaption>
+</figure>
+<figure>
+<div class="stage"><div class="face" data-screen="timer">
+<img class="art" src="revenant-shell-410x502.png" alt="">
+<div class="screen-body">
+<div class="native head-back">&lt;</div><h2 class="title">TIMER</h2><div class="rail"></div>
+<div class="timer-card"><small>COUNTDOWN</small><div class="digits">00:05:00</div></div>
+<div class="native action" style="left:28px;top:278px;width:354px;height:58px">DURATION</div>
+<div class="native action accent" style="left:28px;top:350px;width:220px;height:70px">START</div>
+<div class="native action" style="left:262px;top:350px;width:120px;height:70px">RESET</div>
+<div class="hint" style="left:28px;top:440px">Visual + audio timer alert</div>
+</div></div></div>
+<figcaption><h3 class="caption">Timer</h3><p class="detail">The time and primary action lead. The surrounding glass stays almost black.</p></figcaption>
+</figure>
+<figure>
+<div class="stage"><div class="face" data-screen="quick">
+<img class="art" src="revenant-shell-410x502.png" alt="">
+<div class="screen-body">
+<div class="native head-back">&lt;</div><h2 class="title">QUICK SETTINGS</h2><div class="rail"></div>
+<div class="native native-row" style="top:100px">BRIGHTNESS 60%</div>
+<div class="native native-row" style="top:174px">SOUND ON</div>
+<div class="native native-row" style="top:248px">DO NOT DISTURB OFF</div>
+<div class="native native-row" style="top:322px">BLUETOOTH ON</div>
+<div class="hint" style="left:40px;top:410px;width:322px">Scheduled quiet hours are configured in Alarms.</div>
+</div></div></div>
+<figcaption><h3 class="caption">Quick Settings</h3><p class="detail">The same quiet edge would carry across the system's currently plain control panel.</p></figcaption>
+</figure>
+</div>
+<div class="footer"><span>Design preview · sample values · not device screenshots</span><span>410 × 502 layout · 28 px safe inset · approximate browser typography</span><span>Firmware and device unchanged</span></div>
+</main>
+<script>
+const newImage='revenant-shell-410x502.png';
+const oldImage='../../../components/nightglass_ui/assets/revenant_grid_v2.png';
+const quiet=document.getElementById('quiet');
+const current=document.getElementById('current');
+function setMode(mode){
+ const clean=mode==='quiet';
+ quiet.setAttribute('aria-pressed',String(clean));
+ current.setAttribute('aria-pressed',String(!clean));
+ document.querySelectorAll('.face').forEach(face=>{
+   const img=face.querySelector('.art');
+   img.src=clean?newImage:oldImage;
+   img.style.opacity=clean?String(64/255):(face.dataset.screen==='quick'?'0':String(36/255));
+ });
+ document.getElementById('mode-note').textContent=clean?
+ 'Quiet frame · subdued, firmware-compatible opacity':
+ 'Current · dimmed skull on Apps / Timer; no art in Quick Settings';
+}
+quiet.addEventListener('click',()=>setMode('quiet'));
+current.addEventListener('click',()=>setMode('current'));
+const resize=new ResizeObserver(entries=>entries.forEach(({target,contentRect})=>{
+ target.querySelector('.face').style.transform='scale('+contentRect.width/410+')';
+}));
+document.querySelectorAll('.stage').forEach(el=>resize.observe(el));
+</script>
+</body></html>

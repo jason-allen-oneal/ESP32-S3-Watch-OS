@@ -92,6 +92,7 @@ std::atomic_bool got_ip{false};
 std::atomic_bool credentials_dirty{false};
 std::atomic_bool sleep_suspended{false};
 std::atomic_bool fetch_in_flight{false};
+std::atomic_bool wifi_stop_requested{false};
 std::atomic<std::int64_t> next_connect_us{0};
 std::atomic<std::int64_t> next_fetch_us{0};
 std::atomic<std::int64_t> last_good_us{0};
@@ -242,9 +243,14 @@ void handle_event(void *, esp_event_base_t base, std::int32_t id, void *data) {
         wifi_started.store(false);
         got_ip.store(false);
         connect_requested.store(false);
+        wifi_stop_requested.store(false);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         got_ip.store(false);
         connect_requested.store(false);
+        if (wifi_stop_requested.load()) {
+            if (worker_task) xTaskNotifyGive(worker_task);
+            return;
+        }
         const auto now = esp_timer_get_time();
         portENTER_CRITICAL(&state_mux);
         if (current.reconnect_attempt < std::numeric_limits<std::uint8_t>::max()) {
@@ -259,11 +265,19 @@ void handle_event(void *, esp_event_base_t base, std::int32_t id, void *data) {
         current.last_error = WeatherError::offline;
         ++current.sequence;
         portEXIT_CRITICAL(&state_mux);
-        next_connect_us.store(now + static_cast<std::int64_t>(delay) * 1'000'000);
+        const auto retry_at = now + static_cast<std::int64_t>(delay) * 1'000'000;
+        next_connect_us.store(retry_at);
+        next_fetch_us.store(retry_at);
         nightglass::core::health_registry().set(
             "network", nightglass::core::HealthState::degraded,
             "Wi-Fi disconnected; reconnect backoff active");
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        // A late DHCP event can race the deliberate disconnect/stop sequence.
+        // Never republish an intentionally quiesced station as online.
+        if (wifi_stop_requested.load()) {
+            if (worker_task) xTaskNotifyGive(worker_task);
+            return;
+        }
         got_ip.store(true);
         connect_requested.store(false);
         next_fetch_us.store(0);
@@ -353,6 +367,39 @@ esp_err_t ensure_wifi_started() {
     return result;
 }
 
+bool stop_wifi_for_duty_cycle() {
+    if (!wifi_started.load()) return true;
+    if (!credential_mutex ||
+        xSemaphoreTake(credential_mutex, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
+    wifi_stop_requested.store(true);
+    const esp_err_t disconnected = esp_wifi_disconnect();
+    const esp_err_t stopped = esp_wifi_stop();
+    if (stopped == ESP_OK) {
+        wifi_started.store(false);
+        got_ip.store(false);
+        connect_requested.store(false);
+    } else {
+        wifi_stop_requested.store(false);
+    }
+    xSemaphoreGive(credential_mutex);
+    (void)disconnected;
+    return stopped == ESP_OK;
+}
+
+bool quiesce_wifi(NetworkState idle_state) {
+    if (stop_wifi_for_duty_cycle()) {
+        publish_network(idle_state, false, WeatherError::none);
+        return true;
+    }
+    publish_network(NetworkState::error, got_ip.load(), WeatherError::transport);
+    nightglass::core::health_registry().set(
+        "network", nightglass::core::HealthState::degraded,
+        "Wi-Fi duty-cycle stop failed");
+    return false;
+}
+
 struct HttpBuffer {
     std::array<char, kMaxResponse + 1> bytes{};
     std::size_t length{0};
@@ -438,7 +485,9 @@ void connect_if_due(std::int64_t now) {
         connect_requested.store(true);
         publish_network(NetworkState::connecting, false, WeatherError::none);
     } else {
-        next_connect_us.store(now + 5'000'000);
+        const auto retry_at = now + 5'000'000;
+        next_connect_us.store(retry_at);
+        next_fetch_us.store(retry_at);
         publish_network(NetworkState::error, false, WeatherError::transport);
     }
 }
@@ -503,74 +552,52 @@ void worker(void *) {
         // phone currently owns (Wi-Fi or cellular).
         if (snapshot.data_valid && snapshot.source == WeatherSource::phone &&
             !snapshot.stale) {
-            if (wifi_started.load()) {
-                esp_wifi_disconnect();
-                esp_wifi_stop();
-                wifi_started.store(false);
-                got_ip.store(false);
-                connect_requested.store(false);
-            }
-            publish_network(NetworkState::disabled, false, WeatherError::none);
+            quiesce_wifi(NetworkState::disabled);
             continue;
         }
 
         if (!snapshot.settings.enabled || !snapshot.credentials_configured) {
-            if (wifi_started.load()) {
-                esp_wifi_disconnect();
-                esp_wifi_stop();
-                wifi_started.store(false);
-                got_ip.store(false);
-                connect_requested.store(false);
-            }
-            publish_network(snapshot.settings.enabled ? NetworkState::unprovisioned
-                                                      : NetworkState::disabled,
-                            false, WeatherError::none);
+            quiesce_wifi(snapshot.settings.enabled ? NetworkState::unprovisioned
+                                                   : NetworkState::disabled);
             continue;
         }
-        const esp_err_t startup = ensure_wifi_started();
-        if (startup != ESP_OK) {
-            if (sleep_suspended.load()) continue;
-            publish_network(NetworkState::error, false, WeatherError::transport);
-            nightglass::core::health_registry().set(
-                "network", nightglass::core::HealthState::degraded,
-                "Wi-Fi station initialization failed");
-            continue;
-        }
-        if (credentials_dirty.exchange(false) && wifi_started.load()) {
-            if (!credential_mutex ||
-                xSemaphoreTake(credential_mutex, portMAX_DELAY) != pdTRUE) {
-                publish_network(NetworkState::error, false, WeatherError::transport);
-                continue;
-            }
-            esp_wifi_disconnect();
-            connect_requested.store(false);
-            got_ip.store(false);
-            const esp_err_t applied = sleep_suspended.load()
-                                          ? ESP_ERR_INVALID_STATE
-                                          : apply_credentials_locked();
-            xSemaphoreGive(credential_mutex);
-            if (applied != ESP_OK) {
-                if (sleep_suspended.load()) continue;
-                publish_network(NetworkState::error, false, WeatherError::transport);
-                continue;
-            }
-            next_connect_us.store(0);
-        }
-        connect_if_due(now);
-        portENTER_CRITICAL(&state_mux);
-        snapshot = current;
-        portEXIT_CRITICAL(&state_mux);
+
         const auto power = power_service().snapshot();
         const bool interactive = power.state == nightglass::core::PowerState::active ||
                                  power.state == nightglass::core::PowerState::dim;
-        if (!snapshot.connected || !snapshot.settings.location_configured ||
-            !interactive || now < next_fetch_us.load()) {
+        if (!snapshot.settings.location_configured || !interactive ||
+            now < next_fetch_us.load()) {
+            quiesce_wifi(NetworkState::disabled);
             if (!snapshot.settings.location_configured) {
                 publish_weather_state(WeatherState::unavailable,
                                       WeatherError::no_location);
             }
             continue;
         }
+
+        if (credentials_dirty.exchange(false) && !stop_wifi_for_duty_cycle()) {
+            next_fetch_us.store(now + 30'000'000);
+            publish_network(NetworkState::error, false, WeatherError::transport);
+            continue;
+        }
+        // esp_wifi_stop() posts WIFI_EVENT_STA_STOP asynchronously. Do not
+        // restart the driver until that event has retired the previous cycle.
+        if (wifi_stop_requested.load()) continue;
+        const esp_err_t startup = ensure_wifi_started();
+        if (startup != ESP_OK) {
+            if (sleep_suspended.load()) continue;
+            next_fetch_us.store(now + 30'000'000);
+            publish_network(NetworkState::error, false, WeatherError::transport);
+            nightglass::core::health_registry().set(
+                "network", nightglass::core::HealthState::degraded,
+                "Wi-Fi station initialization failed");
+            continue;
+        }
+        connect_if_due(now);
+        portENTER_CRITICAL(&state_mux);
+        snapshot = current;
+        portEXIT_CRITICAL(&state_mux);
+        if (!snapshot.connected) continue;
 
         publish_weather_state(WeatherState::fetching, WeatherError::none);
         fetch_in_flight.store(true);
@@ -590,6 +617,7 @@ void worker(void *) {
                 !current.settings.enabled || !current.credentials_configured ||
                 !current.connected) {
                 portEXIT_CRITICAL(&state_mux);
+                quiesce_wifi(NetworkState::disabled);
                 continue;
             }
             current.current = decoded;
@@ -622,6 +650,7 @@ void worker(void *) {
             if (configuration_generation != observed_generation ||
                 !current.settings.enabled || !current.credentials_configured) {
                 portEXIT_CRITICAL(&state_mux);
+                quiesce_wifi(NetworkState::disabled);
                 continue;
             }
             current.weather_state = current.data_valid ? WeatherState::stale
@@ -640,6 +669,7 @@ void worker(void *) {
                 "weather", nightglass::core::HealthState::degraded,
                 "Weather refresh failed; last-good data retained");
         }
+        quiesce_wifi(NetworkState::disabled);
     }
 }
 
@@ -798,14 +828,26 @@ nightglass::core::Status NetworkWeatherService::clear_credentials() {
                 "credential store busy"};
     }
     wipe(&runtime_credentials, sizeof(runtime_credentials));
-    if (wifi_started.load()) esp_wifi_disconnect();
+    const bool was_started = wifi_started.load();
+    if (was_started) {
+        wifi_stop_requested.store(true);
+        esp_wifi_disconnect();
+    }
     esp_err_t driver_clear = ESP_OK;
+    esp_err_t driver_stop = ESP_OK;
     if (wifi_initialized.load()) {
         wifi_config_t blank{};
         blank.sta.threshold.authmode = WIFI_AUTH_OPEN;
         driver_clear = esp_wifi_set_config(WIFI_IF_STA, &blank);
         wipe(&blank, sizeof(blank));
-        if (wifi_started.load()) esp_wifi_stop();
+        if (was_started) driver_stop = esp_wifi_stop();
+    }
+    if (driver_stop == ESP_OK) {
+        wifi_started.store(false);
+        got_ip.store(false);
+        connect_requested.store(false);
+    } else {
+        wifi_stop_requested.store(false);
     }
     if (credential_mutex) xSemaphoreGive(credential_mutex);
     portENTER_CRITICAL(&state_mux);
@@ -817,9 +859,9 @@ nightglass::core::Status NetworkWeatherService::clear_credentials() {
     ++current.sequence;
     portEXIT_CRITICAL(&state_mux);
     if (worker_task) xTaskNotifyGive(worker_task);
-    if (driver_clear != ESP_OK) {
+    if (driver_clear != ESP_OK || driver_stop != ESP_OK) {
         return {nightglass::core::StatusCode::io_error,
-                "Wi-Fi driver credential clearing failed"};
+                "Wi-Fi driver credential clearing or stop failed"};
     }
     return nightglass::core::Status::Ok();
 }
@@ -925,8 +967,11 @@ bool NetworkWeatherService::prepare_for_light_sleep() {
         return false;
     }
     if (wifi_started.load()) {
+        wifi_stop_requested.store(true);
+        esp_wifi_disconnect();
         const esp_err_t stopped = esp_wifi_stop();
         if (stopped != ESP_OK) {
+            wifi_stop_requested.store(false);
             if (credential_mutex) xSemaphoreGive(credential_mutex);
             sleep_suspended.store(false);
             return false;
@@ -939,7 +984,7 @@ bool NetworkWeatherService::prepare_for_light_sleep() {
     portENTER_CRITICAL(&state_mux);
     current.connected = false;
     if (current.settings.enabled && current.credentials_configured) {
-        current.network_state = NetworkState::connecting;
+        current.network_state = NetworkState::disabled;
         current.weather_state = current.data_valid ? WeatherState::offline
                                                    : WeatherState::unavailable;
     }

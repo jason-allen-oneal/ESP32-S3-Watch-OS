@@ -30,6 +30,9 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
             state.back_route = Route::home;
             state.back_back_route = Route::home;
             break;
+        case NavigationAction::open_context_deck:
+            push_route(state, Route::context_deck);
+            break;
         case NavigationAction::open_launcher:
             state.route = Route::launcher;
             state.overlay = Overlay::none;
@@ -62,6 +65,12 @@ constexpr NavigationState reduce_impl(NavigationState state, NavigationAction ac
             break;
         case NavigationAction::open_media:
             push_route(state, Route::media);
+            break;
+        case NavigationAction::open_spotify:
+            push_route(state, Route::spotify);
+            break;
+        case NavigationAction::open_discord:
+            push_route(state, Route::discord);
             break;
         case NavigationAction::open_notifications:
             push_route(state, Route::notifications);
@@ -109,6 +118,12 @@ static_assert(reduce_impl({Route::about, Overlay::system_modal, Route::launcher,
 static_assert(reduce_impl({Route::home, Overlay::none, Route::home, Route::home},
                           NavigationAction::open_notifications) ==
               NavigationState{Route::notifications, Overlay::none, Route::home, Route::home});
+static_assert(reduce_impl({Route::home, Overlay::none, Route::home, Route::home},
+                          NavigationAction::open_context_deck) ==
+              NavigationState{Route::context_deck, Overlay::none, Route::home, Route::home});
+static_assert(reduce_impl({Route::context_deck, Overlay::none, Route::home, Route::home},
+                          NavigationAction::back) ==
+              NavigationState{Route::home, Overlay::none, Route::home, Route::home});
 static_assert(reduce_impl({Route::notifications, Overlay::none, Route::home, Route::home},
                           NavigationAction::back) ==
               NavigationState{Route::home, Overlay::none, Route::home, Route::home});

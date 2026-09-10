@@ -1,9 +1,9 @@
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
 #if CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST
-#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #endif
@@ -18,7 +18,9 @@
 #include "nightglass/services/power.hpp"
 #include "nightglass/services/storage.hpp"
 #include "nightglass/services/watchface.hpp"
+#include "nightglass/services/premium.hpp"
 #include "nightglass/services/voice.hpp"
+#include "nightglass/services/usb_update.hpp"
 #include "nightglass/services/audio.hpp"
 #include "nightglass/ui/shell.hpp"
 #include "nightglass/update/service.hpp"
@@ -26,6 +28,13 @@
 
 namespace {
 constexpr char kTag[] = "nightglass_boot";
+
+void report_allocation_failure(std::size_t requested, std::uint32_t capabilities,
+                               const char *function) {
+    ESP_EARLY_LOGE(kTag, "ALLOCATION_FAILED bytes=%u caps=0x%lx caller=%s",
+                   static_cast<unsigned>(requested),
+                   static_cast<unsigned long>(capabilities), function);
+}
 
 #if CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST
 bool wait_for_audio_completion(std::uint32_t initial_sequence,
@@ -94,6 +103,7 @@ void run_audio_boot_self_test() {
 
 extern "C" void app_main() {
     ESP_LOGI(kTag, "Nightglass shell and power-policy boot");
+    ESP_ERROR_CHECK(heap_caps_register_failed_alloc_callback(report_allocation_failure));
 
     auto &board = nightglass::bsp::board();
     const auto safe_output_status = board.prepare_safe_outputs();
@@ -147,6 +157,13 @@ extern "C" void app_main() {
     const bool safe_mode = update.snapshot().safe_mode;
     if (safe_mode) {
         ESP_LOGW(kTag, "SAFE MODE: optional hardware, audio, activity, and radios disabled");
+        // Bring up the signed cable recovery endpoint before display/touch
+        // initialization. If an essential board device fails, app_main may
+        // return, but the USB receiver task remains available for recovery.
+        const auto usb_update_status = nightglass::services::usb_update_service().start();
+        if (!usb_update_status.is_ok()) {
+            ESP_LOGW(kTag, "Direct USB update unavailable: %s", usb_update_status.detail);
+        }
     }
 
     const auto board_status = board.start_essential();
@@ -173,6 +190,7 @@ extern "C" void app_main() {
         }
     }
 
+    nightglass::services::premium_service().start();
     const auto power_status = nightglass::services::power_service().start();
     if (!power_status.is_ok()) {
         ESP_LOGW(kTag, "Power service degraded: %s", power_status.detail);
@@ -196,19 +214,32 @@ extern "C" void app_main() {
     }
 
     if (!safe_mode) {
-        const auto connectivity_status = nightglass::services::connectivity_service().start();
-        if (!connectivity_status.is_ok()) {
-            ESP_LOGW(kTag, "Connectivity service degraded: %s", connectivity_status.detail);
-        }
-
+        // Voice owns buffers that must be quiesced before either update link
+        // can erase/write an inactive application slot. Initialize it before
+        // exposing BLE or USB update commands.
         const auto voice_status = nightglass::services::voice_service().start();
         if (!voice_status.is_ok()) {
             ESP_LOGW(kTag, "Voice service unavailable: %s", voice_status.detail);
         }
 
+        const auto connectivity_status = nightglass::services::connectivity_service().start();
+        if (!connectivity_status.is_ok()) {
+            ESP_LOGW(kTag, "Connectivity service degraded: %s", connectivity_status.detail);
+        }
+
         const auto network_status = nightglass::services::network_weather_service().start();
         if (!network_status.is_ok()) {
             ESP_LOGW(kTag, "Network/weather service degraded: %s", network_status.detail);
+        }
+    }
+
+    // Safe mode deliberately omits voice and radios, but still exposes this
+    // signed recovery route. In normal mode it starts only after voice has
+    // initialized, so prepare_for_update cannot be undone by a later start.
+    if (!safe_mode) {
+        const auto usb_update_status = nightglass::services::usb_update_service().start();
+        if (!usb_update_status.is_ok()) {
+            ESP_LOGW(kTag, "Direct USB update unavailable: %s", usb_update_status.detail);
         }
     }
 
@@ -226,6 +257,9 @@ extern "C" void app_main() {
     nightglass::core::health_registry().set("ui", nightglass::core::HealthState::ok,
                                        "Daily watch shell active");
     ESP_LOGI(kTag, "Nightglass daily shell active");
+    ESP_LOGI(kTag, "BOOT_MEMORY internal_free=%lu largest=%lu",
+             static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
 
 #if CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST
     if (!safe_mode) run_audio_boot_self_test();

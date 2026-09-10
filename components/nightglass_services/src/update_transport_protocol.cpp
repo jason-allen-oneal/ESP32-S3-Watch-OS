@@ -49,10 +49,14 @@ bool is_update_transport_frame(std::span<const std::uint8_t> frame) noexcept {
     return frame[1] >= kUpdateBeginOpcode && frame[1] <= kUpdateStatusQueryOpcode;
 }
 
-bool parse_update_transport_frame(std::span<const std::uint8_t> frame,
-                                  UpdateTransportCommand &command) noexcept {
+namespace {
+
+bool parse_update_transport_frame_bounded(std::span<const std::uint8_t> frame,
+                                          std::size_t frame_maximum,
+                                          std::size_t data_maximum,
+                                          UpdateTransportCommand &command) noexcept {
     command = {};
-    if (!is_update_transport_frame(frame) || frame.size() > kUpdateTransportFrameMaximum) {
+    if (!is_update_transport_frame(frame) || frame.size() > frame_maximum) {
         return false;
     }
     if (frame.size() < 10) return false;
@@ -92,7 +96,7 @@ bool parse_update_transport_frame(std::span<const std::uint8_t> frame,
             return true;
         }
         case kUpdateDataOpcode:
-            if (frame.size() <= 14 || frame.size() > kUpdateTransportFrameMaximum) return false;
+            if (frame.size() <= 14 || frame.size() - 14 > data_maximum) return false;
             command.offset = read_u32(frame.data() + 10);
             command.data_size = static_cast<std::uint8_t>(frame.size() - 14);
             std::copy(frame.begin() + 14, frame.end(), command.data.begin());
@@ -115,6 +119,20 @@ bool parse_update_transport_frame(std::span<const std::uint8_t> frame,
     }
 }
 
+}  // namespace
+
+bool parse_update_transport_frame(std::span<const std::uint8_t> frame,
+                                  UpdateTransportCommand &command) noexcept {
+    return parse_update_transport_frame_bounded(
+        frame, kBleUpdateTransportFrameMaximum, kBleUpdateDataMaximum, command);
+}
+
+bool parse_usb_update_transport_frame(std::span<const std::uint8_t> frame,
+                                      UpdateTransportCommand &command) noexcept {
+    return parse_update_transport_frame_bounded(
+        frame, kUsbUpdateTransportFrameMaximum, kUsbUpdateDataMaximum, command);
+}
+
 std::array<std::uint8_t, 22> encode_update_transport_status(
     const UpdateTransportStatus &status) noexcept {
     std::array<std::uint8_t, 22> frame{};
@@ -124,7 +142,7 @@ std::array<std::uint8_t, 22> encode_update_transport_status(
     frame[10] = status.state;
     frame[11] = status.signature_state;
     frame[12] = status.result;
-    frame[13] = 0;
+    frame[13] = status.acknowledged_opcode;
     write_u32(frame.data() + 14, status.expected_bytes);
     write_u32(frame.data() + 18, status.received_bytes);
     return frame;

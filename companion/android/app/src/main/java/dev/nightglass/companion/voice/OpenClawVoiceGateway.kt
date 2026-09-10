@@ -94,7 +94,12 @@ class OpenClawVoiceGateway(
                 put("message", "Use only the Gateway-provided [Audio] Transcript for " +
                     "this Nightglass request. If it is absent, empty, or a failure " +
                     "placeholder, reply exactly: Voice transcription failed. " +
-                    "Otherwise answer in plain text under 1600 characters.")
+                    "Otherwise answer in plain text under 1600 characters. " +
+                    "Only when directly requested in the transcript, you may append one final line " +
+                    "suggesting a local watch action: [WATCH:TIMER:seconds] (integer 60 to 3600), " +
+                    "[WATCH:OPEN:SPOTIFY], [WATCH:OPEN:PHONE], [WATCH:OPEN:INBOX], or [WATCH:PHONE:RING]. " +
+                    "Describe it as a suggestion awaiting confirmation, never as already performed. " +
+                    "The watch requires a separate physical review and confirmation; do not use tools.")
                 put("deliver", false)
                 put("timeoutMs", responseTimeoutSeconds(encodedBytes) * 1_000L)
                 put("expectedPermissionMode", "read-only")
