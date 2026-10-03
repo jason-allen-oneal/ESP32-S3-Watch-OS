@@ -229,6 +229,59 @@ class OpenClawVoiceGateway(
         return true
     }
 
+    /** Speech generation stays on the authenticated Gateway, never on the watch. */
+    fun synthesizeReply(
+        owner: VoiceTurnOwner,
+        text: String,
+        completed: (Result<ByteArray>) -> Unit,
+    ): Boolean {
+        val spoken = GatewaySpeechReply.spokenExcerpt(text)
+        if (spoken.isBlank()) return false
+        val turn = ActiveTurn(owner)
+        synchronized(activeLock) {
+            if (active != null || resetting.get()) return false
+            active = turn
+        }
+        val task = FutureTask<Unit> {
+            val result = runCatching {
+                val credential = store.load() ?: error("OpenClaw voice is not configured")
+                try {
+                    val socket = RpcSocket(
+                        credential, store, "operator", OpenClawVoiceStore.REQUIRED_SCOPES.sorted(),
+                        credential.operatorAuthToken(), false,
+                    ) { _, _, _ -> }
+                    turn.socket.set(socket)
+                    try {
+                        turn.checkActive()
+                        verifyOperatorHello(socket.connect(), credential.usesVerifiedIdentity)
+                        turn.checkActive()
+                        status("Generating ElevenLabs spoken reply")
+                        val reply = socket.request("talk.speak", buildJsonObject {
+                            put("text", spoken)
+                            put("modelId", GatewaySpeechReply.MODEL)
+                            put("outputFormat", GatewaySpeechReply.FORMAT)
+                        }, 30_000)
+                        turn.checkActive()
+                        GatewaySpeechReply.decode(reply)
+                    } finally {
+                        turn.socket.set(null)
+                        socket.close()
+                    }
+                } finally { credential.wipe() }
+            }
+            val deliver = synchronized(activeLock) {
+                if (active === turn && !turn.cancelled.get()) {
+                    active = null
+                    true
+                } else false
+            }
+            if (deliver) completed(result) else result.getOrNull()?.fill(0)
+        }
+        turn.worker = task
+        executor.execute(task)
+        return true
+    }
+
     /** Create a fresh restricted-agent session and replace the active pointer. */
     fun newConversation(completed: (Result<Unit>) -> Unit): Boolean {
         if (!resetting.compareAndSet(false, true)) return false

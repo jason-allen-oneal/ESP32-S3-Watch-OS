@@ -30,7 +30,6 @@ import dev.nightglass.companion.voice.OpenClawHealth
 import dev.nightglass.companion.voice.OpenClawHealthPolicy
 import dev.nightglass.companion.voice.OpenClawHealthProbe
 import dev.nightglass.companion.voice.VoiceResponseQueue
-import dev.nightglass.companion.voice.VoiceReplySynthesizer
 import dev.nightglass.companion.voice.VoiceTransferReceiver
 import dev.nightglass.companion.voice.VoiceTurnOwner
 import java.util.ArrayDeque
@@ -155,7 +154,6 @@ class NightglassConnectionService : Service() {
     private val openClawVoice by lazy {
         OpenClawVoiceGateway(this) { detail -> update(detail) }
     }
-    private val voiceReplySynthesizer by lazy { VoiceReplySynthesizer(this) }
     private val discordVoiceShare by lazy { DiscordVoiceShare(this) }
     private val openClawHealthProbe by lazy { OpenClawHealthProbe(this) }
     private var voiceHealthProbeInFlight = false
@@ -307,7 +305,6 @@ class NightglassConnectionService : Service() {
         phoneIntegrations.stop()
         voiceReceiver.linkLost()
         openClawVoice.close()
-        voiceReplySynthesizer.close()
         openClawHealthProbe.close()
         weatherExecutor.shutdownNow()
         voiceHealthExecutor.shutdownNow()
@@ -746,17 +743,19 @@ class NightglassConnectionService : Service() {
                                   spoken: Boolean = false) {
         if (!linkReady || owner != activeVoiceOwner || owner.linkGeneration != linkGeneration) return
         val responseId = nextVoiceResponseId()
-        if (!spoken || !voiceReplySynthesizer.synthesize(PremiumContent.spokenText(text)) { result ->
+        val fallbackText = if (spoken) "Voice unavailable.\n\n$text" else text
+        if (!spoken || !openClawVoice.synthesizeReply(owner, PremiumContent.spokenText(text)) { result ->
+            reconnectHandler.post {
                 if (!linkReady || owner != activeVoiceOwner ||
                     owner.linkGeneration != linkGeneration) {
                     result.getOrNull()?.fill(0)
-                    return@synthesize
+                    return@post
                 }
                 val audio = result.getOrNull()
                 if (audio == null) {
-                    queueVoiceText(owner, responseId, text, true)
-                    update("OpenClaw replied on Nightglass (text only)")
-                    return@synthesize
+                    queueVoiceText(owner, responseId, fallbackText, true)
+                    update("OpenClaw replied (text only; watch speech unavailable)")
+                    return@post
                 }
                 val random = java.security.SecureRandom()
                 var audioResponseId: UInt
@@ -771,13 +770,15 @@ class NightglassConnectionService : Service() {
                 }
                 audio.fill(0)
                 if (!accepted) {
-                    queueVoiceText(owner, responseId, text, true)
-                    update("OpenClaw replied on Nightglass (text only)")
+                    queueVoiceText(owner, responseId, fallbackText, true)
+                    update("OpenClaw replied (text only; watch speech unavailable)")
                 } else {
                     update("OpenClaw replied on Nightglass")
                 }
+            }
             }) {
-            queueVoiceText(owner, responseId, text, true)
+            queueVoiceText(owner, responseId, fallbackText, true)
+            if (spoken) update("OpenClaw replied (text only; speech could not start)")
         }
     }
 
