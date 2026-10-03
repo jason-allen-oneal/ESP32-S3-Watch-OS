@@ -185,15 +185,16 @@ void apply_state(nightglass::core::PowerState target, std::int64_t observed_acti
     ++current.sequence;
     portEXIT_CRITICAL(&snapshot_mux);
     notify_state_observer(target);
+    network_weather_service().notify_power_transition();
     ESP_LOGI(kTag, "Display policy state=%u brightness=%u",
              static_cast<unsigned>(target), brightness);
 }
 
 void enter_light_sleep(std::int64_t observed_activity_us) {
     // Manual long light sleep is not entered while the companion radio is
-    // active. ESP-IDF automatic light sleep and BLE modem sleep remain active
-    // between connection events, preserving notifications without pinning the
-    // CPU and controller fully awake.
+    // active. BLE modem sleep is enabled, but automatic CPU light sleep is
+    // intentionally disabled until the GPIO38 wake hand-off is hardware-tested.
+    // Manual esp_light_sleep_start() would disrupt the companion connection.
     if (connectivity_service().snapshot().settings.enabled) return;
     // CPU-side recognition stops in manual light sleep. Until QMI8658 INT1
     // wake-on-motion passes its own hardware gate, keep the IMU stream alive

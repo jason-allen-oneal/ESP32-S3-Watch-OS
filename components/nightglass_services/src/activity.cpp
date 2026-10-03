@@ -28,8 +28,6 @@ namespace {
 
 constexpr char kTag[] = "nightglass_activity";
 constexpr char kNvsNamespace[] = "ng_activity";
-constexpr TickType_t kActivePeriod = pdMS_TO_TICKS(40);
-constexpr TickType_t kBlankPeriod = pdMS_TO_TICKS(100);
 constexpr std::int64_t kStaleAfterUs = 2'000'000;
 constexpr std::int64_t kPeriodicSaveUs = 300'000'000;
 constexpr std::int64_t kSaveRetryBackoffUs = 30'000'000;
@@ -193,7 +191,9 @@ void load_state() {
 }
 
 bool submit(const Command &command) {
-    return command_queue && xQueueSend(command_queue, &command, 0) == pdTRUE;
+    if (!command_queue || xQueueSend(command_queue, &command, 0) != pdTRUE) return false;
+    if (worker_task) xTaskNotifyGive(worker_task);
+    return true;
 }
 
 void publish_processor(const ActivityProcessorOutput &output, const MotionSnapshot &motion,
@@ -283,7 +283,6 @@ void publish_gesture(const GestureProcessorOutput &output, std::int64_t now_us,
 }
 
 void worker(void *) {
-    TickType_t wake = xTaskGetTickCount();
     std::int64_t last_motion_sample_us = 0;
     std::int64_t last_gesture_motion_sample_us = 0;
     std::int64_t last_calibration_keepawake_us = 0;
@@ -533,12 +532,10 @@ void worker(void *) {
             }
             set_persistence(ok);
         }
-        const auto power_state = power_service().snapshot().state;
-        const auto period = power_state == nightglass::core::PowerState::screen_blank ||
-                                    power_state == nightglass::core::PowerState::light_sleep
-                                ? kBlankPeriod
-                                : kActivePeriod;
-        vTaskDelayUntil(&wake, period);
+        // Process a published sensor sample immediately instead of maintaining
+        // a second independent 25/10 Hz polling schedule. A bounded fallback
+        // retains stale-sensor detection, day rollover and persistence retries.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
     }
 }
 
@@ -600,6 +597,10 @@ bool ActivityService::capture_gesture_calibration_sample() {
 
 bool ActivityService::cancel_gesture_calibration() {
     return submit({CommandType::gesture_calibration_cancel});
+}
+
+void ActivityService::notify_motion_sample() {
+    if (worker_task) xTaskNotifyGive(worker_task);
 }
 
 ActivityService &activity_service() { return instance; }

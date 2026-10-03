@@ -529,9 +529,41 @@ void update_age(std::int64_t now) {
     portEXIT_CRITICAL(&state_mux);
 }
 
+TickType_t worker_wait_ticks() {
+    update_age(esp_timer_get_time());
+    NetworkWeatherSnapshot snapshot{};
+    portENTER_CRITICAL(&state_mux);
+    snapshot = current;
+    portEXIT_CRITICAL(&state_mux);
+    // Settings, phone weather, radio events and display transitions notify us.
+    // A cached observation still gets a precise fresh-to-stale deadline.
+    const auto stale_seconds = static_cast<std::uint32_t>(
+        snapshot.settings.refresh_minutes) * 120U + 1U;
+    const bool fresh = snapshot.data_valid && !snapshot.stale;
+    const auto stale_wait = fresh
+        ? std::max<TickType_t>(1, pdMS_TO_TICKS(
+            static_cast<std::uint64_t>(stale_seconds - snapshot.age_seconds) * 1000U))
+        : portMAX_DELAY;
+    if (sleep_suspended.load() ||
+        (fresh && snapshot.source == WeatherSource::phone) ||
+        !snapshot.settings.enabled || !snapshot.credentials_configured ||
+        !snapshot.settings.location_configured) return stale_wait;
+    const auto power = power_service().snapshot().state;
+    if (power != nightglass::core::PowerState::active &&
+        power != nightglass::core::PowerState::dim) return stale_wait;
+    const auto until_fetch_us = next_fetch_us.load() - esp_timer_get_time();
+    if (until_fetch_us > 0) {
+        const auto fetch_wait = std::max<TickType_t>(1, pdMS_TO_TICKS(
+            static_cast<std::uint64_t>((until_fetch_us + 999) / 1000)));
+        return std::min(fetch_wait, stale_wait);
+    }
+    // Keep bounded retries while starting/stopping Wi-Fi or awaiting DHCP.
+    return pdMS_TO_TICKS(1000);
+}
+
 void worker(void *) {
     while (true) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+        ulTaskNotifyTake(pdTRUE, worker_wait_ticks());
         const auto now = esp_timer_get_time();
         NetworkWeatherSnapshot snapshot{};
         std::uint32_t observed_generation = 0;
@@ -738,6 +770,7 @@ nightglass::core::Status NetworkWeatherService::start() {
 }
 
 NetworkWeatherSnapshot NetworkWeatherService::snapshot() const {
+    update_age(esp_timer_get_time());
     NetworkWeatherSnapshot copy{};
     portENTER_CRITICAL(&state_mux);
     copy = current;
@@ -991,6 +1024,10 @@ bool NetworkWeatherService::prepare_for_light_sleep() {
     ++current.sequence;
     portEXIT_CRITICAL(&state_mux);
     return true;
+}
+
+void NetworkWeatherService::notify_power_transition() {
+    if (worker_task) xTaskNotifyGive(worker_task);
 }
 
 void NetworkWeatherService::resume_from_light_sleep() {

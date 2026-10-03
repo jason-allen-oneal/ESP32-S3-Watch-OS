@@ -677,8 +677,8 @@ void probe_devices(i2c_master_bus_handle_t bus_handle) {
 
 void hardware_task(void *context) {
     probe_devices(static_cast<i2c_master_bus_handle_t>(context));
-    std::int64_t last_rtc_us = -1'000'000;
-    std::int64_t last_battery_us = -2'000'000;
+    std::int64_t last_rtc_us = -30'000'000;
+    std::int64_t last_battery_us = -15'000'000;
     while (true) {
         run_touch_bus_recovery();
         const std::int64_t now = esp_timer_get_time();
@@ -710,15 +710,22 @@ void hardware_task(void *context) {
         }
 
         publish_motion();
-        if (now - last_rtc_us >= 1'000'000) {
+        activity_service().notify_motion_sample();
+        const auto power_state = power_service().snapshot().state;
+        const bool blank = power_state == nightglass::core::PowerState::screen_blank ||
+                           power_state == nightglass::core::PowerState::light_sleep;
+        // Keep interactive diagnostics responsive. In standby the clock
+        // extrapolates the RTC sample using esp_timer's monotonic clock.
+        const auto rtc_period_us = blank ? 30'000'000 : 1'000'000;
+        const auto battery_period_us = blank ? 15'000'000 : 2'000'000;
+        if (now - last_rtc_us >= rtc_period_us) {
             publish_rtc();
             last_rtc_us = now;
         }
-        if (now - last_battery_us >= 2'000'000) {
+        if (now - last_battery_us >= battery_period_us) {
             publish_battery();
             last_battery_us = now;
         }
-        const auto power_state = power_service().snapshot().state;
         const auto poll_ticks = power_state == nightglass::core::PowerState::screen_blank ||
                                         power_state == nightglass::core::PowerState::light_sleep
                                     ? kBlankPollTicks

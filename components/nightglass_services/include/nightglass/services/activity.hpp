@@ -71,6 +71,7 @@ public:
     [[nodiscard]] ActivitySnapshot snapshot() const;
     bool update_settings(const ActivitySettings &settings);
     bool reset_today();
+    void notify_motion_sample();
     bool start_gesture_calibration();
     bool capture_gesture_calibration_sample();
     bool cancel_gesture_calibration();

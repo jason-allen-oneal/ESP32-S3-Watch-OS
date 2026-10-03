@@ -11,10 +11,10 @@ namespace nightglass::services {
 using PowerStateObserver = void (*)(nightglass::core::PowerState state, void *context);
 
 struct PowerSettings {
-    std::uint8_t active_brightness{30};
+    std::uint8_t active_brightness{20};
     std::uint8_t dim_brightness{8};
-    std::uint16_t dim_after_seconds{15};
-    std::uint16_t blank_after_seconds{30};
+    std::uint16_t dim_after_seconds{5};
+    std::uint16_t blank_after_seconds{15};
     std::uint16_t sleep_after_blank_seconds{15};  // 0 disables light sleep.
 };
 
@@ -25,7 +25,7 @@ struct PowerSnapshot {
     nightglass::core::PowerState state{nightglass::core::PowerState::active};
     nightglass::core::WakeReason last_wake{nightglass::core::WakeReason::cold_boot};
     nightglass::core::WakeReason last_activity_reason{nightglass::core::WakeReason::cold_boot};
-    std::uint8_t requested_brightness{30};
+    std::uint8_t requested_brightness{20};
     bool side_key_ready{false};
     bool side_key_pressed{false};
     bool light_sleep_enabled{false};
