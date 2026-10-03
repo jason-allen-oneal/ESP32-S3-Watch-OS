@@ -224,4 +224,12 @@ idf_dir="${NIGHTGLASS_IDF_PATH:-${IDF_PATH:-${HOME}/esp/esp-idf-v5.5.5}}"
 python3 -B "${project_dir}/tests/ota_crypto_test.py" \
   "${update_binary}" "${verifier_binary}"
 
+rtc_binary="$(mktemp)"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/time_math.cpp" \
+  "${project_dir}/tests/rtc_sync_test.cpp" -o "${rtc_binary}"
+"${rtc_binary}"
+rm -f "${rtc_binary}"
+
 printf 'Nightglass host tests passed\n'

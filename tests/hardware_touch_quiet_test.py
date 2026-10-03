@@ -266,6 +266,7 @@ esp_err_t gpio_set_level(gpio_num_t, int) { throw std::runtime_error("diagnostic
 void set_haptic_state(bool, std::int64_t, bool) { throw std::runtime_error("haptic mutation"); }
 void publish_haptic_failure() { throw std::runtime_error("haptic failure mutation"); }
 void publish_motion() { ++motion_polls; events.emplace_back("motion"); }
+void run_rtc_sync() {}
 void publish_rtc() { ++rtc_polls; events.emplace_back("rtc"); }
 void publish_battery() { ++battery_polls; events.emplace_back("battery"); }
 std::uint32_t ulTaskNotifyTake(int clear, TickType_t ticks) {
@@ -434,7 +435,7 @@ void check_no_request() {
         run_task();
         const auto elapsed_us = std::int64_t(450) * expected_ticks * tick_ms * 1000;
         const bool blank = state != nightglass::core::PowerState::active;
-        require(rtc_polls == 1 + elapsed_us / (blank ? 30'000'000 : 1'000'000),
+        require(rtc_polls == 1 + elapsed_us / 1'000'000,
                 "RTC standby/active cadence regression");
         require(battery_polls == 1 + elapsed_us / (blank ? 15'000'000 : 2'000'000),
                 "battery standby/active cadence regression");

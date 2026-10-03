@@ -13,6 +13,9 @@
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "nightglass/core/health.hpp"
+#include "nightglass/services/hardware.hpp"
+#include "nightglass/services/clock.hpp"
+#include "nightglass/services/rtc_sync.hpp"
 #include "nightglass/services/update_transport.hpp"
 #include "nightglass/services/usb_update_protocol.hpp"
 #include "nightglass/update/service.hpp"
@@ -84,6 +87,15 @@ bool send_status(const std::uint8_t *data, std::size_t size) {
                      application->version, static_cast<unsigned long>(application->secure_version),
                      running ? running->label : "unknown", esp_err_to_name(state_result),
                      state_result == ESP_OK ? static_cast<int>(state) : -1);
+            const auto hardware = hardware_service().snapshot();
+            const auto clock = clock_service().snapshot();
+            ESP_LOGI(kTag, "USB_TELEMETRY rtc_present=%u rtc_valid=%u rtc_age_ms=%lld clock_valid=%u utc=%lld battery_present=%u percent_valid=%u percent=%u mv=%u voltage_valid=%u charging=%u discharging=%u",
+                hardware.rtc.present, hardware.rtc.valid,
+                static_cast<long long>((now_us - hardware.rtc.sampled_at_us) / 1000),
+                clock.time_valid, static_cast<long long>(clock.utc_epoch_seconds),
+                hardware.battery.battery_present, hardware.battery.percent_valid, hardware.battery.percent,
+                hardware.battery.voltage_mv, hardware.battery.voltage_valid,
+                hardware.battery.charging, hardware.battery.discharging);
         }
     }
     const auto envelope = encode_usb_update_envelope(std::span(data, size));
@@ -119,6 +131,13 @@ void receiver(void *) {
             const bool ready = decoder.feed(input[static_cast<std::size_t>(index)]);
             last_envelope_byte_us = decoder.in_progress() ? now_us : 0;
             if (!ready) continue;
+            const auto payload = decoder.payload();
+            if (is_rtc_sync_frame(payload)) {
+                const auto epoch = decode_rtc_sync(payload);
+                const bool accepted = epoch > 0 && hardware_service().request_rtc_time(epoch);
+                ESP_LOGI(kTag, "USB_RTC_SYNC accepted=%u", accepted);
+                continue;
+            }
             UpdateTransportCommand command{};
             const bool parsed = parse_usb_update_transport_frame(decoder.payload(), command);
             command.link = UpdateTransportLink::usb;

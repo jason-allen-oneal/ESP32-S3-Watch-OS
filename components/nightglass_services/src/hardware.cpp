@@ -1,4 +1,6 @@
 #include "nightglass/services/hardware.hpp"
+#include "nightglass/services/time_math.hpp"
+#include "nightglass/services/rtc_sync.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -288,7 +290,9 @@ void publish_rtc() {
     RtcSnapshot next{};
     next.sampled_at_us = esp_timer_get_time();
     std::uint8_t raw[7]{};
-    if (rtc_device && read_register(rtc_device, 0x04, raw, sizeof(raw)) == ESP_OK) {
+    const bool read_ok = rtc_device &&
+        read_register(rtc_device, 0x04, raw, sizeof(raw)) == ESP_OK;
+    if (read_ok) {
         next.present = true;
         next.second = from_bcd(raw[0] & 0x7FU);
         next.minute = from_bcd(raw[1] & 0x7FU);
@@ -302,8 +306,14 @@ void publish_rtc() {
                      next.weekday <= 6 && next.month >= 1 && next.month <= 12;
     }
 
+    if (!read_ok || !next.valid) {
+        ESP_LOGW(kTag, "RTC_READ read_ok=%u valid=%u os=%u raw=%02x:%02x:%02x date=%02x/%02x/%02x",
+            read_ok, next.valid, (raw[0] & 0x80U) != 0, raw[2], raw[1], raw[0], raw[6], raw[5], raw[3]);
+    }
     portENTER_CRITICAL(&snapshot_mux);
-    current.rtc = next;
+    // Keep the last real timestamp across a transient I2C failure; ClockService
+    // expires it after 35 seconds. A successful invalid/OS-marked read is never hidden.
+    if (read_ok || !current.rtc.valid) current.rtc = next;
     ++current.sequence;
     portEXIT_CRITICAL(&snapshot_mux);
 }
@@ -682,12 +692,44 @@ void probe_devices(i2c_master_bus_handle_t bus_handle) {
              pmic_identified, imu_ready);
 }
 
+portMUX_TYPE rtc_sync_mux = portMUX_INITIALIZER_UNLOCKED;
+std::int64_t rtc_sync_epoch = 0, rtc_sync_requested_us = 0;
+
+void run_rtc_sync() {
+    std::int64_t epoch = 0, requested_us = 0;
+    portENTER_CRITICAL(&rtc_sync_mux);
+    epoch = rtc_sync_epoch;
+    requested_us = rtc_sync_requested_us;
+    rtc_sync_epoch = 0;
+    portEXIT_CRITICAL(&rtc_sync_mux);
+    if (epoch == 0) return;
+    epoch += std::max<std::int64_t>(0, esp_timer_get_time() - requested_us) / 1'000'000;
+    struct Io {
+        bool read_control(std::uint8_t &value) { return rtc_device && read_register(rtc_device, 0, &value, 1) == ESP_OK; }
+        bool write_control(std::uint8_t value) { return write_register(rtc_device, 0, value) == ESP_OK; }
+        bool write_time(const std::array<std::uint8_t, 8> &bytes) {
+            const auto result = i2c_master_transmit(rtc_device, bytes.data(), bytes.size(), kI2cTimeoutMs);
+            record_hardware_bus_transaction(rtc_device, result);
+            return result == ESP_OK;
+        }
+    } io;
+    const bool written = sync_rtc(io, epoch);
+    publish_rtc();
+    const auto rtc = hardware_service().snapshot().rtc;
+    const CivilTime value{rtc.year,rtc.month,rtc.day,rtc.weekday,rtc.hour,rtc.minute,rtc.second};
+    const auto actual = rtc.valid && valid_civil(value) ? civil_to_epoch(value) : 0;
+    const bool verified = written && actual >= epoch && actual <= epoch + 2;
+    ESP_LOGI(kTag, "RTC_TIME_SYNC verified=%u epoch=%lld readback=%lld", verified,
+        static_cast<long long>(epoch), static_cast<long long>(actual));
+}
+
 void hardware_task(void *context) {
     probe_devices(static_cast<i2c_master_bus_handle_t>(context));
     std::int64_t last_rtc_us = -30'000'000;
     std::int64_t last_battery_us = -15'000'000;
     while (true) {
         run_touch_bus_recovery();
+        run_rtc_sync();
         const std::int64_t now = esp_timer_get_time();
         const bool desired_gyro = diagnostics_gyro_requested.load() ||
                                   gestures_require_gyro();
@@ -723,7 +765,7 @@ void hardware_task(void *context) {
                            power_state == nightglass::core::PowerState::light_sleep;
         // Keep interactive diagnostics responsive. In standby the clock
         // extrapolates the RTC sample using esp_timer's monotonic clock.
-        const auto rtc_period_us = blank ? 30'000'000 : 1'000'000;
+        const auto rtc_period_us = 1'000'000;
         const auto battery_period_us = blank ? 15'000'000 : 2'000'000;
         if (now - last_rtc_us >= rtc_period_us) {
             publish_rtc();
@@ -792,6 +834,16 @@ HardwareSnapshot HardwareService::snapshot() const {
     copy = current;
     portEXIT_CRITICAL(&snapshot_mux);
     return copy;
+}
+
+bool HardwareService::request_rtc_time(std::int64_t epoch) {
+    if (!service_task || !valid_rtc_epoch(epoch)) return false;
+    portENTER_CRITICAL(&rtc_sync_mux);
+    const bool available = rtc_sync_epoch == 0;
+    if (available) { rtc_sync_epoch = epoch; rtc_sync_requested_us = esp_timer_get_time(); }
+    portEXIT_CRITICAL(&rtc_sync_mux);
+    if (available) xTaskNotifyGive(service_task);
+    return available;
 }
 
 bool HardwareService::set_gyro_enabled(bool enabled) {

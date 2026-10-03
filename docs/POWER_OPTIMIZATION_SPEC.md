@@ -267,3 +267,15 @@ python3 scripts/nightglass-usb-update.py build/update-package-0.2.4 \
 - [x] [`components/nightglass_services/src/connectivity.cpp`](../components/nightglass_services/src/connectivity.cpp): Set low-power advertising intervals.
 - [x] [`components/nightglass_services/src/network_weather.cpp`](../components/nightglass_services/src/network_weather.cpp): Implement Wi-Fi disconnect and stop after weather fetch.
 - [x] [`sdkconfig.defaults`](../sdkconfig.defaults): Update BLE modem-sleep, CPU frequency, and FreeRTOS tick-rate settings. The main-XTAL BLE clock is intentionally retained for link stability; the RTC-slow alternative remains a hardware-blocked experiment.
+
+### RTC recovery follow-up (0.2.18)
+
+Following a missing-time/RTC failure report on the watch, RTC sampling is restored
+at one second in all display states. Transient bus failures preserve only the
+last genuine sample, which still expires at the clock's existing freshness bound.
+A successful oscillator-stop/invalid read remains invalid. USB status telemetry
+reports RTC validity and battery voltage/charging alongside the PMIC percentage.
+A physical-USB NGT1 + little-endian uint64 UTC frame queues a validated 2020–2099
+time write on the hardware task: stop RTC, coherent BCD time/date write, restart,
+and readback verification. This is not an update-signature bypass. Hardware
+confirmation and diagnosis remain required before claiming the RTC is fixed.
