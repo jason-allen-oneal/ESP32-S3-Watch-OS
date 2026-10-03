@@ -768,7 +768,10 @@ class NightglassConnectionService : Service() {
                 val accepted = synchronized(writes) {
                     val queued = voiceWrites.enqueueResponseWithAudio(
                         owner, responseId, audioResponseId, text, audio, negotiatedPayload,
-                        streaming = true)
+                        // Acknowledged BLE writes on this phone sustain less than
+                        // the 8 kB/s playback rate. Validate/buffer the full bounded
+                        // reply before playback to avoid repeated I2S starvation.
+                        streaming = false)
                     if (queued) writeNextLocked()
                     queued
                 }
