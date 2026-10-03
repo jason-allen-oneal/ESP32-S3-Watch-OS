@@ -101,3 +101,16 @@ saved power/gesture/AOD settings and negotiated BLE parameters for each run.
 
 Firmware builds and host tests are necessary but cannot replace these gates.
 No claimed hours-of-runtime gain should be published before measurements.
+
+## 0.2.16 installation and 0.2.17 correction
+
+Signed 0.2.16/secure16 installed on ota_0 and passed the unchanged health gate
+at uptime 61.542 seconds. User previously confirmed physical wake/swipe on
+0.2.15. No unplugged sleep claim is made for 0.2.16.
+
+Boot exposed an 8,800-byte internal-memory allocation failure for optional CPU
+retention. IDF 5.5.5 esp_pm_configure ignores the return from its sleep setup;
+a failed CPU-retention init also skips modem sleep configuration in that call.
+0.2.17 therefore disables CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP, enforced by
+the release verifier, retaining ordinary automatic light sleep without this
+optional allocation. Physical sleep/wake/BLE evidence is required after install.
