@@ -14,6 +14,33 @@ object VoiceAudioCodec {
             .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
     }
 
+    /** Voice-only +6 dB boost; compress peaks instead of hard-clipping PCM.
+     * In-place before framing/CRC so buffered and streamed replies are identical.
+     * Never apply to microphone recordings or notification cues.
+     */
+    fun boostSpokenReply(input: ByteArray) {
+        input.indices.forEach { index ->
+            val sample = decodeMulaw(input[index]).toInt()
+            val doubled = kotlin.math.abs(sample) * 2
+            val magnitude = if (doubled <= 24_000) doubled
+                else 24_000 + (doubled - 24_000) / 5
+            input[index] = encodeMulaw(if (sample < 0) -magnitude else magnitude)
+        }
+    }
+
+    internal fun encodeMulaw(sample: Int): Byte {
+        val sign = if (sample < 0) 0x80 else 0
+        val magnitude = kotlin.math.abs(sample.coerceIn(-32635, 32635)) + 0x84
+        var exponent = 7
+        var mask = 0x4000
+        while (exponent > 0 && magnitude and mask == 0) {
+            mask = mask ushr 1
+            exponent--
+        }
+        val mantissa = (magnitude ushr (exponent + 3)) and 0x0f
+        return (sign or (exponent shl 4) or mantissa).inv().toByte()
+    }
+
     /**
      * Wrap one complete bounded watch turn as standard 8 kHz mono PCM16 WAV.
      * Keeping the source rate avoids tripling the attachment before the

@@ -759,6 +759,7 @@ class NightglassConnectionService : Service() {
                     update("OpenClaw replied (text only; watch speech unavailable)")
                     return@post
                 }
+                dev.nightglass.companion.voice.VoiceAudioCodec.boostSpokenReply(audio)
                 val random = java.security.SecureRandom()
                 var audioResponseId: UInt
                 do {
