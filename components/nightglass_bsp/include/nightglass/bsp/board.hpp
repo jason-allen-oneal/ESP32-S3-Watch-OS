@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 
 #include "driver/i2c_master.h"
@@ -23,7 +24,7 @@ public:
 
 private:
     std::uint8_t target_brightness_{30};
-    bool display_sleeping_{false};
+    std::atomic_bool display_sleeping_{false};
 };
 
 Board &board();

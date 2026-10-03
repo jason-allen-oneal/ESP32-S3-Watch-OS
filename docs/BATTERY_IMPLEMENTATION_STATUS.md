@@ -122,3 +122,17 @@ in the candidate boot. Firmware SHA-256:
 `c4393ac165667447b48386c52f5fdb86403f2fb751c8a1f1332fad30f0e48aed`.
 Owner-only evidence: `/home/rev/projects/hardware/nightglass-evidence/standby-0.2.17-20261003/`.
 Unplugged touch/BLE/sleep-counter acceptance is still pending.
+
+## Scroll/idle touch candidate 0.2.23
+
+- Suppress the 10-second periodic touch probe while the panel is asleep.
+  Physical touch GPIO interrupts remain enabled and continue waking LVGL.
+  The cached panel state is atomic because the probe runs in the timer task.
+  Live 0.2.22 logs showed sleeping probe failures followed by touch-bus recovery
+  windows of approximately 3.5 seconds; no battery-current improvement is yet measured.
+- Enable LVGL partial-render double buffering using the existing eight-row
+  internal DMA buffers. This adds one small buffer, allowing drawing and panel
+  transfer overlap without increasing the reviewed buffer height or changing
+  refresh cadence. Physical scroll smoothness remains an acceptance check.
+- Host tests verify sleeping timer suppression and unchanged physical IRQ wake.
+  Raise-only gesture behavior and saved settings are unchanged.
