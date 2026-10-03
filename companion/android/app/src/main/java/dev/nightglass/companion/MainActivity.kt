@@ -25,6 +25,7 @@ import dev.nightglass.companion.protocol.NightglassProtocol
 import dev.nightglass.companion.weather.PhoneWeatherProxy
 import dev.nightglass.companion.update.OtaPackageLoader
 import dev.nightglass.companion.voice.OpenClawVoiceGateway
+import dev.nightglass.companion.notifications.NightglassNotificationListener
 
 class MainActivity : AppCompatActivity() {
     private val permissionRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants -> if (grants.filterKeys { it != Manifest.permission.POST_NOTIFICATIONS }.values.all { it }) connect() else Toast.makeText(this, "Bluetooth permission is needed to connect your watch. Try again when ready.", Toast.LENGTH_LONG).show() }
@@ -151,6 +152,13 @@ class MainActivity : AppCompatActivity() {
                 Manifest.permission.READ_PHONE_STATE, Manifest.permission.ANSWER_PHONE_CALLS)) }
         })
         root.addView(Button(this).apply { text = "Enable watch notifications"; setOnClickListener { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } })
+        root.addView(CheckBox(this).apply {
+            text = "Notification sounds"
+            isChecked = NightglassNotificationListener.notificationSoundsEnabled(this@MainActivity)
+            setOnCheckedChangeListener { _, enabled ->
+                NightglassNotificationListener.setNotificationSoundsEnabled(this@MainActivity, enabled)
+            }
+        })
         root.addView(TextView(this).apply {
             text = "Connected apps"; textSize = 20f; setPadding(0, pad, 0, 0)
         })
