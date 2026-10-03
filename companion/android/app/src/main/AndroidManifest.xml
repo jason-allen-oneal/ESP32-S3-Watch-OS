@@ -22,13 +22,12 @@
         <package android:name="com.discord" />
     </queries>
     <application android:theme="@style/Theme.Nightglass" android:label="Nightglass" android:allowBackup="false" android:supportsRtl="true">
-        <!-- Preserve explicit shortcuts to the existing setup activity. -->
-        <activity android:name=".MainActivity" android:exported="true" />
-        <activity android:name=".premium.ControlCenterActivity" android:exported="true">
+        <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".premium.ControlCenterActivity" android:exported="true" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

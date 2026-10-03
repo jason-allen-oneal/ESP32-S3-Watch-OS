@@ -39,6 +39,35 @@ class OpenClawRpcSocketTest {
     private val json = Json { ignoreUnknownKeys = true }
     private val sessionKey = "agent:main:dashboard:6f54fe44-2c7d-48d1-a80e-053bc52feb72"
 
+    @Test fun verifiedIdentityConnectNeverSendsSavedReusableToken() {
+        val server = MockWebServer()
+        val received = CompletableFuture<JsonObject>()
+        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+            override fun onOpen(ws: WebSocket, response: Response) {
+                ws.send("""{"type":"event","event":"connect.challenge","payload":{"nonce":"verified-nonce","ts":1700000000000}}""")
+            }
+            override fun onMessage(ws: WebSocket, text: String) {
+                val request = json.parseToJsonElement(text).jsonObject
+                received.complete(request["params"]!!.jsonObject)
+                ws.send(response(request.string("id"), helloPayload()))
+            }
+            override fun onClosing(ws: WebSocket, code: Int, reason: String) { ws.close(code, reason) }
+        }))
+        server.start()
+        val c = credential("wss://rev.tailfa9b46.ts.net/nightglass/ws")
+        val client = okhttp3.OkHttpClient.Builder().addInterceptor { chain ->
+            chain.proceed(chain.request().newBuilder().url(server.url("/")).build())
+        }.build()
+        val rpc = OpenClawVoiceGateway.RpcSocket(c, null, "operator", c.scopes.sorted(),
+            "must-not-be-sent", false, client, signPayload = { canonical, _ ->
+                assertFalse(canonical.contains("must-not-be-sent")); "fixture-signature"
+            })
+        try {
+            rpc.connect()
+            assertFalse(received.get(1, TimeUnit.SECONDS).containsKey("auth"))
+        } finally { rpc.close(); server.shutdown() }
+    }
+
     @Test fun realWebSocketExercisesConnectSessionChatEventsAbortAndAttachmentEnvelope() {
         val server = MockWebServer()
         val requests = CopyOnWriteArrayList<JsonObject>()

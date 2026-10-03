@@ -48,7 +48,7 @@ class OpenClawHealthProbe(context: Context) {
             ?: return OpenClawProbeResult(configured = false, reachable = false, fatal = false)
         try {
             val hasBootstrap = !credential.bootstrapToken.isNullOrBlank()
-            val hasOperator = !credential.operatorToken.isNullOrBlank()
+            val hasOperator = credential.usesVerifiedIdentity || !credential.operatorToken.isNullOrBlank()
             if ((!hasBootstrap && !hasOperator) || !internetAvailable) {
                 return OpenClawProbeResult(
                     configured = hasBootstrap || hasOperator,
@@ -98,11 +98,10 @@ class OpenClawHealthProbe(context: Context) {
                     ?: return OpenClawProbeResult(true, reachable = false, fatal = true)
             }
 
-            val configured = credential.operatorToken != null &&
+            val configured = (credential.usesVerifiedIdentity || credential.operatorToken != null) &&
                 OpenClawVoiceStore.scopesAreAllowedHandoff(credential.scopes)
             if (!configured) return OpenClawProbeResult(true, reachable = false, fatal = true)
-            val token = credential.operatorToken
-                ?: return OpenClawProbeResult(true, reachable = false, fatal = true)
+            val token = credential.operatorAuthToken()
             var socket: OpenClawVoiceGateway.RpcSocket? = null
             return try {
                 socket = OpenClawVoiceGateway.RpcSocket(
@@ -121,7 +120,7 @@ class OpenClawHealthProbe(context: Context) {
                 val methods = hello["features"]?.jsonObject?.get("methods")?.jsonArray
                     ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
                 when {
-                    OpenClawVoiceStore.scopesAreExactlyRequired(scopes) -> {
+                    VerifiedIdentityPolicy.grantsVoice(scopes, credential.usesVerifiedIdentity) -> {
                         require("sessions.create" in methods && "chat.send" in methods &&
                             "chat.abort" in methods)
                         OpenClawProbeResult(true, reachable = true, fatal = false)

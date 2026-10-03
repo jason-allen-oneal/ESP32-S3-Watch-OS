@@ -1156,6 +1156,12 @@ class NightglassConnectionService : Service() {
                 Log.i(TAG, "OpenClaw health result: configured=${result.configured} " +
                     "internet=$internet reachable=${result.reachable} " +
                     "fatal=${result.fatal} state=${decision.state.name}")
+                getSharedPreferences("nightglass_openclaw_health", MODE_PRIVATE).edit()
+                    .putLong("checkedAt", System.currentTimeMillis())
+                    .putBoolean("configured", result.configured)
+                    .putBoolean("reachable", result.reachable)
+                    .putBoolean("internet", internet)
+                    .putBoolean("fatal", result.fatal).apply()
                 publishOpenClawHealth(decision.state)
                 scheduleOpenClawHealth()
             }
