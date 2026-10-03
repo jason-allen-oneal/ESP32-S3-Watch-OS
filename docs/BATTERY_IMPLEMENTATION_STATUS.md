@@ -114,3 +114,11 @@ a failed CPU-retention init also skips modem sleep configuration in that call.
 0.2.17 therefore disables CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP, enforced by
 the release verifier, retaining ordinary automatic light sleep without this
 optional allocation. Physical sleep/wake/BLE evidence is required after install.
+
+Signed 0.2.17/secure17 installed on ota_1, VALID pending=0, accepted at
+uptime 61.543 seconds. Fresh native USB identity confirmed the installed
+version and partition. No ALLOCATION_FAILED or CPU-retention error appeared
+in the candidate boot. Firmware SHA-256:
+`c4393ac165667447b48386c52f5fdb86403f2fb751c8a1f1332fad30f0e48aed`.
+Owner-only evidence: `/home/rev/projects/hardware/nightglass-evidence/standby-0.2.17-20261003/`.
+Unplugged touch/BLE/sleep-counter acceptance is still pending.
