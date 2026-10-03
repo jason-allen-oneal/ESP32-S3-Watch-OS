@@ -1,7 +1,18 @@
 # Battery implementation status — 2026-10-03
 
-This is a source-only first pass, not a measured battery-life release. No watch
-write, signing, current measurement, or physical wake test has been performed.
+Signed **0.2.15 / secure15** is installed on **ota_1**, VALID, pending=0.
+Native USB installation completed without erasing NVS and preserved 0.2.14 as
+its rollback image. The unchanged health gate accepted at uptime 61.543 seconds;
+a subsequent live USB query confirmed the accepted version and partition.
+Firmware SHA-256: `fa992b5ff204ea48e37f3d834954c5d11419acceb7aaaf359f537caa71f984c8`.
+Release checks included host tests, deterministic double build, image/partition
+validation and signed-package verification. BLE reconnected and activity/gyro
+calibration completed. Existing intermittent touch I2C errors remain visible;
+physical tap/swipe acceptance is pending the user's check.
+
+Evidence is stored owner-only in
+`/home/rev/projects/hardware/nightglass-evidence/battery-0.2.15-20261003/`.
+No battery-current measurement or runtime gain is claimed.
 The older POWER_OPTIMIZATION_SPEC.md includes targets and historical problems;
 its current/runtime numbers must not be presented as measured results.
 
