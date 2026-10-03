@@ -156,7 +156,9 @@ class NightglassNotificationListener : NotificationListenerService() {
         mediaController = null
         if (current === this) current = null
     }
-    override fun onNotificationPosted(sbn: StatusBarNotification) { relay(sbn, true); relayMedia() }
+    // Notification cards stay visible; they don't request a watch sound.
+    // This does not mute spoken replies, alarms, timers or phone audio.
+    override fun onNotificationPosted(sbn: StatusBarNotification) { relay(sbn, false); relayMedia() }
     override fun onNotificationRemoved(sbn: StatusBarNotification) { val id = keys.entries.firstOrNull { it.value == sbn.key }?.key ?: return; keys.remove(id); NightglassConnectionService.send(this, NightglassProtocol.remove(id)); relayMedia() }
     private fun relayMedia() {
         val manager = getSystemService(MediaSessionManager::class.java)
