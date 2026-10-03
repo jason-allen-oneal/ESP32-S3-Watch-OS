@@ -17,3 +17,14 @@ The four main screen native render contact sheets are in `concepts/visual-pass-2
 Read-only supported USB identity probe: version=0.2.18, secure=18, pending=0, ota_0, ota_state=2 (VALID). Native signed USB update will use the inactive slot and existing 60-second boot health gate; no NVS/bond reset, erase, key/eFuse changes or separate assets-volume write.
 
 Installation is pending. Accepted identity and release hashes must be recorded after the signed install. Physical appearance/touch acceptance and another owner voice turn are not established by off-device checks.
+
+## Installed and accepted
+
+Signed native USB installation completed successfully. The exact pending 0.2.19 / secure19 boot passed the existing 60-second health gate (`essential_ok=1`, `safe_mode=0`) and emitted `OTA_HEALTH_ACCEPTED state=VALID pending=0`. A subsequent independent supported status probe confirmed `version=0.2.19 secure=19 pending=0 partition=ota_1 state_io=ESP_OK ota_state=2`. RTC/clock telemetry remained valid. USB installer exited 0 and released the port. No NVS erase or separate assets-volume write occurred.
+
+- Firmware source commit: `1d6290a2431fabf259bfec2166cd4edf1ec61a2a`.
+- Firmware: 3,136,960 bytes; SHA-256 `6b52dd6b485f2937a85788454f73e5eb546103fb511bfae74fad249fb86bd8f2`.
+- Evidence: `/home/rev/projects/hardware/nightglass-evidence/native-visual-pass-20261003/` (release gate, signed package, installation log, fresh accepted identity, native renderer scripts/config).
+- Off-device captures were taken at the timer-driven flush, separately from pagination stress checks, to avoid the temporary host fixture's double-refresh capture artifacts. The Large Text contact sheet was corrected; this documentation-only capture update does not change installed firmware.
+- No phone is currently attached via ADB, so another post-update voice turn has not been independently exercised. The owner confirmed voice worked before this UI update; its capture/release/cancel semantics and service configuration were retained.
+- On-wrist appearance and touch acceptance remain for the owner to judge on the actual watch; boot acceptance is not a claim of that visual review.
