@@ -44,6 +44,7 @@ enum class VoiceFrameKind : std::uint8_t {
     response_audio_begin = 0x4a,
     response_audio_data = 0x4b,
     response_audio_end = 0x4c,
+    response_audio_stream_data = 0x4d,
 };
 
 enum class VoiceHealthState : std::uint8_t {

@@ -232,4 +232,5 @@ rtc_binary="$(mktemp)"
 "${rtc_binary}"
 rm -f "${rtc_binary}"
 
+python3 "${project_dir}/tests/progressive_voice_source_test.py"
 printf 'Nightglass host tests passed\n'

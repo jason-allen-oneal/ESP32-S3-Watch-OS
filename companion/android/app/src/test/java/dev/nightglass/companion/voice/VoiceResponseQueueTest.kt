@@ -4,6 +4,34 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VoiceResponseQueueTest {
+    @Test fun streamingAudioFramesFitMtuAndProtectAllBindingFields() {
+        val queue = VoiceResponseQueue()
+        val owner = VoiceTurnOwner(7u, 4, 2)
+        assertTrue(queue.enqueueResponseWithAudio(owner, 9u, 10u, "Reply",
+            ByteArray(4000) { (it % 255).toByte() }, 244, streaming = true))
+        var dataBytes = 0
+        var terminal = false
+        while (true) {
+            val entry = queue.beginWrite() ?: break
+            assertTrue(entry.frame.size <= 244)
+            val frame = entry.frame.copyOf()
+            if (frame[1].toInt() == 0x4a) assertEquals(2, frame[18].toInt())
+            if (frame[1].toInt() == 0x4d) {
+                val payloadEnd = frame.size - 4
+                val expected = java.nio.ByteBuffer.wrap(frame, payloadEnd, 4)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN).int.toUInt()
+                assertEquals(expected, VoiceTransferReceiver.crc32(frame.copyOfRange(0, payloadEnd)))
+                val offset = java.nio.ByteBuffer.wrap(frame, 10, 4)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+                assertEquals(dataBytes, offset)
+                dataBytes += frame.size - 18
+            }
+            val completed = queue.completeWrite()
+            if (completed != null) { assertEquals(owner, completed); terminal = true }
+        }
+        assertEquals(4000, dataBytes)
+        assertTrue(terminal)
+    }
     @Test fun normalizesUnicodeToWatchAscii() {
         val encoded = VoiceResponseQueue.asciiForWatch("Caf\u00e9 \u2014 \"ready\" \ud83d\udc7b")
         assertEquals("Cafe - \"ready\" ?", encoded.toString(Charsets.US_ASCII))

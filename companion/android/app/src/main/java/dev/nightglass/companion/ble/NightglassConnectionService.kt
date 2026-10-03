@@ -612,6 +612,7 @@ class NightglassConnectionService : Service() {
             completedVoiceOwner?.let { owner ->
                 if (owner == activeVoiceOwner && owner.linkGeneration == linkGeneration) {
                     activeVoiceOwner = null
+                    if (!otaHighPriority) gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
                     update("Voice response delivered on Nightglass")
                 }
             }
@@ -744,6 +745,7 @@ class NightglassConnectionService : Service() {
         if (!linkReady || owner != activeVoiceOwner || owner.linkGeneration != linkGeneration) return
         val responseId = nextVoiceResponseId()
         val fallbackText = if (spoken) "Voice unavailable.\n\n$text" else text
+        if (spoken) gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
         if (!spoken || !openClawVoice.synthesizeReply(owner, PremiumContent.spokenText(text)) { result ->
             reconnectHandler.post {
                 if (!linkReady || owner != activeVoiceOwner ||
@@ -764,7 +766,8 @@ class NightglassConnectionService : Service() {
                 } while (audioResponseId == 0u || audioResponseId == responseId)
                 val accepted = synchronized(writes) {
                     val queued = voiceWrites.enqueueResponseWithAudio(
-                        owner, responseId, audioResponseId, text, audio, negotiatedPayload)
+                        owner, responseId, audioResponseId, text, audio, negotiatedPayload,
+                        streaming = true)
                     if (queued) writeNextLocked()
                     queued
                 }
@@ -821,6 +824,7 @@ class NightglassConnectionService : Service() {
         activeVoiceDiscordReply = false
         openClawVoice.cancel(owner)
         synchronized(writes) { voiceWrites.purge(owner) }
+        if (!otaHighPriority) gatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
     }
     private fun write(frame: ByteArray) {
         synchronized(writes) {

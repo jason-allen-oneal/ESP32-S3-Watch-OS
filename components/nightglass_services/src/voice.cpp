@@ -132,6 +132,9 @@ std::uint32_t audio_response_crc{};
 std::uint32_t audio_response_expected{};
 std::uint32_t audio_response_received{};
 bool audio_playback_active{false};
+bool audio_response_streaming{false};
+bool audio_stream_ended{false};
+bool audio_stream_failed{false};
 std::int64_t recording_started_us{};
 std::int64_t upload_deadline_us{};
 std::int64_t processing_deadline_us{};
@@ -149,6 +152,7 @@ struct VoicePlaybackContext {
     std::uint32_t session_id{0};
     std::uint8_t *buffer{nullptr};
     std::size_t bytes{0};
+    std::int64_t stream_deadline_us{0};
 };
 VoicePlaybackContext playback_context{};
 
@@ -158,6 +162,14 @@ void secure_wipe(void *memory, std::size_t length) {
 }
 
 void clear_audio_response_locked() {
+    portENTER_CRITICAL(&voice_lock);
+    const bool playback_active = audio_playback_active;
+    portEXIT_CRITICAL(&voice_lock);
+    if (audio_response_streaming && playback_active) {
+        // The audio worker owns this allocation until its completion callback.
+        audio_stream_failed = true;
+        return;
+    }
     if (audio_response_buffer != nullptr) {
         secure_wipe(audio_response_buffer, audio_response_expected);
         heap_caps_free(audio_response_buffer);
@@ -167,6 +179,33 @@ void clear_audio_response_locked() {
     audio_response_crc = 0;
     audio_response_expected = 0;
     audio_response_received = 0;
+    audio_response_streaming = false;
+    audio_stream_ended = false;
+    audio_stream_failed = false;
+}
+
+bool read_spoken_stream(void *context, std::size_t offset,
+                        std::span<std::uint8_t> destination) {
+    const auto *playback = static_cast<VoicePlaybackContext *>(context);
+    const auto deadline = std::min(esp_timer_get_time() + 5'000'000,
+                                   playback->stream_deadline_us);
+    do {
+        if (cancel_requested.load(std::memory_order_acquire)) return false;
+        if (xSemaphoreTake(response_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            const bool valid = !audio_stream_failed && audio_response_streaming &&
+                playback->buffer == audio_response_buffer &&
+                offset <= playback->bytes && destination.size() <= playback->bytes - offset;
+            const bool ready = valid && (destination.empty()
+                ? audio_stream_ended && offset == playback->bytes
+                : offset + destination.size() <= audio_response_received);
+            if (ready && !destination.empty())
+                std::copy_n(playback->buffer + offset, destination.size(), destination.data());
+            xSemaphoreGive(response_mutex);
+            if (!valid || ready) return ready;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    } while (esp_timer_get_time() < deadline);
+    return false;
 }
 
 void wipe_response() {
@@ -530,12 +569,24 @@ void capture_complete(void *context, const VoiceCaptureResult &result) {
 void voice_playback_complete(void *context, const VoicePlaybackResult &result) {
     auto *playback = static_cast<VoicePlaybackContext *>(context);
     if (playback == nullptr) return;
+    // Synchronize producer access before releasing the progressive buffer.
+    xSemaphoreTake(response_mutex, portMAX_DELAY);
+    if (audio_response_streaming && playback->buffer == audio_response_buffer) {
+        audio_response_buffer = nullptr;
+        audio_response_id = 0;
+        audio_response_expected = 0;
+        audio_response_received = 0;
+        audio_response_streaming = false;
+        audio_stream_ended = false;
+        audio_stream_failed = false;
+    }
     if (playback->buffer != nullptr) {
         secure_wipe(playback->buffer, playback->bytes);
         heap_caps_free(playback->buffer);
         playback->buffer = nullptr;
         playback->bytes = 0;
     }
+    xSemaphoreGive(response_mutex);
     portENTER_CRITICAL(&voice_lock);
     if (audio_playback_active && current.session_id == playback->session_id) {
         audio_playback_active = false;
@@ -848,6 +899,7 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
                                   frame.kind == VoiceFrameKind::response_end ||
                                   frame.kind == VoiceFrameKind::response_audio_begin ||
                                   frame.kind == VoiceFrameKind::response_audio_data ||
+                                  frame.kind == VoiceFrameKind::response_audio_stream_data ||
                                   frame.kind == VoiceFrameKind::response_audio_end;
     if (response_payload &&
         (response_mutex == nullptr ||
@@ -924,7 +976,7 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
                current.state == VoiceTurnState::complete &&
                spoken_replies_requested && !spoken_audio_claimed &&
                audio_response_buffer == nullptr && !audio_playback_active &&
-               frame.codec == 1 && frame.sample_rate_khz == 8 &&
+               (frame.codec == 1 || frame.codec == 2) && frame.sample_rate_khz == 8 &&
                frame.total_bytes <= kVoiceMaximumSpokenReplyBytes) {
         audio_response_buffer = static_cast<std::uint8_t *>(heap_caps_malloc(
             frame.total_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -933,11 +985,17 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
             audio_response_expected = frame.total_bytes;
             audio_response_received = 0;
             audio_response_crc = frame.crc32;
+            audio_response_streaming = frame.codec == 2;
+            audio_stream_ended = false;
+            audio_stream_failed = false;
             spoken_audio_claimed = true;
             accepted = true;
         }
-    } else if (frame.kind == VoiceFrameKind::response_audio_data &&
-               current.state == VoiceTurnState::complete &&
+    } else if (((frame.kind == VoiceFrameKind::response_audio_data && !audio_response_streaming) ||
+                (frame.kind == VoiceFrameKind::response_audio_stream_data && audio_response_streaming)) &&
+               (current.state == VoiceTurnState::complete ||
+                (audio_response_streaming && current.state == VoiceTurnState::speaking)) &&
+               !audio_stream_failed &&
                audio_response_buffer != nullptr &&
                frame.response_id == audio_response_id &&
                audio_response_received <= audio_response_expected &&
@@ -947,8 +1005,20 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
                   audio_response_buffer + audio_response_received);
         audio_response_received += static_cast<std::uint32_t>(frame.payload.size());
         accepted = true;
+        if (audio_response_streaming && !audio_playback_active &&
+            audio_response_received >= std::min<std::uint32_t>(2048, audio_response_expected)) {
+            playback_buffer = audio_response_buffer;
+            playback_bytes = audio_response_expected;
+            playback_context = {current.session_id, playback_buffer, playback_bytes};
+            playback_context.stream_deadline_us = esp_timer_get_time() + 30'000'000;
+            audio_playback_active = true;
+            current.state = VoiceTurnState::speaking;
+            ++current.sequence;
+            start_playback = true;
+        }
     } else if (frame.kind == VoiceFrameKind::response_audio_end &&
-               current.state == VoiceTurnState::complete &&
+               (current.state == VoiceTurnState::complete ||
+                (audio_response_streaming && current.state == VoiceTurnState::speaking)) &&
                audio_response_buffer != nullptr &&
                frame.response_id == audio_response_id &&
                frame.total_bytes == audio_response_expected &&
@@ -959,11 +1029,17 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
         portEXIT_CRITICAL(&voice_lock);
         const bool crc_valid = voice_crc32({audio_response_buffer, bytes}) == expected_crc;
         portENTER_CRITICAL(&voice_lock);
-        const bool still_current = current.state == VoiceTurnState::complete &&
+        const bool still_current = (current.state == VoiceTurnState::complete ||
+                                   (audio_response_streaming && current.state == VoiceTurnState::speaking)) &&
                                    frame.response_id == audio_response_id &&
                                    audio_response_received == bytes &&
                                    audio_response_crc == expected_crc;
-        if (crc_valid && still_current && !audio_playback_active) {
+        if (audio_response_streaming && (!crc_valid || !still_current))
+            audio_stream_failed = true;
+        if (audio_response_streaming && crc_valid && still_current && !audio_stream_failed) {
+            audio_stream_ended = true;
+            accepted = true;
+        } else if (crc_valid && still_current && !audio_playback_active) {
             playback_buffer = audio_response_buffer;
             playback_bytes = bytes;
             audio_response_buffer = nullptr;
@@ -1009,12 +1085,24 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
     if (clear_audio_response) clear_audio_response_locked();
     if (response_payload) xSemaphoreGive(response_mutex);
     if (start_playback) {
+        ESP_LOGI(kTag, "Spoken playback start: streaming=%u buffered=%lu total=%lu",
+                 audio_response_streaming ? 1U : 0U,
+                 static_cast<unsigned long>(audio_response_received),
+                 static_cast<unsigned long>(playback_bytes));
         const auto status = audio_service().request_voice_playback(
-            playback_buffer, playback_bytes, voice_playback_complete, &playback_context);
+            playback_buffer, playback_bytes, voice_playback_complete, &playback_context,
+            audio_response_streaming ? read_spoken_stream : nullptr);
         if (!status.is_ok()) {
+            xSemaphoreTake(response_mutex, portMAX_DELAY);
+            if (audio_response_buffer == playback_buffer) {
+                audio_response_buffer = nullptr;
+                audio_response_id = 0;
+                audio_response_streaming = false;
+            }
             secure_wipe(playback_buffer, playback_bytes);
             heap_caps_free(playback_buffer);
             playback_context = {};
+            xSemaphoreGive(response_mutex);
             portENTER_CRITICAL(&voice_lock);
             audio_playback_active = false;
             if (current.state == VoiceTurnState::speaking) {

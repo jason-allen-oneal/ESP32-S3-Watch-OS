@@ -310,12 +310,24 @@ object NightglassProtocol {
     }
 
     fun voiceAudioResponseBegin(session: UInt, responseId: UInt, totalBytes: Int,
-                                crc32: UInt): ByteArray {
+                                crc32: UInt, streaming: Boolean = false): ByteArray {
         require(session != 0u && responseId != 0u &&
             totalBytes in 1..MAX_SPOKEN_REPLY_BYTES)
         return ByteBuffer.allocate(20).order(ByteOrder.LITTLE_ENDIAN)
             .put(VERSION).put(0x4a).putInt(session.toInt()).putInt(responseId.toInt())
-            .putInt(totalBytes).putInt(crc32.toInt()).put(1).put(8).array()
+            .putInt(totalBytes).putInt(crc32.toInt()).put(if (streaming) 2.toByte() else 1.toByte()).put(8).array()
+    }
+
+    fun voiceAudioStreamData(session: UInt, responseId: UInt, offset: Int,
+                             payload: ByteArray): ByteArray {
+        require(session != 0u && responseId != 0u && offset in 0..MAX_SPOKEN_REPLY_BYTES &&
+            payload.isNotEmpty() && payload.size <= 226 && payload.size <= MAX_SPOKEN_REPLY_BYTES - offset)
+        val prefix = ByteBuffer.allocate(14 + payload.size).order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION).put(0x4d).putInt(session.toInt()).putInt(responseId.toInt())
+            .putInt(offset).put(payload).array()
+        val crc = java.util.zip.CRC32().apply { update(prefix) }.value
+        return ByteBuffer.allocate(prefix.size + 4).order(ByteOrder.LITTLE_ENDIAN)
+            .put(prefix).putInt(crc.toInt()).array().also { prefix.fill(0) }
     }
 
     fun voiceAudioResponseData(session: UInt, responseId: UInt, offset: Int,
