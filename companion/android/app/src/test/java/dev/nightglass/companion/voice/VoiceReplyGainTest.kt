@@ -14,7 +14,7 @@ class VoiceReplyGainTest {
         assertEquals(before.size, audio.size)
         before.indices.forEach { i ->
             val after = VoiceAudioCodec.decodeMulaw(audio[i]).toInt()
-            assertTrue(abs(after - before[i] * 5 / 2) <= 512)
+            assertTrue(abs(after - before[i] * 7 / 2) <= 512)
         }
     }
     @Test fun allEncodedInputsStayMonotonicSymmetricAndBelowClipping() {
