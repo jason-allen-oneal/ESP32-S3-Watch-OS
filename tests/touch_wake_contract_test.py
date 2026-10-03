@@ -10,10 +10,12 @@ board = (ROOT / "components/nightglass_bsp/src/board.cpp").read_text()
 shell = (ROOT / "components/nightglass_ui/src/shell.cpp").read_text()
 update = (ROOT / "components/nightglass_update/src/service.cpp").read_text()
 
-# Automatic light sleep cannot be re-enabled until GPIO38 has a tested,
-# race-safe edge/level hand-off. Explicit light sleep remains bracketed below.
-assert "config.light_sleep_enable = false;" in power
-assert "config.light_sleep_enable = true;" not in power
+# Automatic sleep is bracketed by IDF callbacks and vetoed outside standby.
+assert "config.light_sleep_enable = true;" in power
+assert "callbacks.enter_cb = automatic_sleep_enter;" in power
+assert "callbacks.exit_cb = automatic_sleep_exit;" in power
+assert "esp_pm_register_skip_light_sleep_callback(skip_automatic_sleep)" in power
+assert "automatic_sleep_fault.load()" in power
 assert "gpio_wakeup_enable(kTouchInterruptGpio, GPIO_INTR_LOW_LEVEL)" in power
 assert "gpio_set_intr_type(kTouchInterruptGpio, GPIO_INTR_NEGEDGE)" in power
 

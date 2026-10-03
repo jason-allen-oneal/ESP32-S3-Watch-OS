@@ -41,28 +41,46 @@ its current/runtime numbers must not be presented as measured results.
   Snapshot reads update weather age so UI freshness does not depend on polling.
 - Corrected the power comment claiming automatic light sleep was active.
 
-## Not implemented: physical validation is required
+## Standby candidate 0.2.16 — implementation complete, HIL pending
 
-1. **Connected automatic CPU light sleep.** GPIO38 is currently a normal
-   falling-edge touch interrupt. Level wake changes interrupt configuration;
-   restoring safe race-free hand-off needs hardware tests. Automatic CPU
-   sleep remains disabled, and manual sleep remains forbidden while BLE is
-   enabled. BLE modem sleep remains configured. Do not remove that guard.
-   The existing manual sleep path still pauses motion sampling, so this pass
-   does not claim uninterrupted step tracking during manual sleep.
-2. **QMI8658 FIFO / low-power raise-to-wake.** Validate exact chip revision,
-   FIFO timestamp/batch behavior and GPIO21 INT1 wiring before changing the
-   backend. Compare walking/running counts and gesture traces against the
-   existing pipeline. Do not power-gate gyro while the current gyro-dependent
-   gesture recognizer needs it.
-3. **Adaptive BLE intervals.** Measure negotiated (not merely requested)
-   parameters, bonded idle reliability, notification delay and voice/OTA
-   throughput. Retain the stable main-crystal sleep clock.
-4. **AOD minute-only refresh / diagnostics / USB event handling.** Retain the
-   current touch recovery fallback. Diagnostic reduction was not retained
-   because existing recovery regression coverage depends on it. Event-driven
-   USB handling must preserve connection and update-envelope recovery.
-5. **Rail gating and deep sleep.** Need exact board schematic and battery-path
+- Automatic CPU light sleep is enabled through paired IDF 5.5.5 PM callbacks.
+  Sleep is vetoed unless the display is blank, the configured sleep delay has
+  elapsed, USB is disconnected, and no touch/wake fault is present. Existing
+  BLE modem sleep and connection scheduling are preserved.
+- The GPIO38 falling-edge interrupt is masked before arming low-level wake,
+  then level wake is disabled and falling-edge IRQ restored after every sleep
+  attempt. Already asserted contacts veto sleep; contacts racing entry/exit
+  latch a wake-only touch for the power supervisor. Setup/restoration failure
+  disables subsequent automatic sleep and reports degraded health.
+- The legacy unbounded manual sleep path is bypassed while automatic sleep is
+  configured, so hardware/activity/clock task deadlines keep running. This
+  prevents the previous indefinite manual-sleep sampling gap, but sensor FIFO
+  and hardware step counting are not implemented.
+- PM profiling is enabled for this candidate. USB reattachment reports
+  AUTO_SLEEP_EVIDENCE and IDF successful/rejected sleep counts plus PM locks.
+  Callback duration counters alone are not proof of successful entry; IDF's
+  successful sleep counts are the acceptance evidence.
+- Raise-only gesture configurations use an accelerometer tilt recognizer
+  requiring arm-down arming, real orientation change and a 250 ms settled
+  face-up finish. The gyro is power-gated in that configuration. Enabling any
+  twist/shake/flick gesture, gyro diagnostics or calibration retains gyro.
+  Existing gyro macro recognizers and saved calibration are not removed.
+- Host coverage exercises callback races, each GPIO failure boundary, 1,000
+  hand-offs, 25/10 Hz raise traces, stationary/impact/gap rejection, and the
+  unchanged touch recovery coverage. Physical connected sleep, touch/button,
+  tilt false-positive/latency, and walking accuracy remain hardware gates.
+
+## Still pending
+
+1. **QMI8658 FIFO / interrupt sampling.** Validate exact chip revision, FIFO
+   timestamp/batch behavior and GPIO21 wiring before changing the backend.
+   Current sensor polling rates are unchanged.
+2. **Adaptive BLE intervals.** Measure negotiated parameters, bonded idle
+   reliability, notification delay and voice/OTA throughput. Retain the stable
+   main-crystal sleep clock.
+3. **AOD minute-only refresh / diagnostics / USB event handling.** Retain touch
+   recovery coverage and USB connection/envelope recovery.
+4. **Rail gating and deep sleep.** Need exact schematic and battery-path
    current measurements. Never gate shared touch/IMU rails speculatively.
 
 ## Hardware acceptance matrix

@@ -33,6 +33,8 @@ struct PowerSnapshot {
     bool sleeping{false};
     bool wake_touch_pending{false};
     std::uint32_t sleep_count{0};
+    std::uint32_t automatic_sleep_count{0};
+    std::uint32_t automatic_sleep_ms{0};
     std::uint32_t last_sleep_ms{0};
     std::int64_t last_activity_us{0};
     std::int64_t last_physical_input_us{0};

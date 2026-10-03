@@ -19,6 +19,12 @@
 namespace nightglass::services {
 namespace {
 
+#if CONFIG_NIGHTGLASS_LOW_POWER_RAISE
+constexpr bool kLowPowerRaiseEnabled = true;
+#else
+constexpr bool kLowPowerRaiseEnabled = false;
+#endif
+
 constexpr char kTag[] = "nightglass_hw";
 constexpr std::uint8_t kRtcAddress = 0x51;
 constexpr std::uint8_t kPmicAddress = 0x34;
@@ -272,7 +278,8 @@ bool apply_gyro_policy(bool enabled) {
 bool gestures_require_gyro() {
     const auto activity = activity_service().snapshot();
     const auto settings = activity.settings;
-    return settings.raise_to_wake || settings.double_twist_quick_settings ||
+    return (settings.raise_to_wake && !kLowPowerRaiseEnabled) ||
+           settings.double_twist_quick_settings ||
            settings.shake_notifications || settings.flick_media_next ||
            gesture_calibration_active(activity.gesture_calibration);
 }
