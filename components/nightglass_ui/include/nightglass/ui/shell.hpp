@@ -269,6 +269,7 @@ private:
     std::array<lv_obj_t *, nightglass::services::kAgendaCapacity> agenda_items_{};
     lv_obj_t *media_state_{nullptr};
     lv_obj_t *media_title_{nullptr};
+    lv_obj_t *media_play_{nullptr};
     lv_obj_t *media_artist_{nullptr};
     lv_obj_t *media_progress_{nullptr};
     lv_obj_t *media_time_{nullptr};
@@ -318,6 +319,7 @@ private:
     lv_obj_t *quiet_end_{nullptr};
     std::uint8_t alarm_slot_index_{0};
     lv_obj_t *countdown_time_{nullptr};
+    lv_obj_t *countdown_arc_{nullptr};
     lv_obj_t *countdown_duration_{nullptr};
     lv_obj_t *countdown_toggle_{nullptr};
     lv_obj_t *stopwatch_time_{nullptr};
