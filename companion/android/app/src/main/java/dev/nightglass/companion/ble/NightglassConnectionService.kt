@@ -1164,6 +1164,7 @@ class NightglassConnectionService : Service() {
                     .putBoolean("internet", internet)
                     .putBoolean("fatal", result.fatal).apply()
                 publishOpenClawHealth(decision.state)
+                update("Nightglass connected")
                 scheduleOpenClawHealth()
             }
         }
@@ -1219,7 +1220,7 @@ class NightglassConnectionService : Service() {
             text.contains("Pairing", ignoreCase = true) -> "pairing"
             text.contains("Bluetooth", ignoreCase = true) -> "bluetooth"
             text.contains("not found", ignoreCase = true) -> "not_found"
-            else -> "updated"
+            else -> if (linkReady) "connected" else "updated"
         }
         val updatedAt = System.currentTimeMillis()
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
