@@ -13,7 +13,7 @@ object NightglassProtocol {
     const val VERSION: Byte = 1
     /** Five minutes of 8 kHz G.711 mu-law audio. */
     const val MAX_VOICE_ENCODED_BYTES = 2_400_000
-    const val MAX_SPOKEN_REPLY_BYTES = 96_000
+    const val MAX_SPOKEN_REPLY_BYTES = 480_000
     const val DEFAULT_VOICE_DURATION_SECONDS = 60
     const val MAX_DISCORD_VOICE_REPLY_BYTES = DEFAULT_VOICE_DURATION_SECONDS * 8_000
     const val MAX_VOICE_DURATION_SECONDS = 300

@@ -106,6 +106,10 @@ int main() {
         assert(!parse_voice_frame(corrupted, frame));
     }
     assert(!parse_voice_frame(std::span(stream_data).first(18), frame));
+    const auto full_minute = encode_voice_audio_begin(7, 12, 480'000, 1);
+    assert(full_minute.size != 0);
+    assert(parse_voice_frame({full_minute.bytes.data(), full_minute.size}, frame));
+    assert(frame.total_bytes == 480'000);
     assert(encode_voice_audio_begin(7, 12, kVoiceMaximumSpokenReplyBytes + 1U, 1).size == 0);
 
     const std::array<std::uint8_t, 7> health{1, 0x49, 9, 0, 0, 0, 2};

@@ -14,16 +14,16 @@ object VoiceAudioCodec {
             .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
     }
 
-    /** Voice-only +6 dB boost; compress peaks instead of hard-clipping PCM.
+    /** Voice-only approximately +8 dB boost; compress peaks instead of hard-clipping PCM.
      * In-place before framing/CRC so buffered and streamed replies are identical.
      * Never apply to microphone recordings or notification cues.
      */
     fun boostSpokenReply(input: ByteArray) {
         input.indices.forEach { index ->
             val sample = decodeMulaw(input[index]).toInt()
-            val doubled = kotlin.math.abs(sample) * 2
-            val magnitude = if (doubled <= 24_000) doubled
-                else 24_000 + (doubled - 24_000) / 5
+            val amplified = kotlin.math.abs(sample) * 5 / 2
+            val magnitude = if (amplified <= 24_000) amplified
+                else 24_000 + (amplified - 24_000) / 7
             input[index] = encodeMulaw(if (sample < 0) -magnitude else magnitude)
         }
     }

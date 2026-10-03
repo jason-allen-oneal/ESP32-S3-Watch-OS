@@ -48,7 +48,7 @@ class VoiceEventFence(private val owner: VoiceTurnOwner) {
 }
 
 /** Dedicated, atomic, GATT-write-acknowledged watch response transport. */
-class VoiceResponseQueue(private val capacity: Int = 768) {
+class VoiceResponseQueue(private val capacity: Int = 4096) {
     data class Entry(
         val frame: ByteArray,
         val owner: VoiceTurnOwner?,

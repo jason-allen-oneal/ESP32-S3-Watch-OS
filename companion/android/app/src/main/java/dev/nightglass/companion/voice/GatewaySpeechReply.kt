@@ -9,12 +9,12 @@ import kotlinx.serialization.json.jsonPrimitive
 object GatewaySpeechReply {
     const val MODEL = "eleven_flash_v2_5"
     const val FORMAT = "ulaw_8000"
-    const val MAX_TEXT_CHARS = 140
+    const val MAX_TEXT_CHARS = 800
 
     fun spokenExcerpt(text: String): String {
         val clean = text.trim()
         if (clean.length <= MAX_TEXT_CHARS) return clean
-        val end = clean.lastIndexOf(' ', MAX_TEXT_CHARS).takeIf { it >= 70 }
+        val end = clean.lastIndexOf(' ', MAX_TEXT_CHARS).takeIf { it >= MAX_TEXT_CHARS / 2 }
             ?: MAX_TEXT_CHARS
         return clean.substring(0, end).trim()
     }
@@ -30,7 +30,7 @@ object GatewaySpeechReply {
             ?: error("Speech response has no audio")
         val maxBytes = NightglassProtocol.MAX_SPOKEN_REPLY_BYTES
         require(encoded.isNotEmpty() && encoded.length <= ((maxBytes + 2) / 3) * 4) {
-            "Speech exceeds the watch's 12-second playback limit"
+            "Speech exceeds the watch's 60-second playback limit"
         }
         val audio = Base64.getDecoder().decode(encoded)
         if (audio.isEmpty() || audio.size > maxBytes) {

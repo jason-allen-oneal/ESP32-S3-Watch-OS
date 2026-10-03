@@ -13,6 +13,12 @@ class GatewaySpeechReplyTest {
         put("outputFormat", format)
         put("audioBase64", Base64.getEncoder().encodeToString(bytes))
     }
+    @Test fun acceptsFullMinuteAndDoesNotTruncateOrdinaryLongReply() {
+        val audio = ByteArray(480_000) { 0xff.toByte() }
+        assertArrayEquals(audio, GatewaySpeechReply.decode(reply(audio)))
+        val text = "This is a complete sentence. ".repeat(20).trim()
+        assertEquals(text, GatewaySpeechReply.spokenExcerpt(text))
+    }
     @Test fun acceptsExactWatchFormat() {
         val audio = byteArrayOf(0, 1, -1, 127)
         assertArrayEquals(audio, GatewaySpeechReply.decode(reply(audio)))
@@ -24,7 +30,7 @@ class GatewaySpeechReplyTest {
         }
     }
     @Test fun rejectsEmptyAndOversizedAudio() {
-        for (audio in listOf(byteArrayOf(), ByteArray(96_001))) {
+        for (audio in listOf(byteArrayOf(), ByteArray(dev.nightglass.companion.protocol.NightglassProtocol.MAX_SPOKEN_REPLY_BYTES + 1))) {
             assertThrows(IllegalArgumentException::class.java) { GatewaySpeechReply.decode(reply(audio)) }
         }
     }

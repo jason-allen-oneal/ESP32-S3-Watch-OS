@@ -1010,7 +1010,7 @@ bool VoiceService::accept_frame(const VoiceFrame &frame) {
             playback_buffer = audio_response_buffer;
             playback_bytes = audio_response_expected;
             playback_context = {current.session_id, playback_buffer, playback_bytes};
-            playback_context.stream_deadline_us = esp_timer_get_time() + 30'000'000;
+            playback_context.stream_deadline_us = esp_timer_get_time() + 90'000'000;
             audio_playback_active = true;
             current.state = VoiceTurnState::speaking;
             ++current.sequence;

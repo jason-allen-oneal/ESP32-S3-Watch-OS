@@ -1,9 +1,31 @@
 package dev.nightglass.companion.voice
 
+import dev.nightglass.companion.protocol.NightglassProtocol
 import org.junit.Assert.*
 import org.junit.Test
 
 class VoiceResponseQueueTest {
+    @Test fun fullMinuteStreamFitsQueueAndPreservesEverySample() {
+        val queue = VoiceResponseQueue()
+        val owner = VoiceTurnOwner(7u, 4, 2)
+        val audio = ByteArray(NightglassProtocol.MAX_SPOKEN_REPLY_BYTES) { (it % 256).toByte() }
+        assertTrue(queue.enqueueResponseWithAudio(owner, 9u, 10u, "Long reply",
+            audio, 244, streaming = true))
+        var offset = 0
+        var finished = false
+        while (true) {
+            val entry = queue.beginWrite() ?: break
+            if (entry.frame[1] == 0x4d.toByte()) {
+                val bytes = entry.frame.copyOfRange(14, entry.frame.size - 4)
+                assertArrayEquals(audio.copyOfRange(offset, offset + bytes.size), bytes)
+                offset += bytes.size
+            }
+            if (queue.completeWrite() != null) finished = true
+        }
+        assertEquals(audio.size, offset)
+        assertTrue(finished)
+    }
+
     @Test fun streamingAudioFramesFitMtuAndProtectAllBindingFields() {
         val queue = VoiceResponseQueue()
         val owner = VoiceTurnOwner(7u, 4, 2)

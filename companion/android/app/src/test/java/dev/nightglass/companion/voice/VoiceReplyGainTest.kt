@@ -5,7 +5,7 @@ import org.junit.Test
 import kotlin.math.abs
 
 class VoiceReplyGainTest {
-    @Test fun quietSpeechGetsApproximatelySixDbWithoutChangingLength() {
+    @Test fun quietSpeechGetsModestExtraGainWithoutChangingLength() {
         val audio = intArrayOf(0, 1000, -1000, 5000, -5000).map {
             VoiceAudioCodec.encodeMulaw(it)
         }.toByteArray()
@@ -14,7 +14,7 @@ class VoiceReplyGainTest {
         assertEquals(before.size, audio.size)
         before.indices.forEach { i ->
             val after = VoiceAudioCodec.decodeMulaw(audio[i]).toInt()
-            assertTrue(abs(after - before[i] * 2) <= 256)
+            assertTrue(abs(after - before[i] * 5 / 2) <= 512)
         }
     }
     @Test fun allEncodedInputsStayMonotonicSymmetricAndBelowClipping() {
