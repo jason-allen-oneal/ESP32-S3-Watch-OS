@@ -13,18 +13,26 @@ public:
                  bool enabled) noexcept {
         const float magnitude = std::sqrt(x * x + y * y + z * z);
         if (!enabled || now <= last_us_ || !std::isfinite(magnitude) ||
-            magnitude < 0.75F || magnitude > 1.25F ||
-            (last_us_ > 0 && now - last_us_ > 160'000)) {
+            magnitude < 0.35F || magnitude > 2.5F ||
+            (last_us_ > 0 && now - last_us_ > 500'000)) {
             reset_pose();
             last_us_ = now;
             return false;
         }
         last_us_ = now;
         if (now < cooldown_us_) { reset_pose(); return false; }
+        // A normal lift briefly departs from 1g. Preserve its down-pose
+        // baseline, but never count unsettled samples as a face-up finish.
+        if (magnitude < 0.75F || magnitude > 1.25F) {
+            settled_us_ = 0;
+            previous_z_ = z;
+            return false;
+        }
         if (!armed_) {
             if (z >= -face_up_g + 0.25F) {
-                if (++arm_samples_ >= 8) { armed_ = true; start_z_ = z; }
-            } else { arm_samples_ = 0; }
+                if (arm_started_us_ == 0) arm_started_us_ = now;
+                if (now - arm_started_us_ >= 300'000) { armed_ = true; start_z_ = z; }
+            } else { arm_started_us_ = 0; }
             return false;
         }
         if (candidate_us_ == 0 && start_z_ - z >= 0.25F) candidate_us_ = now;
@@ -49,12 +57,12 @@ public:
 private:
     void reset_pose() noexcept {
         armed_ = false;
-        arm_samples_ = 0;
+        arm_started_us_ = 0;
         candidate_us_ = settled_us_ = 0;
         start_z_ = previous_z_ = 0;
     }
     bool armed_{false};
-    unsigned arm_samples_{0};
+    std::int64_t arm_started_us_{0};
     float start_z_{0}, previous_z_{0};
     std::int64_t last_us_{0}, candidate_us_{0}, settled_us_{0}, cooldown_us_{0};
 };

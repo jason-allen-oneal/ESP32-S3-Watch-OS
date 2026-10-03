@@ -473,10 +473,10 @@ void worker(void *) {
                     !settings.shake_notifications && !settings.flick_media_next;
                 const bool raise = low_power_raise.process(motion.accel_x_g, motion.accel_y_g,
                     motion.accel_z_g, motion.sampled_at_us, gesture_processor.profile().raise_face_up_g,
-                    accel_only_raise && screen_inactive);
+                    accel_only_raise);
                 if (accel_only_raise) {
                     // Never allow stale gyro state to emit a second raise.
-                    gesture.detected = raise ? GestureKind::raise : GestureKind::none;
+                    gesture.detected = raise && screen_inactive ? GestureKind::raise : GestureKind::none;
                     gesture.strength = raise ? -motion.accel_z_g : 0;
                 }
                 publish_gesture(gesture, now_us, external_power, recent_physical_input,

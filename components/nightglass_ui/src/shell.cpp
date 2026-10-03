@@ -3808,7 +3808,20 @@ void Shell::refresh_gestures() {
                                     snapshot.settings.shake_notifications ||
                                     snapshot.settings.flick_media_next;
             const auto motion = nightglass::services::hardware_service().snapshot().motion;
-            if (any_action && !motion.gyro_calibrated) {
+            const bool gyro_required = snapshot.settings.double_twist_quick_settings ||
+                snapshot.settings.shake_notifications || snapshot.settings.flick_media_next
+#if !CONFIG_NIGHTGLASS_LOW_POWER_RAISE
+                || snapshot.settings.raise_to_wake
+#endif
+                ;
+            if (snapshot.settings.raise_to_wake && !gyro_required) {
+                set_state(gesture_state_, motion.valid ? "RAISE TO WAKE | LOW POWER"
+                                                       : "RAISE SENSOR UNAVAILABLE",
+                          motion.valid ? kGreen : kAmber);
+                std::snprintf(detail, sizeof(detail),
+                    "Accelerometer-only detection; gyro stays off.\n"
+                    "Raise detections: %lu", static_cast<unsigned long>(snapshot.raise_count));
+            } else if (any_action && !motion.gyro_calibrated) {
                 const unsigned progress = motion.gyro_calibration_required == 0
                                               ? 0
                                               : 100U * motion.gyro_calibration_samples /
