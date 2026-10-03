@@ -50,3 +50,12 @@ before calling this installed or proven. At implementation time only the phone
 is connected by USB; the watch connection and signed firmware install remain
 pending. Existing app data, bonds, settings, routes and voice credentials are
 preserved; no VPS or phone VPN is added.
+
+## Notification sound preference
+
+Owner requested an opt-in, not permanent suppression. Companion Settings →
+Notifications & phone features → Notification sounds is a persistent checkbox,
+off by default. Newly posted notifications carry the audible-alert bit only
+when opted in. Notification cards continue to relay; reconnect replay remains
+silent. This setting does not change global watch volume/mute, spoken replies,
+alarms, timers or phone sounds. Live UI/persistence verification follows install.
