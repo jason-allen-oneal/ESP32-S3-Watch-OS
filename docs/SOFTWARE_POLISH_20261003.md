@@ -15,3 +15,9 @@ Owner requested all four follow-through areas. Home/face/ambient renderer functi
 Host tests passed including weekly alarm-deadline cases. 102 Android unit tests and lint passed. Replay ownership tests execute extracted production paths under AddressSanitizer/UBSan with controlled audio queue: repeat, duplicate replay prevention, immediate enqueue failure, cancellation, secure wipe. Firmware build passed. Native LVGL fixtures passed for 16 renderer families in normal/Large Text, with minimum 56px controls and bounded reply pagination. Large Text notification status/count overlap was corrected and visually rechecked. Fixtures use service stubs, not hardware acceptance. Deterministic release verification, signing and OTA deployment are tracked below when complete.
 
 These checks are not physical usability, listening or unplugged battery validation.
+
+### Release checkpoint
+
+Deterministic release gate passed commit `bf0e79e`, firmware **0.2.26 / secure 26**, image SHA-256 `34d4ae7788783e8864adc9578b9f6dfa0fdf5bb01d63f92478078c5dfab6e0c7`, 3,147,232 bytes. Home/face/ambient function bodies compare unchanged. All 102 Android tests and lint passed; original installed companion certificate matches the new APK.
+
+Installation attempt stopped before transfer because the phone disappeared from ADB. Paired OpenClaw phone remains connected, but advertises no file-transfer/install/mobile-UI commands; no remote install capability was assumed or enabled. Companion APK is built but **not yet installed**. Firmware **not yet installed**. Masked signing prompt opened on the existing desktop; passphrase and phone reconnection are needed. Watch delivery remains Bluetooth OTA, not a request for a watch cable. Evidence: `/home/rev/projects/hardware/nightglass-evidence/ota-diagnosis-20261003/`.
