@@ -765,7 +765,7 @@ void hardware_task(void *context) {
                            power_state == nightglass::core::PowerState::light_sleep;
         // Keep interactive diagnostics responsive. In standby the clock
         // extrapolates the RTC sample using esp_timer's monotonic clock.
-        const auto rtc_period_us = 1'000'000;
+        const auto rtc_period_us = blank ? 30'000'000 : 1'000'000;
         const auto battery_period_us = blank ? 15'000'000 : 2'000'000;
         if (now - last_rtc_us >= rtc_period_us) {
             publish_rtc();

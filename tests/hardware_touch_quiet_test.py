@@ -435,7 +435,7 @@ void check_no_request() {
         run_task();
         const auto elapsed_us = std::int64_t(450) * expected_ticks * tick_ms * 1000;
         const bool blank = state != nightglass::core::PowerState::active;
-        require(rtc_polls == 1 + elapsed_us / 1'000'000,
+        require(rtc_polls == 1 + elapsed_us / (blank ? 30'000'000 : 1'000'000),
                 "RTC standby/active cadence regression");
         require(battery_polls == 1 + elapsed_us / (blank ? 15'000'000 : 2'000'000),
                 "battery standby/active cadence regression");

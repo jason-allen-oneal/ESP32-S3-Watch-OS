@@ -28,6 +28,7 @@ ft3168_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-ft3168-test.XXXXXX")"
 premium_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-premium-test.XXXXXX")"
 trap 'rm -f "${raise_binary}" "${gyro_binary}" "${gesture_binary}" "${gesture_calibration_binary}" "${gesture_policy_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${voice_codec_binary}" "${voice_protocol_binary}" "${voice_state_binary}" "${update_transport_binary}" "${usb_update_protocol_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}" "${ft3168_binary}"' EXIT
 
+python3 "${project_dir}/tests/ui_refresh_efficiency_test.py"
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \

@@ -193,9 +193,26 @@ T next_value(T current, const T (&values)[N]) {
     return values[0];
 }
 
+// Avoid allocation, layout and invalidation when periodic data is unchanged.
+void set_label_if_changed(lv_obj_t *target, const char *text) {
+    if (!target) return;
+    const char *current = lv_label_get_text(target);
+    if (text && current && std::strcmp(current, text) == 0) return;
+    lv_label_set_text(target, text);
+}
+
+lv_obj_t *route_scroller(lv_obj_t *host) {
+    for (std::uint32_t i = 0; i < lv_obj_get_child_count(host); ++i) {
+        auto *child = lv_obj_get_child(host, i);
+        if (lv_obj_has_flag(child, LV_OBJ_FLAG_SCROLLABLE) &&
+            lv_obj_get_scroll_dir(child) == LV_DIR_VER) return child;
+    }
+    return nullptr;
+}
+
 void set_button_text(lv_obj_t *button, const char *text) {
     if (button && lv_obj_get_child_count(button) > 0) {
-        lv_label_set_text(lv_obj_get_child(button, 0), text);
+        set_label_if_changed(lv_obj_get_child(button, 0), text);
     }
 }
 
@@ -266,7 +283,7 @@ lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
         else if (font == &lv_font_montserrat_16 || font == &lv_font_montserrat_18)
             font = &lv_font_montserrat_20;
     }
-    lv_label_set_text(obj, text);
+    set_label_if_changed(obj, text);
     lv_obj_set_style_text_font(obj, font, 0);
     lv_obj_set_style_text_color(obj, lv_color_hex(chrome_color(color)), 0);
     return obj;
@@ -274,7 +291,7 @@ lv_obj_t *label(lv_obj_t *parent, const char *text, const lv_font_t *font,
 
 void set_state(lv_obj_t *target, const char *text, std::uint32_t color) {
     if (!target) return;
-    lv_label_set_text(target, text);
+    set_label_if_changed(target, text);
     lv_obj_set_style_text_color(target, lv_color_hex(color), 0);
 }
 
@@ -1147,7 +1164,7 @@ void Shell::time_format_callback(lv_event_t *event) {
     auto settings = nightglass::services::clock_service().snapshot().settings;
     settings.use_24_hour = !settings.use_24_hour;
     if (!nightglass::services::clock_service().update_clock_settings(settings)) {
-        lv_label_set_text(self->clock_preview_, "CLOCK QUEUE FULL");
+        set_label_if_changed(self->clock_preview_, "CLOCK QUEUE FULL");
     }
 }
 
@@ -1157,7 +1174,7 @@ void Shell::utc_offset_callback(lv_event_t *event) {
     settings.utc_offset_minutes = static_cast<std::int16_t>(settings.utc_offset_minutes + 30);
     if (settings.utc_offset_minutes > 14 * 60) settings.utc_offset_minutes = -12 * 60;
     if (!nightglass::services::clock_service().update_clock_settings(settings)) {
-        lv_label_set_text(self->clock_preview_, "CLOCK QUEUE FULL");
+        set_label_if_changed(self->clock_preview_, "CLOCK QUEUE FULL");
     }
 }
 
@@ -1166,7 +1183,7 @@ void Shell::dst_callback(lv_event_t *event) {
     auto settings = nightglass::services::clock_service().snapshot().settings;
     settings.daylight_saving = !settings.daylight_saving;
     if (!nightglass::services::clock_service().update_clock_settings(settings)) {
-        lv_label_set_text(self->clock_preview_, "CLOCK QUEUE FULL");
+        set_label_if_changed(self->clock_preview_, "CLOCK QUEUE FULL");
     }
 }
 
@@ -1356,35 +1373,35 @@ void Shell::countdown_duration_callback(lv_event_t *event) {
     constexpr std::uint32_t values[]{60, 300, 600, 900, 1800, 3600};
     if (!nightglass::services::clock_service().set_timer_duration(
             next_value(snapshot.timer_configured_seconds, values))) {
-        lv_label_set_text(self->countdown_time_, "QUEUE FULL");
+        set_label_if_changed(self->countdown_time_, "QUEUE FULL");
     }
 }
 
 void Shell::countdown_toggle_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     if (!nightglass::services::clock_service().toggle_timer()) {
-        lv_label_set_text(self->countdown_time_, "QUEUE FULL");
+        set_label_if_changed(self->countdown_time_, "QUEUE FULL");
     }
 }
 
 void Shell::countdown_reset_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     if (!nightglass::services::clock_service().reset_timer()) {
-        lv_label_set_text(self->countdown_time_, "QUEUE FULL");
+        set_label_if_changed(self->countdown_time_, "QUEUE FULL");
     }
 }
 
 void Shell::stopwatch_toggle_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     if (!nightglass::services::clock_service().toggle_stopwatch()) {
-        lv_label_set_text(self->stopwatch_time_, "QUEUE FULL");
+        set_label_if_changed(self->stopwatch_time_, "QUEUE FULL");
     }
 }
 
 void Shell::stopwatch_reset_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     if (!nightglass::services::clock_service().reset_stopwatch()) {
-        lv_label_set_text(self->stopwatch_time_, "QUEUE FULL");
+        set_label_if_changed(self->stopwatch_time_, "QUEUE FULL");
     }
 }
 
@@ -1398,10 +1415,10 @@ void Shell::audio_play_callback(lv_event_t *event) {
     const auto status = nightglass::services::audio_service().request_test_tone();
     if (status.is_ok()) {
         set_state(self->audio_state_, "QUEUED", kAmber);
-        lv_label_set_text(self->audio_detail_, "Speaker test queued off the UI task");
+        set_label_if_changed(self->audio_detail_, "Speaker test queued off the UI task");
     } else {
         set_state(self->audio_state_, "FAILED", kRed);
-        lv_label_set_text(self->audio_detail_, status.detail);
+        set_label_if_changed(self->audio_detail_, status.detail);
     }
 }
 
@@ -1410,11 +1427,11 @@ void Shell::audio_capture_callback(lv_event_t *event) {
     const auto status = nightglass::services::audio_service().request_microphone_sample();
     if (!status.is_ok()) {
         set_state(self->audio_state_, "FAILED", kRed);
-        lv_label_set_text(self->audio_detail_, status.detail);
+        set_label_if_changed(self->audio_detail_, status.detail);
         return;
     }
     set_state(self->audio_state_, "QUEUED", kAmber);
-    lv_label_set_text(self->audio_detail_, "Microphone sample queued off the UI task");
+    set_label_if_changed(self->audio_detail_, "Microphone sample queued off the UI task");
 }
 
 void Shell::audio_volume_callback(lv_event_t *event) {
@@ -1426,7 +1443,7 @@ void Shell::audio_volume_callback(lv_event_t *event) {
     const auto status = nightglass::services::audio_service().update_settings(settings);
     if (!status.is_ok()) {
         set_state(self->audio_state_, "SAVE FAILED", kRed);
-        lv_label_set_text(self->audio_detail_, status.detail);
+        set_label_if_changed(self->audio_detail_, status.detail);
         return;
     }
     self->refresh_audio();
@@ -1439,7 +1456,7 @@ void Shell::audio_mute_callback(lv_event_t *event) {
     const auto status = nightglass::services::audio_service().update_settings(settings);
     if (!status.is_ok()) {
         set_state(self->audio_state_, "SAVE FAILED", kRed);
-        lv_label_set_text(self->audio_detail_, status.detail);
+        set_label_if_changed(self->audio_detail_, status.detail);
         return;
     }
     self->refresh_audio();
@@ -1452,7 +1469,7 @@ void Shell::audio_dnd_callback(lv_event_t *event) {
     const auto status = nightglass::services::audio_service().update_settings(settings);
     if (!status.is_ok()) {
         set_state(self->audio_state_, "SAVE FAILED", kRed);
-        lv_label_set_text(self->audio_detail_, status.detail);
+        set_label_if_changed(self->audio_detail_, status.detail);
         return;
     }
     self->refresh_audio();
@@ -1652,7 +1669,7 @@ void Shell::openclaw_press_callback(lv_event_t *event) {
     const auto status = nightglass::services::voice_service().begin_capture();
     if (!status.is_ok() && self->openclaw_detail_) {
         set_state(self->openclaw_state_, "UNAVAILABLE", kRed);
-        lv_label_set_text(self->openclaw_detail_, status.detail);
+        set_label_if_changed(self->openclaw_detail_, status.detail);
     }
 }
 
@@ -1682,7 +1699,7 @@ void Shell::openclaw_duration_callback(lv_event_t *event) {
     const auto status = nightglass::services::voice_service().update_settings(settings);
     if (!status.is_ok() && self->openclaw_detail_) {
         set_state(self->openclaw_state_, "BUSY", kAmber);
-        lv_label_set_text(self->openclaw_detail_, status.detail);
+        set_label_if_changed(self->openclaw_detail_, status.detail);
         return;
     }
     self->refresh_openclaw();
@@ -1709,7 +1726,7 @@ void Shell::openclaw_spoken_callback(lv_event_t *event) {
         !snapshot.spoken_replies);
     if (!status.is_ok() && self->openclaw_detail_) {
         set_state(self->openclaw_state_, "BUSY", kAmber);
-        lv_label_set_text(self->openclaw_detail_, status.detail);
+        set_label_if_changed(self->openclaw_detail_, status.detail);
         return;
     }
     self->refresh_openclaw();
@@ -2017,18 +2034,7 @@ void Shell::render_route() {
             break;
     }
     install_touch_callbacks(content_host_);
-    if (!(nightglass::services::premium_service().profile().flags &
-          nightglass::services::kPremiumReduceMotion) && !ambient_visible_) {
-        lv_anim_t transition;
-        lv_anim_init(&transition);
-        lv_anim_set_var(&transition, content_host_);
-        lv_anim_set_values(&transition, 190, 255);
-        lv_anim_set_duration(&transition, 120);
-        lv_anim_set_exec_cb(&transition, [](void *object, std::int32_t opacity) {
-            lv_obj_set_style_opa(static_cast<lv_obj_t *>(object), opacity, 0);
-        });
-        lv_anim_start(&transition);
-    }
+    // Immediate route presentation avoids full-content opacity redraws.
     ESP_LOGI(kTag, "UI route build=%lldus route=%u", esp_timer_get_time() - render_started,
              static_cast<unsigned>(navigation_.route));
 }
@@ -3039,7 +3045,7 @@ void Shell::refresh_watchface_settings() {
     if (!watchface_name_) return;
     const auto &pack = nightglass::services::watchface_service().selected();
     const auto profile = nightglass::services::premium_service().profile();
-    lv_label_set_text(watchface_name_, profile.face == 2 ? profile.name.data() : pack.name);
+    set_label_if_changed(watchface_name_, profile.face == 2 ? profile.name.data() : pack.name);
 }
 
 void Shell::render_power_settings() {
@@ -3370,10 +3376,10 @@ void Shell::refresh_context_deck() {
     auto set_card = [](const ContextCardWidgets &card, const char *title,
                        const char *detail, std::uint32_t title_color = kPrimary) {
         if (card.title) {
-            lv_label_set_text(card.title, title);
+            set_label_if_changed(card.title, title);
             lv_obj_set_style_text_color(card.title, lv_color_hex(chrome_color(title_color)), 0);
         }
-        if (card.detail) lv_label_set_text(card.detail, detail);
+        if (card.detail) set_label_if_changed(card.detail, detail);
     };
 
     const auto connectivity = nightglass::services::connectivity_service().snapshot();
@@ -3567,7 +3573,7 @@ void Shell::refresh_openclaw() {
             break;
     }
     set_state(openclaw_state_, state, color);
-    lv_label_set_text(openclaw_detail_, detail);
+    set_label_if_changed(openclaw_detail_, detail);
     const auto response_length = static_cast<std::size_t>(snapshot.response_bytes);
     if (response_length > 0) {
         const bool changed = std::strlen(openclaw_response_cache_.data()) != response_length ||
@@ -3621,17 +3627,17 @@ void Shell::refresh_openclaw() {
                 openclaw_response_cache_.data(), suggestion.text_length, openclaw_response_page_,
                 page_text, sizeof(page_text));
         }
-        lv_label_set_text(openclaw_response_, page_text);
+        set_label_if_changed(openclaw_response_, page_text);
     } else {
         openclaw_response_page_count_ = 1;
-        lv_label_set_text(openclaw_response_, "Your response will appear here.");
+        set_label_if_changed(openclaw_response_, "Your response will appear here.");
     }
     if (openclaw_page_) {
         char page[32]{};
         std::snprintf(page, sizeof(page), "PAGE %u / %u",
                       static_cast<unsigned>(openclaw_response_page_ + 1U),
                       static_cast<unsigned>(openclaw_response_page_count_));
-        lv_label_set_text(openclaw_page_, page);
+        set_label_if_changed(openclaw_page_, page);
     }
     if (openclaw_previous_) {
         if (openclaw_response_page_ == 0) lv_obj_add_state(openclaw_previous_, LV_STATE_DISABLED);
@@ -3659,7 +3665,15 @@ void Shell::refresh_openclaw() {
 
 void Shell::refresh_notifications() {
     const auto snapshot = nightglass::services::connectivity_service().snapshot();
-    if (snapshot.notification_sequence != notification_sequence_) render_route();
+    if (snapshot.notification_sequence != notification_sequence_) {
+        auto *scroller = route_scroller(content_host_);
+        const auto offset = scroller ? lv_obj_get_scroll_y(scroller) : 0;
+        render_route();
+        if (auto *replacement = route_scroller(content_host_)) {
+            lv_obj_update_layout(replacement);
+            lv_obj_scroll_to_y(replacement, offset, LV_ANIM_OFF);
+        }
+    }
 }
 
 void Shell::refresh_activity() {
@@ -3667,7 +3681,7 @@ void Shell::refresh_activity() {
     const auto snapshot = nightglass::services::activity_service().snapshot();
     char text[96]{};
     std::snprintf(text, sizeof(text), "%lu STEPS", static_cast<unsigned long>(snapshot.steps_today));
-    lv_label_set_text(activity_steps_, text);
+    set_label_if_changed(activity_steps_, text);
     char distance[32]{};
     nightglass::services::format_activity_distance(
         distance, sizeof(distance), snapshot.distance_mm, snapshot.settings.units);
@@ -3678,7 +3692,7 @@ void Shell::refresh_activity() {
                       : snapshot.readiness == nightglass::services::ActivityReadiness::warming_up
                             ? "CALIBRATING"
                             : "UNAVAILABLE");
-    lv_label_set_text(activity_detail_, text);
+    set_label_if_changed(activity_detail_, text);
     nightglass::services::format_step_length(
         text, sizeof(text), snapshot.settings.step_length_mm, snapshot.settings.units);
     set_button_text(activity_step_length_, text);
@@ -3797,7 +3811,7 @@ void Shell::refresh_gestures() {
                 set_button_enabled(gesture_calibration_, true);
             }
         }
-        lv_label_set_text(gesture_detail_, detail);
+        set_label_if_changed(gesture_detail_, detail);
         set_button_text(gesture_calibration_, text);
     } else {
         lv_obj_add_flag(gesture_calibration_cancel_, LV_OBJ_FLAG_HIDDEN);
@@ -3851,7 +3865,7 @@ void Shell::refresh_gestures() {
                           "Records three examples of each gesture, then checks for false triggers.");
             set_button_text(gesture_calibration_, "START GUIDED CALIBRATION");
         }
-        lv_label_set_text(gesture_detail_, detail);
+        set_label_if_changed(gesture_detail_, detail);
     }
     set_button_text(gesture_raise_, snapshot.settings.raise_to_wake
                                         ? "RAISE TO WAKE  ON"
@@ -3902,7 +3916,7 @@ void Shell::refresh_weather() {
                       snapshot.credentials_configured ? "DIRECT FALLBACK READY"
                                                       : "PHONE PROXY PREFERRED");
     }
-    lv_label_set_text(weather_detail_, text);
+    set_label_if_changed(weather_detail_, text);
     std::snprintf(text, sizeof(text), "WEATHER  %s", snapshot.settings.enabled ? "ON" : "OFF");
     set_button_text(weather_toggle_, text);
     set_button_text(weather_units_, snapshot.settings.units == nightglass::services::WeatherUnits::metric
@@ -3935,7 +3949,7 @@ void Shell::refresh_connectivity() {
         std::snprintf(text, sizeof(text), "%s | %u notifications", snapshot.detail.data(),
                       snapshot.notification_count);
     }
-    lv_label_set_text(connectivity_detail_, text);
+    set_label_if_changed(connectivity_detail_, text);
     set_button_text(connectivity_toggle_, snapshot.settings.enabled ? "BLUETOOTH  ON"
                                                                     : "BLUETOOTH  OFF");
     if (phone_battery_) {
@@ -3947,7 +3961,7 @@ void Shell::refresh_connectivity() {
         } else {
             std::snprintf(text, sizeof(text), "PHONE BATTERY  --");
         }
-        lv_label_set_text(phone_battery_, text);
+        set_label_if_changed(phone_battery_, text);
     }
     if (phone_call_) {
         std::snprintf(text, sizeof(text), "%s%s%s",
@@ -3956,7 +3970,7 @@ void Shell::refresh_connectivity() {
                       snapshot.call.ringing || snapshot.call.active
                           ? snapshot.call.label.data() : "",
                       snapshot.call.muted ? " | MUTED" : "");
-        lv_label_set_text(phone_call_, text);
+        set_label_if_changed(phone_call_, text);
     }
     for (std::size_t index = 0; index < agenda_items_.size(); ++index) {
         if (!agenda_items_[index]) continue;
@@ -3983,9 +3997,9 @@ void Shell::refresh_connectivity() {
                               static_cast<unsigned long>(duration_minutes),
                               entry.title.data());
             }
-            lv_label_set_text(agenda_items_[index], text);
+            set_label_if_changed(agenda_items_[index], text);
         } else {
-            lv_label_set_text(agenda_items_[index], index == 0 ? "No upcoming events" : "");
+            set_label_if_changed(agenda_items_[index], index == 0 ? "No upcoming events" : "");
         }
     }
 }
@@ -4002,10 +4016,10 @@ void Shell::refresh_media() {
                                                                      : "NO MEDIA SESSION",
               connected && snapshot.media.available ? kGreen : kAmber);
     set_button_text(media_play_, snapshot.media.playing ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
-    lv_label_set_text(media_title_, snapshot.media.available && snapshot.media.title[0]
+    set_label_if_changed(media_title_, snapshot.media.available && snapshot.media.title[0]
                                          ? snapshot.media.title.data()
                                          : "Nothing playing");
-    lv_label_set_text(media_artist_, snapshot.media.available
+    set_label_if_changed(media_artist_, snapshot.media.available
                                           ? snapshot.media.artist.data()
                                           : "Start music on the phone");
     if (media_progress_) {
@@ -4028,7 +4042,7 @@ void Shell::refresh_media() {
         format_media_time(duration, sizeof(duration), snapshot.media.duration_ms);
         std::snprintf(combined, sizeof(combined), "%s / %s%s", position, duration,
                       snapshot.media.seekable ? " | SEEK READY" : "");
-        lv_label_set_text(media_time_, combined);
+        set_label_if_changed(media_time_, combined);
     }
 }
 
@@ -4120,7 +4134,7 @@ void Shell::refresh_home() {
             const auto length = std::strlen(buffer);
             std::snprintf(buffer + length, sizeof(buffer) - length, " %s", period);
         }
-        lv_label_set_text(home_time_, buffer);
+        set_label_if_changed(home_time_, buffer);
         if (full_background) {
             static constexpr const char *days[]{"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY",
                                                 "THURSDAY", "FRIDAY", "SATURDAY"};
@@ -4128,7 +4142,7 @@ void Shell::refresh_home() {
                                                   "JUN", "JUL", "AUG", "SEP", "OCT", "NOV",
                                                   "DEC"};
             const auto day_index = static_cast<unsigned>(clock.local_time.weekday % 7);
-            lv_label_set_text(home_day_, days[day_index]);
+            set_label_if_changed(home_day_, days[day_index]);
             const auto month_index = clock.local_time.month <= 12 ? clock.local_time.month : 0;
             std::snprintf(buffer, sizeof(buffer), "%s %02u", months[month_index],
                           clock.local_time.day);
@@ -4137,7 +4151,7 @@ void Shell::refresh_home() {
                           static_cast<long>(clock.local_time.year), clock.local_time.month,
                           clock.local_time.day);
         }
-        lv_label_set_text(home_date_, buffer);
+        set_label_if_changed(home_date_, buffer);
         const int effective_offset = clock.settings.utc_offset_minutes +
                                      (clock.settings.daylight_saving ? 60 : 0);
         const int offset_abs = effective_offset < 0 ? -effective_offset : effective_offset;
@@ -4151,9 +4165,9 @@ void Shell::refresh_home() {
             set_state(home_time_state_, buffer, kGreen);
         }
     } else {
-        lv_label_set_text(home_time_, "--:--");
-        lv_label_set_text(home_date_, full_background ? "NO DATE" : "DATE UNAVAILABLE");
-        if (home_day_) lv_label_set_text(home_day_, "NO DAY");
+        set_label_if_changed(home_time_, "--:--");
+        set_label_if_changed(home_date_, full_background ? "NO DATE" : "DATE UNAVAILABLE");
+        if (home_day_) set_label_if_changed(home_day_, "NO DAY");
         set_state(home_time_state_, full_background ? "NO TIME" : "TIME UNAVAILABLE", kRed);
     }
 
@@ -4167,7 +4181,7 @@ void Shell::refresh_home() {
             std::snprintf(buffer, sizeof(buffer), "%s%u%%", battery.charging ? "CHG " : "",
                           battery.percent);
         }
-        lv_label_set_text(home_battery_, buffer);
+        set_label_if_changed(home_battery_, buffer);
         if (battery.voltage_valid) {
             if (full_background) {
                 std::snprintf(buffer, sizeof(buffer), "%u.%02uV | %s",
@@ -4180,10 +4194,10 @@ void Shell::refresh_home() {
                               battery.charging ? "Charging" : battery.discharging ? "Battery"
                                                                                  : "State partial");
             }
-            if (home_battery_detail_) lv_label_set_text(home_battery_detail_, buffer);
+            if (home_battery_detail_) set_label_if_changed(home_battery_detail_, buffer);
         } else {
             if (home_battery_detail_) {
-                lv_label_set_text(home_battery_detail_,
+                set_label_if_changed(home_battery_detail_,
                                   full_background ? "VOLTAGE N/A"
                                   : battery.charging ? "Charging | voltage unavailable"
                                                      : "Voltage unavailable");
@@ -4198,13 +4212,13 @@ void Shell::refresh_home() {
     } else if (battery.pmic_present && !battery.battery_present) {
         set_state(home_battery_, full_background ? "N/A" : "NO BATTERY", kAmber);
         if (home_battery_detail_) {
-            lv_label_set_text(home_battery_detail_,
+            set_label_if_changed(home_battery_detail_,
                               full_background ? "NO BATTERY" : "Battery not detected");
         }
     } else {
         set_state(home_battery_, full_background ? "N/A" : "BATTERY --", kRed);
         if (home_battery_detail_) {
-            lv_label_set_text(home_battery_detail_,
+            set_label_if_changed(home_battery_detail_,
                               full_background ? "NO DATA" : "Battery data unavailable");
         }
     }
@@ -4223,9 +4237,9 @@ void Shell::refresh_home() {
         if (activity.readiness == nightglass::services::ActivityReadiness::ready) {
             nightglass::services::format_activity_distance(
                 buffer, sizeof(buffer), activity.distance_mm, activity.settings.units);
-            lv_label_set_text(home_distance_, buffer);
+            set_label_if_changed(home_distance_, buffer);
         } else {
-            lv_label_set_text(home_distance_, "CALIBRATING");
+            set_label_if_changed(home_distance_, "CALIBRATING");
         }
     }
     const auto weather = nightglass::services::network_weather_service().snapshot();
@@ -4322,7 +4336,7 @@ void Shell::refresh_home() {
         } else {
             std::snprintf(buffer, sizeof(buffer), "OFF");
         }
-        lv_label_set_text(home_alarm_, buffer);
+        set_label_if_changed(home_alarm_, buffer);
     }
     if (home_timer_) {
         if (clock.timer_ringing) {
@@ -4339,7 +4353,7 @@ void Shell::refresh_home() {
         } else {
             std::snprintf(buffer, sizeof(buffer), "IDLE");
         }
-        lv_label_set_text(home_timer_, buffer);
+        set_label_if_changed(home_timer_, buffer);
     }
     if (home_aod_active_) {
         constexpr std::uint32_t kAodPrimary = 0x303832;
@@ -4386,10 +4400,10 @@ void Shell::refresh_clock_settings() {
                       buffer, period[0] ? " " : "", period,
                       static_cast<long>(snapshot.local_time.year), snapshot.local_time.month,
                       snapshot.local_time.day);
-        lv_label_set_text(clock_preview_, preview);
+        set_label_if_changed(clock_preview_, preview);
         lv_obj_set_style_text_align(clock_preview_, LV_TEXT_ALIGN_CENTER, 0);
     } else if (clock_preview_) {
-        lv_label_set_text(clock_preview_, "TIME UNAVAILABLE");
+        set_label_if_changed(clock_preview_, "TIME UNAVAILABLE");
     }
 }
 
@@ -4405,7 +4419,7 @@ void Shell::refresh_alarm() {
     format_time(buffer, sizeof(buffer), alarm_time, snapshot.settings.use_24_hour, &period);
     char display[64]{};
     std::snprintf(display, sizeof(display), "%s%s%s", buffer, period[0] ? " " : "", period);
-    lv_label_set_text(alarm_time_, display);
+    set_label_if_changed(alarm_time_, display);
     const bool selected_ringing = snapshot.alarm_ringing &&
                                   snapshot.ringing_alarm_index == alarm_slot_index_;
     set_state(alarm_state_, selected_ringing ? "RINGING" : alarm.enabled ? "ON" : "OFF",
@@ -4451,7 +4465,7 @@ void Shell::refresh_countdown() {
         format_duration(buffer, sizeof(buffer),
                         static_cast<std::uint64_t>(snapshot.timer_remaining_seconds) * 1000, false);
     }
-    lv_label_set_text(countdown_time_, buffer);
+    set_label_if_changed(countdown_time_, buffer);
     lv_obj_set_style_text_font(countdown_time_, snapshot.timer_remaining_seconds < 3600
                                ? &lv_font_montserrat_48 : &lv_font_montserrat_32, 0);
     if (countdown_arc_) lv_arc_set_value(countdown_arc_, snapshot.timer_configured_seconds
@@ -4469,7 +4483,7 @@ void Shell::refresh_stopwatch() {
     const auto snapshot = nightglass::services::clock_service().snapshot();
     char buffer[64]{};
     format_duration(buffer, sizeof(buffer), snapshot.stopwatch_elapsed_ms, true);
-    lv_label_set_text(stopwatch_time_, buffer);
+    set_label_if_changed(stopwatch_time_, buffer);
     set_button_text(stopwatch_toggle_, snapshot.stopwatch_running ? "PAUSE" : "START");
 }
 
@@ -4487,19 +4501,19 @@ void Shell::refresh_audio() {
                                                         : "DO NOT DISTURB  OFF");
     if (!snapshot.enabled) {
         set_state(audio_state_, "DISABLED", kAmber);
-        lv_label_set_text(audio_detail_, "Audio is disabled in this build");
+        set_label_if_changed(audio_detail_, "Audio is disabled in this build");
         return;
     }
     if (snapshot.hardware_failed) {
         set_state(audio_state_, "UNAVAILABLE", kRed);
-        lv_label_set_text(audio_detail_, snapshot.amplifier_disabled_verified
+        set_label_if_changed(audio_detail_, snapshot.amplifier_disabled_verified
                                              ? "Audio cleanup failed; restart required"
                                              : "PA low was not verified; audio locked");
         return;
     }
     if (snapshot.operation_pending) {
         set_state(audio_state_, "RUNNING", kAmber);
-        lv_label_set_text(audio_detail_,
+        set_label_if_changed(audio_detail_,
                           snapshot.operation == nightglass::services::AudioOperation::capture
                               ? "Microphone sample in progress"
                               : "Speaker test in progress");
@@ -4508,7 +4522,7 @@ void Shell::refresh_audio() {
     if (snapshot.operation != nightglass::services::AudioOperation::none &&
         !snapshot.last_operation_ok) {
         set_state(audio_state_, "FAILED", kRed);
-        lv_label_set_text(audio_detail_,
+        set_label_if_changed(audio_detail_,
                           snapshot.operation == nightglass::services::AudioOperation::capture
                               ? "Microphone capture failed"
                               : "Speaker test failed; output was shut down");
@@ -4516,7 +4530,7 @@ void Shell::refresh_audio() {
     }
     if (!snapshot.hardware_initialized) {
         set_state(audio_state_, "READY TO TEST", kAmber);
-        lv_label_set_text(audio_detail_, "Codec opens only for an explicit test");
+        set_label_if_changed(audio_detail_, "Codec opens only for an explicit test");
         return;
     }
     char buffer[160]{};
@@ -4527,7 +4541,7 @@ void Shell::refresh_audio() {
                       static_cast<unsigned long>(snapshot.last_capture_rms),
                       static_cast<unsigned long>(snapshot.last_transfer_bytes));
         set_state(audio_state_, "CAPTURED", kGreen);
-        lv_label_set_text(audio_level_, capture_buffer);
+        set_label_if_changed(audio_level_, capture_buffer);
         std::snprintf(buffer, sizeof(buffer),
                       "%s | 16 kHz mono\nRX %lu | TX %lu frames\nErrors %lu/%lu\nPA OFF",
                       capture_buffer,
@@ -4557,7 +4571,7 @@ void Shell::refresh_audio() {
                       static_cast<unsigned long>(snapshot.read_errors),
                       static_cast<unsigned long>(snapshot.write_errors));
     }
-    lv_label_set_text(audio_detail_, buffer);
+    set_label_if_changed(audio_detail_, buffer);
 }
 
 void Shell::refresh_quick_settings() {
@@ -4725,10 +4739,10 @@ void Shell::refresh_diagnostics() {
                   rtc_age > 2'000'000 ? kAmber : kGreen);
         std::snprintf(buffer, sizeof(buffer), "%02u:%02u:%02u\n%04u-%02u-%02u",
                       rtc.hour, rtc.minute, rtc.second, rtc.year, rtc.month, rtc.day);
-        lv_label_set_text(diagnostics_rtc_detail_, buffer);
+        set_label_if_changed(diagnostics_rtc_detail_, buffer);
     } else {
         set_state(diagnostics_rtc_state_, "NO DATA", kRed);
-        lv_label_set_text(diagnostics_rtc_detail_, rtc.present ? "RTC value invalid or stale"
+        set_label_if_changed(diagnostics_rtc_detail_, rtc.present ? "RTC value invalid or stale"
                                                                : "RTC read failed");
     }
 
@@ -4736,10 +4750,10 @@ void Shell::refresh_diagnostics() {
     const auto battery_age = now - battery.sampled_at_us;
     if (!battery.pmic_present || battery_age > 10'000'000) {
         set_state(diagnostics_battery_state_, "NO DATA", kRed);
-        lv_label_set_text(diagnostics_battery_detail_, "AXP2101 telemetry unavailable");
+        set_label_if_changed(diagnostics_battery_detail_, "AXP2101 telemetry unavailable");
     } else if (!battery.battery_present) {
         set_state(diagnostics_battery_state_, "NO BATTERY", kAmber);
-        lv_label_set_text(diagnostics_battery_detail_, "PMIC live | battery not detected");
+        set_label_if_changed(diagnostics_battery_detail_, "PMIC live | battery not detected");
     } else {
         set_state(diagnostics_battery_state_, battery_age > 5'000'000 ? "STALE" : "LIVE",
                   battery_age > 5'000'000 ? kAmber : kGreen);
@@ -4752,14 +4766,14 @@ void Shell::refresh_diagnostics() {
         } else {
             std::snprintf(buffer, sizeof(buffer), "Battery detected\n%s | metrics partial", charge);
         }
-        lv_label_set_text(diagnostics_battery_detail_, buffer);
+        set_label_if_changed(diagnostics_battery_detail_, buffer);
     }
 
     const auto &motion = snapshot.motion;
     const auto motion_age = now - motion.sampled_at_us;
     if (!motion.present || !motion.valid || motion_age > 2'000'000) {
         set_state(diagnostics_motion_state_, "NO DATA", kRed);
-        lv_label_set_text(diagnostics_motion_detail_, "QMI8658 sample unavailable");
+        set_label_if_changed(diagnostics_motion_detail_, "QMI8658 sample unavailable");
     } else if (!motion.gyro_calibrated) {
         set_state(diagnostics_motion_state_, "CALIBRATING", kAmber);
         const unsigned progress = motion.gyro_calibration_required == 0
@@ -4771,7 +4785,7 @@ void Shell::refresh_diagnostics() {
                       progress, motion.gyro_calibration_samples,
                       motion.gyro_calibration_required,
                       static_cast<unsigned long>(motion.gyro_calibration_restarts));
-        lv_label_set_text(diagnostics_motion_detail_, buffer);
+        set_label_if_changed(diagnostics_motion_detail_, buffer);
     } else {
         set_state(diagnostics_motion_state_, motion_age > 500'000 ? "STALE" : "LIVE",
                   motion_age > 500'000 ? kAmber : kGreen);
@@ -4803,25 +4817,25 @@ void Shell::refresh_diagnostics() {
                       "%s | bias %s %s %s\nACC %s  %s  %s g\nGYR %s  %s  %s d/s",
                       motion.moving ? "Moving" : "Still", bias_x, bias_y, bias_z,
                       accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
-        lv_label_set_text(diagnostics_motion_detail_, buffer);
+        set_label_if_changed(diagnostics_motion_detail_, buffer);
     }
 
     const auto &haptic = snapshot.haptic;
     if (!haptic.actuator_present) {
         set_state(diagnostics_haptic_state_, "DEFERRED", kAmber);
         if (haptic.supply_state_known && !haptic.supply_enabled) {
-            lv_label_set_text(diagnostics_haptic_detail_,
+            set_label_if_changed(diagnostics_haptic_detail_,
                               "No fitted actuator detected\nALDO3 verified off");
         } else {
-            lv_label_set_text(diagnostics_haptic_detail_,
+            set_label_if_changed(diagnostics_haptic_detail_,
                               "No fitted actuator detected\nALDO3 state unverified");
         }
     } else if (haptic.ready) {
         set_state(diagnostics_haptic_state_, "READY", kGreen);
-        lv_label_set_text(diagnostics_haptic_detail_, "Actuator service available");
+        set_label_if_changed(diagnostics_haptic_detail_, "Actuator service available");
     } else {
         set_state(diagnostics_haptic_state_, "UNAVAILABLE", kRed);
-        lv_label_set_text(diagnostics_haptic_detail_, "Actuator present | service unavailable");
+        set_label_if_changed(diagnostics_haptic_detail_, "Actuator present | service unavailable");
     }
 }
 
@@ -5042,7 +5056,7 @@ void Shell::refresh_ambient() {
         std::snprintf(date, sizeof(date), "%04ld-%02u-%02u", static_cast<long>(clock.local_time.year),
                       clock.local_time.month, clock.local_time.day);
     }
-    lv_label_set_text(ambient_time_, time); lv_label_set_text(ambient_date_, date);
+    set_label_if_changed(ambient_time_, time); set_label_if_changed(ambient_date_, date);
     const int x = nightglass::services::premium_aod_shift(minute);
     const int y = nightglass::services::premium_aod_shift(minute / 9);
     lv_obj_align(ambient_time_, LV_ALIGN_CENTER, x, y - 22);
@@ -5100,12 +5114,12 @@ void Shell::refresh_personal_home() {
         format_time(text, sizeof(text), clock.local_time, clock.settings.use_24_hour, &period);
         if (period[0]) { const auto end = std::strlen(text); std::snprintf(text + end, sizeof(text) - end, " %s", period); }
     }
-    lv_label_set_text(home_time_, text);
+    set_label_if_changed(home_time_, text);
     if (clock.time_valid)
         std::snprintf(text, sizeof(text), "%04ld-%02u-%02u", static_cast<long>(clock.local_time.year),
                       clock.local_time.month, clock.local_time.day);
     else std::snprintf(text, sizeof(text), "Time unavailable");
-    lv_label_set_text(home_date_, text);
+    set_label_if_changed(home_date_, text);
     for (unsigned i = 0; i < 3; ++i) {
         switch (p.complications[i]) {
             case 0:
@@ -5137,7 +5151,7 @@ void Shell::refresh_personal_home() {
             default: std::snprintf(text, sizeof(text), "%s", connection.state ==
                 nightglass::services::CompanionLinkState::connected_encrypted ? "Connected" : "Offline"); break;
         }
-        if (personal_values_[i]) lv_label_set_text(personal_values_[i], text);
+        if (personal_values_[i]) set_label_if_changed(personal_values_[i], text);
     }
 }
 
