@@ -10,3 +10,20 @@ Implements the approved non-Home direction in real LVGL/Android code. All Home/f
 - Companion Watch page adds direct appearance/complication/glance-order entries into existing customization sections. Draft/apply, confirmed state, imports/backups and actual native preview remain. No invented favorites editor or replacement face.
 
 Host checks passed. Cached Java21/Gradle8.9 Android assemble, tests and lint passed. Native LVGL off-device fixtures cover13renderer families in normal/Large Text with minimum56pixelbuttons and font pagination; fixtures stub service values/callbacks and are not physical acceptance. Firmware release/signing/install acceptance and phone installation to be recorded separately.
+
+## Verified outcome / remaining installation
+
+Firmware release gate passed sourcee16d542, candidate0.2.25 secure25, image
+3a2dde13c8bc8b919e53586f12ccaf7e86a2eb4c15d7c85715463a702a1503a5.
+Protected signer and independent signed-package verification passed.
+USB installer exited1 before opening a port: watch by-id symlink absent;
+only Samsung phone remained attached. No firmware transfer started.
+The supported phone package picker did not complete an alternate transfer.
+Watch remains on its previous firmware until cable connection/install is verified.
+
+Companion palette follow-up6c3f37e built with99tests, zero failures/errors/skips,
+and lint passed. Installed in place with matching certificate, no data clear.
+Visually checked Watch tab black/neutral/lime styling and new entries.
+Glance order shortcut was exercised and opened the actual editor.
+No appearance Apply command, face/profile reset or Gateway configuration edit.
+Evidence: nightglass-evidence/everyday-ui-20261003 outside repository.
