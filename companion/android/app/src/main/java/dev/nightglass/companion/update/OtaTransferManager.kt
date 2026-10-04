@@ -15,7 +15,7 @@ class OtaTransferManager(
     private val report: (Progress) -> Unit,
 ) {
     data class Progress(val active: Boolean, val complete: Boolean, val percent: Int,
-                        val detail: String)
+                        val detail: String, val targetVersion: String? = null)
 
     private var selected: PreparedOtaPackage? = null
     private var image: InputStream? = null
@@ -26,20 +26,29 @@ class OtaTransferManager(
     private var timeout: ScheduledFuture<*>? = null
     private var ackGeneration = 0
     private var retryCount = 0
+    private var targetVersion: String? = null
+    private var rejection: Pair<ULong, String>? = null
     private var lastPercent = -1
 
     @Synchronized fun active(): Boolean = selected != null || processing || aborting
 
+    fun onFirmwareInfo(info: NightglassProtocol.FirmwareInfo) {
+        executor.execute { synchronized(this) {
+            if (info.result != 0 && info.detail.isNotBlank()) rejection = info.session to info.detail
+        } }
+    }
     @Synchronized fun start(uris: List<android.net.Uri>) {
         if (processing || selected != null) {
             emit(true, false, maxOf(lastPercent, 0), "An update is already active")
             return
         }
         processing = true
+        targetVersion = null; rejection = null
         executor.execute {
             val result = runCatching { OtaPackageLoader.load(resolver, uris) }
             synchronized(this) { processing = false; selected = result.getOrNull() }
             val pkg = result.getOrNull()
+            targetVersion = pkg?.manifest?.appVersion
             if (pkg == null) {
                 fail("Update package rejected: ${result.exceptionOrNull()?.message ?: "invalid package"}")
             } else if (negotiatedPayload() < 244) {
@@ -101,7 +110,8 @@ class OtaTransferManager(
                 emit(true, false, maxOf(lastPercent, 0), "Clearing prior watch update session")
                 return sendAndAwait(NightglassProtocol.otaAbort(status.session))
             }
-            if (status.result != 0) return fail("Watch rejected update operation (${status.result})")
+            if (status.result != 0) return fail(rejection?.takeIf { it.first == status.session }?.second
+                ?.let { "Update rejected: $it" } ?: "Watch rejected update operation (${status.result})")
             if (aborting) {
                 if (status.state == 1) {
                     closeImage(); selected = null; aborting = false
@@ -207,7 +217,7 @@ class OtaTransferManager(
     private fun emit(active: Boolean, complete: Boolean, percent: Int, detail: String) {
         if (percent == lastPercent && detail == "Transferring signed firmware") return
         lastPercent = percent
-        report(Progress(active, complete, percent, detail))
+        report(Progress(active, complete, percent, detail, targetVersion))
     }
     private fun closeImage() { image?.close(); image = null; imageOffset = 0 }
 }

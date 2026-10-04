@@ -155,10 +155,23 @@ struct VoicePlaybackContext {
     std::int64_t stream_deadline_us{0};
 };
 VoicePlaybackContext playback_context{};
+std::uint8_t *replay_buffer{};
+std::size_t replay_bytes{};
 
 void secure_wipe(void *memory, std::size_t length) {
     auto *bytes = static_cast<volatile std::uint8_t *>(memory);
     while (length--) *bytes++ = 0;
+}
+
+void clear_replay_locked() {
+    if (replay_buffer) {
+        secure_wipe(replay_buffer, replay_bytes);
+        heap_caps_free(replay_buffer);
+    }
+    replay_buffer = nullptr; replay_bytes = 0;
+    portENTER_CRITICAL(&voice_lock);
+    current.replay_available = false;
+    portEXIT_CRITICAL(&voice_lock);
 }
 
 void clear_audio_response_locked() {
@@ -213,6 +226,7 @@ void wipe_response() {
         xSemaphoreTake(response_mutex, portMAX_DELAY) != pdTRUE) {
         return;
     }
+    clear_replay_locked();
     secure_wipe(current.response.data(), current.response.size());
     portENTER_CRITICAL(&voice_lock);
     current.response_bytes = 0;
@@ -571,6 +585,7 @@ void voice_playback_complete(void *context, const VoicePlaybackResult &result) {
     if (playback == nullptr) return;
     // Synchronize producer access before releasing the progressive buffer.
     xSemaphoreTake(response_mutex, portMAX_DELAY);
+    const bool was_streaming = audio_response_streaming;
     if (audio_response_streaming && playback->buffer == audio_response_buffer) {
         audio_response_buffer = nullptr;
         audio_response_id = 0;
@@ -579,6 +594,20 @@ void voice_playback_complete(void *context, const VoicePlaybackResult &result) {
         audio_response_streaming = false;
         audio_stream_ended = false;
         audio_stream_failed = false;
+    }
+    portENTER_CRITICAL(&voice_lock);
+    const bool keep_reply = !was_streaming &&
+        current.state == VoiceTurnState::speaking && current.session_id == playback->session_id &&
+        !cancel_requested.load(std::memory_order_acquire) && !update_blocked.load(std::memory_order_acquire) &&
+        result.status == nightglass::core::StatusCode::ok;
+    portEXIT_CRITICAL(&voice_lock);
+    if (keep_reply && playback->buffer != nullptr) {
+        clear_replay_locked();
+        replay_buffer = playback->buffer; replay_bytes = playback->bytes;
+        playback->buffer = nullptr; playback->bytes = 0;
+        portENTER_CRITICAL(&voice_lock);
+        current.replay_available = true;
+        portEXIT_CRITICAL(&voice_lock);
     }
     if (playback->buffer != nullptr) {
         secure_wipe(playback->buffer, playback->bytes);
@@ -744,6 +773,45 @@ nightglass::core::Status VoiceService::begin_capture(VoiceDestination destinatio
         return status;
     }
     return nightglass::core::Status::Ok();
+}
+
+nightglass::core::Status VoiceService::replay_reply() {
+    if (response_mutex == nullptr || xSemaphoreTake(response_mutex, pdMS_TO_TICKS(100)) != pdTRUE)
+        return {nightglass::core::StatusCode::unavailable, "reply buffer unavailable"};
+    portENTER_CRITICAL(&voice_lock);
+    const bool available = replay_buffer != nullptr && replay_bytes > 0 &&
+        current.state == VoiceTurnState::complete && !audio_playback_active &&
+        !update_blocked.load(std::memory_order_acquire);
+    if (available) {
+        playback_context = {current.session_id, replay_buffer, replay_bytes, 0};
+        replay_buffer = nullptr; replay_bytes = 0;
+        current.replay_available = false;
+        current.state = VoiceTurnState::speaking;
+        audio_playback_active = true; ++current.sequence;
+        cancel_requested.store(false, std::memory_order_release);
+    }
+    portEXIT_CRITICAL(&voice_lock);
+    xSemaphoreGive(response_mutex);
+    if (!available) return {nightglass::core::StatusCode::invalid_state, "no completed reply to replay"};
+    const auto status = audio_service().request_voice_playback(playback_context.buffer,
+        playback_context.bytes, voice_playback_complete, &playback_context);
+    if (status.is_ok() && cancel_requested.load(std::memory_order_acquire))
+        audio_service().stop_voice_playback();
+    if (!status.is_ok()) {
+        xSemaphoreTake(response_mutex, portMAX_DELAY);
+        // Enqueue failure leaves ownership here; preserve the reply for retry.
+        replay_buffer = playback_context.buffer; replay_bytes = playback_context.bytes;
+        playback_context = {};
+        portENTER_CRITICAL(&voice_lock);
+        const bool cancelled = cancel_requested.load(std::memory_order_acquire);
+        current.state = cancelled ? VoiceTurnState::cancelled : VoiceTurnState::complete;
+        current.replay_available = !cancelled;
+        audio_playback_active = false; ++current.sequence;
+        portEXIT_CRITICAL(&voice_lock);
+        if (cancel_requested.load(std::memory_order_acquire)) clear_replay_locked();
+        xSemaphoreGive(response_mutex);
+    }
+    return status;
 }
 
 void VoiceService::finish_capture() {
@@ -1146,6 +1214,7 @@ VoiceSnapshot VoiceService::snapshot() const {
     snapshot.health_sequence = current.health_sequence;
     sampled_health_updated_us = health_updated_us;
     snapshot.spoken_replies = spoken_replies_setting;
+    snapshot.replay_available = current.replay_available;
     snapshot.discord_reply = discord_reply_requested;
     snapshot.settings = current.settings;
     if (snapshot.state == VoiceTurnState::recording && recording_started_us > 0) {

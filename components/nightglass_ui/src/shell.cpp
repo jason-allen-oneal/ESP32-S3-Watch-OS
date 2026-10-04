@@ -9,6 +9,9 @@
 #include <span>
 
 #include "esp_log.h"
+#ifdef ESP_PLATFORM
+#include "esp_app_desc.h"
+#endif
 #include "esp_heap_caps.h"
 #include "esp_lvgl_port.h"
 #include "esp_timer.h"
@@ -1719,6 +1722,13 @@ void Shell::openclaw_next_callback(lv_event_t *event) {
     self->refresh_openclaw();
 }
 
+void Shell::openclaw_replay_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (!self) return;
+    (void)nightglass::services::voice_service().replay_reply();
+    self->refresh_openclaw();
+}
+
 void Shell::openclaw_spoken_callback(lv_event_t *event) {
     auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
     const auto snapshot = nightglass::services::voice_service().snapshot();
@@ -1794,13 +1804,23 @@ void Shell::notification_detail_callback(lv_event_t *event) {
     auto *context = static_cast<NotificationActionContext *>(lv_event_get_user_data(event));
     if (!context || !context->shell || context->id == 0) return;
     context->shell->selected_notification_id_ = context->id;
+    nightglass::services::connectivity_service().read_notification(context->id);
     if (context->shell->navigation_.route == nightglass::core::Route::discord) {
         // Keep the user inside the Discord surface. The dedicated detail view
         // below keeps the Discord inbox back stack and reply controls intact.
         context->shell->render_route();
         return;
     }
-    context->shell->render_route();
+    auto *self = context->shell;
+    const auto link = nightglass::services::connectivity_service().snapshot();
+    if (link.state == nightglass::services::CompanionLinkState::connected_encrypted &&
+        link.notification_privacy != nightglass::services::NotificationPrivacyPolicy::always_redact &&
+        link.notification_details_unlocked) {
+        self->premium_kind_ = 2; self->premium_target_ = context->id;
+        self->premium_token_ = 0; self->premium_requested_us_ = esp_timer_get_time();
+        self->premium_open_ = nightglass::services::premium_service().request_content(2, context->id);
+    }
+    self->render_route();
 }
 
 void Shell::notification_list_callback(lv_event_t *event) {
@@ -2250,6 +2270,13 @@ void Shell::render_launcher() {
     make_list_row(scroller, 1088, "About", about_callback, this);
 }
 
+void Shell::context_primary_callback(lv_event_t *event) {
+    auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+    if (!self) return;
+    self->refresh_context_deck();
+    self->navigate(self->context_primary_action_);
+}
+
 void Shell::render_context_deck() {
     add_header(content_host_, "Today", back_callback, this);
     constexpr std::array<const char *, 5> kEyebrows{
@@ -2265,7 +2292,7 @@ void Shell::render_context_deck() {
     const int kCardHeight = large ? 120 : 96;
     constexpr int kCardWidth = kSafeContentWidth - 8;
     constexpr std::array<lv_event_cb_t, 5> open_card{
-        connectivity_callback, activity_callback, weather_callback, media_app_callback, notifications_callback};
+        context_primary_callback, activity_callback, weather_callback, media_app_callback, notifications_callback};
     unsigned position = 0;
     for (auto index : profile.deck_order) {
         if (!(profile.deck_mask & (1U << index))) continue;
@@ -2344,12 +2371,12 @@ void Shell::render_openclaw() {
                                      kSurface, kPrimary, openclaw_previous_callback, this);
     openclaw_next_ = make_button(scroller, 174, 370, 164, 56, "Next",
                                  kSurface, kPrimary, openclaw_next_callback, this);
-    openclaw_duration_ = make_button(scroller, 0, 440, kSafeContentWidth - 16, 56,
+    openclaw_duration_ = make_button(scroller, 0, 510, kSafeContentWidth - 16, 56,
                                      "", kSurface, kPrimary, openclaw_duration_callback, this);
-    openclaw_spoken_ = make_button(scroller, 0, 510, kSafeContentWidth - 16, 56,
+    openclaw_spoken_ = make_button(scroller, 0, 580, kSafeContentWidth - 16, 56,
                                    "", kSurface, kPrimary, openclaw_spoken_callback, this);
-    make_button(scroller, 0, 580, kSafeContentWidth - 16, 56,
-                "Cancel", kSurface, kAmber, openclaw_cancel_callback, this);
+    openclaw_replay_ = make_button(scroller, 0, 440, kSafeContentWidth - 16, 56,
+                "Replay last reply", kSurface, kPrimary, openclaw_replay_callback, this);
     openclaw_suggestion_ = make_button(scroller, 0, 650, kSafeContentWidth - 16, 68,
         "No suggested action", kSurface, kPrimary, openclaw_suggestion_callback, this);
     lv_obj_add_state(openclaw_suggestion_, LV_STATE_DISABLED);
@@ -2683,7 +2710,7 @@ void Shell::render_discord() {
             lv_obj_set_height(body, 48);
             lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_WRAP);
 
-            make_button(card, 12, 140, card_width - 24, 56, "CONVERSATION + ACTIONS",
+            make_button(card, 12, 140, card_width - 24, 56, "Full message & actions",
                         kSurface, kPrimary, premium_open_callback, this);
 
             auto &open = notification_actions_[notification_action_count_++];
@@ -2917,11 +2944,11 @@ void Shell::render_notifications() {
             lv_obj_set_width(body, kSafeContentWidth - 32);
             lv_obj_set_height(body, 90);
             lv_label_set_long_mode(body, LV_LABEL_LONG_MODE_WRAP);
-            make_button(detail, 0, 194, kSafeContentWidth - 20, 56, "CONVERSATION + ACTIONS",
+            make_button(detail, 0, 194, kSafeContentWidth - 20, 56, "Full message & actions",
                         kSurface, kPrimary, premium_open_callback, this);
             auto &open = notification_actions_[notification_action_count_++];
             open = {this, selected->id, false, nullptr};
-            make_button(detail, 0, 252, 164, 56, "OPEN ON PHONE", kSurface, kPrimary,
+            make_button(detail, 0, 252, 164, 56, "Open on phone", kSurface, kPrimary,
                         notification_action_callback, &open);
             auto &dismiss = notification_actions_[notification_action_count_++];
             dismiss = {this, selected->id, true, nullptr};
@@ -2983,7 +3010,7 @@ void Shell::render_notifications() {
     auto *scroller = make_scroller(content_host_);
 
     auto *status = lv_obj_create(scroller);
-    lv_obj_set_size(status, kSafeContentWidth - 16, 56);
+    lv_obj_set_size(status, kSafeContentWidth - 16, 80);
     lv_obj_set_pos(status, 0, 0);
     lv_obj_set_style_radius(status, 14, 0);
     lv_obj_set_style_bg_color(status, lv_color_hex(chrome_palette().surface), 0);
@@ -3003,10 +3030,35 @@ void Shell::render_notifications() {
                   snapshot.notification_count,
                   snapshot.notification_count == 1 ? "" : "S");
     auto *count = label(status, count_text, &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(count, 190, 8);
+    lv_obj_set_pos(count, 12, 42);
 
-    int y = 70;
-    for (const auto &notification : snapshot.notifications) {
+    int y = 94;
+    std::array<const nightglass::services::CompanionNotification *, nightglass::services::kNotificationCapacity> ordered{};
+    unsigned total = 0;
+    unsigned unread = 0;
+    for (const auto &item : snapshot.notifications) if (item.valid) {
+        ordered[total++] = &item;
+        if (item.unread) ++unread;
+    }
+    std::stable_sort(ordered.begin(), ordered.begin() + total, [](const auto *a, const auto *b) {
+        return std::strcmp(a->app.data(), b->app.data()) < 0;
+    });
+    std::snprintf(count_text, sizeof(count_text), "%u new / %u", unread, total);
+    set_label_if_changed(count, count_text);
+    const char *previous_app = nullptr;
+    for (unsigned item_index = 0; item_index < total; ++item_index) {
+        const auto &notification = *ordered[item_index];
+        if (!previous_app || std::strcmp(previous_app, notification.app.data()) != 0) {
+            unsigned group_count = 0;
+            for (unsigned j = item_index; j < total &&
+                 std::strcmp(ordered[j]->app.data(), notification.app.data()) == 0; ++j) ++group_count;
+            char group[48]{};
+            std::snprintf(group, sizeof(group), "%s (%u)", notification.app.data(), group_count);
+            auto *group_label = label(scroller, group, &lv_font_montserrat_16, kSecondary);
+            lv_obj_set_pos(group_label, 8, y);
+            y += 32;
+            previous_app = notification.app.data();
+        }
         if (!notification.valid || notification_action_count_ + 2 > 24) continue;
         auto *card = lv_obj_create(scroller);
         lv_obj_set_size(card, kSafeContentWidth - 16, 170);
@@ -3017,7 +3069,7 @@ void Shell::render_notifications() {
         lv_obj_set_style_border_width(card, 1, 0);
         lv_obj_set_style_pad_all(card, 0, 0);
         lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-        auto *app = label(card, notification.app.data(), &lv_font_montserrat_14, kGreen);
+        auto *app = label(card, notification.unread ? "NEW" : "Read", &lv_font_montserrat_14, notification.unread ? kGreen : kSecondary);
         lv_obj_set_pos(app, 12, 8);
         auto *title = label(card, notification.title.data(), &lv_font_montserrat_16, kPrimary);
         lv_obj_set_pos(title, 12, 34);
@@ -3031,7 +3083,7 @@ void Shell::render_notifications() {
 
         auto &view_context = notification_actions_[notification_action_count_++];
         view_context = {this, notification.id, false, nullptr};
-        make_button(card, 12, 104, 128, 56, "Read", kSurface, kPrimary,
+        make_button(card, 12, 104, 128, 56, "Details", kSurface, kPrimary,
                     notification_detail_callback, &view_context);
         auto &dismiss_context = notification_actions_[notification_action_count_++];
         dismiss_context = {this, notification.id, true, nullptr};
@@ -3296,13 +3348,23 @@ void Shell::render_about() {
     auto *identity = make_route_card(content_host_, 112, 142);
     auto *name = label(identity, "Nightglass", &lv_font_montserrat_32, kPrimary);
     lv_obj_set_pos(name, 0, 0);
-    auto *kind = label(identity, "Native watch system", &lv_font_montserrat_16, kCyan);
+    char firmware[64]{};
+#ifdef ESP_PLATFORM
+    const auto *app = esp_app_get_description();
+    std::snprintf(firmware, sizeof(firmware), "Firmware %s | secure %lu", app->version,
+                  static_cast<unsigned long>(app->secure_version));
+#else
+    std::snprintf(firmware, sizeof(firmware), "Firmware: development preview");
+#endif
+    auto *kind = label(identity, firmware, &lv_font_montserrat_16, kCyan);
     lv_obj_set_pos(kind, 0, 44);
+    lv_obj_set_width(kind, kSafeContentWidth - 32);
+    lv_label_set_long_mode(kind, LV_LABEL_LONG_MODE_DOTS);
     auto *version = label(identity, "ESP-IDF 5.5.5 | LVGL 9.5", &lv_font_montserrat_14,
                           kSecondary);
     lv_obj_set_pos(version, 0, 78);
 
-    auto *hardware = make_route_card(content_host_, 270, 154);
+    auto *hardware = make_route_card(content_host_, 270, 176);
     auto *heading = label(hardware, "HARDWARE", &lv_font_montserrat_14, kViolet);
     lv_obj_set_pos(heading, 0, 0);
     auto *detail = label(hardware,
@@ -3408,9 +3470,39 @@ void Shell::refresh_context_deck() {
     char title[128]{};
     char detail[128]{};
 
+    context_primary_action_ = nightglass::core::NavigationAction::open_connectivity;
+    const auto next_alarm = clock.time_valid ? nightglass::services::next_alarm_index(
+        clock.alarms, nightglass::services::civil_to_epoch(clock.local_time), clock.local_time.weekday)
+        : nightglass::services::kNoAlarmIndex;
+    const auto local_epoch = nightglass::services::civil_to_epoch(clock.local_time);
+    const auto alarm_local = next_alarm != nightglass::services::kNoAlarmIndex ?
+        nightglass::services::next_alarm_local_epoch(clock.alarms[next_alarm], local_epoch, clock.local_time.weekday) : 0;
+    const auto alarm_utc = alarm_local - (clock.settings.utc_offset_minutes + (clock.settings.daylight_saving ? 60 : 0)) * 60;
+    const bool alarm_is_next = next_alarm != nightglass::services::kNoAlarmIndex &&
+        (connectivity.agenda.count == 0 || !connectivity.agenda.events[0].valid ||
+         alarm_utc <= (connectivity.agenda.events[0].all_day ? connectivity.agenda.events[0].end_epoch_seconds :
+                       connectivity.agenda.events[0].start_epoch_seconds));
     // Next up: keep the watch useful even when the phone is quiet. Agenda is
     // already bounded by the companion protocol and is safe to render here.
-    if (connectivity.agenda.count > 0 && connectivity.agenda.events[0].valid) {
+    if (clock.timer_running || clock.timer_ringing) {
+        format_duration(title, sizeof(title), static_cast<std::uint64_t>(clock.timer_remaining_seconds) * 1000U, false);
+        set_card(context_cards_[0], clock.timer_ringing ? "Timer finished" : title, "Tap to open timer", kAmber);
+        context_primary_action_ = nightglass::core::NavigationAction::open_countdown;
+    } else if (clock.alarm_ringing) {
+        set_card(context_cards_[0], "Alarm ringing", "Tap for alarm controls", kAmber);
+        context_primary_action_ = nightglass::core::NavigationAction::open_alarm;
+    } else if (connectivity.media.available && connectivity.media.playing) {
+        set_card(context_cards_[0], connectivity.media.title.data(), "Now playing / tap for controls", kCyan);
+        context_primary_action_ = nightglass::core::NavigationAction::open_media;
+    } else if (alarm_is_next) {
+        const auto &alarm = clock.alarms[next_alarm];
+        const auto occurrence = nightglass::services::epoch_to_civil(alarm_local);
+        std::snprintf(title, sizeof(title), "%02u:%02u / %s", alarm.hour, alarm.minute, alarm.label.data());
+        constexpr const char *days[]{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        std::snprintf(detail, sizeof(detail), "%s / tap for alarm controls", days[occurrence.weekday % 7]);
+        set_card(context_cards_[0], title, detail, kCyan);
+        context_primary_action_ = nightglass::core::NavigationAction::open_alarm;
+    } else if (connectivity.agenda.count > 0 && connectivity.agenda.events[0].valid) {
         const auto &event = connectivity.agenda.events[0];
         if (event.all_day) {
             std::snprintf(title, sizeof(title), "ALL DAY");
@@ -3428,7 +3520,12 @@ void Shell::refresh_context_deck() {
                       event.all_day ? "" : "  |  PHONE");
         set_card(context_cards_[0], title, detail, kCyan);
     } else {
-        set_card(context_cards_[0], "No upcoming event", "Your schedule is clear", kGreen);
+        if (next_alarm != nightglass::services::kNoAlarmIndex) {
+            const auto &alarm = clock.alarms[next_alarm];
+            std::snprintf(title, sizeof(title), "%02u:%02u / %s", alarm.hour, alarm.minute, alarm.label.data());
+            set_card(context_cards_[0], title, "Next scheduled alarm / tap to open", kCyan);
+            context_primary_action_ = nightglass::core::NavigationAction::open_alarm;
+        } else set_card(context_cards_[0], "No upcoming event", "Your schedule is clear", kGreen);
     }
 
     // Move: use the same activity readiness language as the full Activity app.
@@ -3530,7 +3627,7 @@ void Shell::refresh_openclaw() {
                           static_cast<unsigned>(snapshot.settings.maximum_duration_seconds));
             break;
         case nightglass::services::VoiceTurnState::finishing:
-            state = "FINISHING"; color = kAmber;
+            state = "Finishing"; color = kAmber;
             std::snprintf(detail, sizeof(detail), "Closing microphone safely");
             break;
         case nightglass::services::VoiceTurnState::uploading:
@@ -3543,7 +3640,7 @@ void Shell::refresh_openclaw() {
             std::snprintf(detail, sizeof(detail), "OpenClaw is processing the turn");
             break;
         case nightglass::services::VoiceTurnState::complete:
-            state = "COMPLETE"; color = kGreen;
+            state = "Reply received"; color = kGreen;
             std::snprintf(detail, sizeof(detail), "Response received | hold to ask again");
             break;
         case nightglass::services::VoiceTurnState::speaking:
@@ -3551,12 +3648,12 @@ void Shell::refresh_openclaw() {
             std::snprintf(detail, sizeof(detail), "Watch is reading the response aloud");
             break;
         case nightglass::services::VoiceTurnState::cancelled:
-            state = "CANCELLED"; color = kAmber;
+            state = "Cancelled"; color = kAmber;
             std::snprintf(detail, sizeof(detail), "Audio discarded");
             break;
         case nightglass::services::VoiceTurnState::failed:
         case nightglass::services::VoiceTurnState::unavailable:
-            state = "UNAVAILABLE"; color = kRed;
+            state = "Unavailable"; color = kRed;
             switch (snapshot.status) {
                 case nightglass::services::VoiceStatus::disconnected:
                     std::snprintf(detail, sizeof(detail), "Secure phone link unavailable");
@@ -3664,7 +3761,7 @@ void Shell::refresh_openclaw() {
     }
     if (openclaw_page_) {
         char page[32]{};
-        std::snprintf(page, sizeof(page), "PAGE %u / %u",
+        std::snprintf(page, sizeof(page), "REPLY %u / %u",
                       static_cast<unsigned>(openclaw_response_page_ + 1U),
                       static_cast<unsigned>(openclaw_response_page_count_));
         set_label_if_changed(openclaw_page_, page);
@@ -3677,6 +3774,11 @@ void Shell::refresh_openclaw() {
         if (openclaw_response_page_ + 1 >= openclaw_response_page_count_)
             lv_obj_add_state(openclaw_next_, LV_STATE_DISABLED);
         else lv_obj_clear_state(openclaw_next_, LV_STATE_DISABLED);
+    }
+    if (openclaw_replay_) {
+        if (snapshot.replay_available && snapshot.state == nightglass::services::VoiceTurnState::complete)
+            lv_obj_remove_state(openclaw_replay_, LV_STATE_DISABLED);
+        else lv_obj_add_state(openclaw_replay_, LV_STATE_DISABLED);
     }
     if (openclaw_spoken_) {
         set_button_text(openclaw_spoken_, snapshot.spoken_replies
@@ -4983,6 +5085,7 @@ void Shell::clear_route_objects() {
     openclaw_previous_ = nullptr;
     openclaw_next_ = nullptr;
     openclaw_spoken_ = nullptr;
+    openclaw_replay_ = nullptr;
     openclaw_ptt_ = nullptr;
     openclaw_stop_ = nullptr;
     openclaw_suggestion_ = nullptr;

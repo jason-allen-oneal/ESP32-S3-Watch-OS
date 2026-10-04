@@ -65,6 +65,7 @@ public:
     bool send_call(CallCommand command);
     bool send_phone(PhoneCommand command);
     bool mark_notification(std::uint32_t id, bool dismiss);
+    void read_notification(std::uint32_t id);
     bool reply_notification(std::uint32_t id, const char *reply);
     bool send_voice_frame(std::span<const std::uint8_t> frame);
     bool send_premium_frame(std::span<const std::uint8_t> frame);

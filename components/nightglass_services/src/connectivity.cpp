@@ -64,6 +64,8 @@ portMUX_TYPE peer_lock = portMUX_INITIALIZER_UNLOCKED;
 ConnectivitySnapshot current{};
 std::atomic<std::uint16_t> connection_handle{kNoConnection};
 std::uint16_t status_handle{};
+std::array<std::uint32_t, 32> read_notification_ids{};
+std::size_t read_notification_cursor{};
 std::uint16_t outbound_handle{};
 std::uint16_t premium_handle{};
 std::atomic_bool outbound_subscribed{false};
@@ -449,11 +451,22 @@ bool apply_message(const CompanionMessage &message,
             [&](const auto &notification) {
                 return notification.valid && notification.id == message.notification_id;
             });
+        bool was_unread = std::find(read_notification_ids.begin(), read_notification_ids.end(),
+                                    message.notification_id) == read_notification_ids.end();
+        for (const auto &previous : current.notifications) {
+            if (previous.valid && previous.id == message.notification_id) {
+                was_unread = previous.unread || (message.notification.alert &&
+                    (previous.title != message.notification.title || previous.body != message.notification.body));
+                break;
+            }
+        }
         remove_notification_locked(message.notification_id);
         for (std::size_t index = current.notifications.size() - 1; index > 0; --index) {
             current.notifications[index] = current.notifications[index - 1];
         }
         current.notifications[0] = message.notification;
+        current.notifications[0].unread = was_unread;
+        if (was_unread) std::replace(read_notification_ids.begin(), read_notification_ids.end(), message.notification_id, std::uint32_t{0});
         if (notification_details_redacted_locked()) redact_notification(current.notifications[0]);
         current.notification_count = static_cast<std::uint8_t>(std::count_if(
             current.notifications.begin(), current.notifications.end(),
@@ -998,6 +1011,20 @@ bool ConnectivityService::send_call(CallCommand command) {
 bool ConnectivityService::send_phone(PhoneCommand command) {
     const auto frame = encode_phone_command(command, next_sequence8());
     return notify_outbound(frame.data(), frame.size());
+}
+
+void ConnectivityService::read_notification(std::uint32_t id) {
+    if (id == 0) return;
+    portENTER_CRITICAL(&state_lock);
+    for (auto &notification : current.notifications) {
+        if (notification.valid && notification.id == id && notification.unread) {
+            notification.unread = false;
+            read_notification_ids[read_notification_cursor++ % read_notification_ids.size()] = id;
+            ++current.notification_sequence; ++current.sequence;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&state_lock);
 }
 
 bool ConnectivityService::mark_notification(std::uint32_t id, bool dismiss) {

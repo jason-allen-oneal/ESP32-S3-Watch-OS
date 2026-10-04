@@ -6,6 +6,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class NightglassProtocolTest {
+    @Test fun firmwareIdentityExtensionIsBoundedAndDoesNotMasqueradeAsLegacyAck() {
+        val version = "0.2.26".toByteArray()
+        val detail = "image version is already running".toByteArray()
+        val frame = ByteBuffer.allocate(18 + version.size + detail.size).order(ByteOrder.LITTLE_ENDIAN)
+            .put(1).put(0x36).putLong(123).putInt(26).put(4).put(0)
+            .put(version.size.toByte()).put(detail.size.toByte()).put(version).put(detail).array()
+        val info = NightglassProtocol.parseFirmwareInfo(frame)!!
+        assertEquals("0.2.26", info.version)
+        assertEquals(26L, info.secureVersion)
+        assertFalse(info.pendingVerification)
+        assertEquals("image version is already running", info.detail)
+        assertNull(NightglassProtocol.parseOtaStatus(frame))
+        assertNull(NightglassProtocol.parseFirmwareInfo(frame.copyOf(frame.size - 1)))
+        assertNull(NightglassProtocol.parseFirmwareInfo(frame.copyOf().also { it[15] = 2 }))
+        assertNull(NightglassProtocol.parseFirmwareInfo(frame.copyOf().also { it[16] = 32 }))
+        assertNull(NightglassProtocol.parseFirmwareInfo(frame.copyOf().also { it[18] = 0 }))
+        assertNull(NightglassProtocol.parseFirmwareInfo(frame.copyOf().also { java.util.Arrays.fill(it, 2, 10, 0) }))
+    }
     @Test fun watchStatusRequiresExactAuthorizedProof() {
         val authorized = NightglassProtocol.parseWatchStatus(
             byteArrayOf(1, 3, 2, 1, 1, 1))

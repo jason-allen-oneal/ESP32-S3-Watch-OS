@@ -45,9 +45,11 @@ class MainActivity : AppCompatActivity() {
                 renderLinkStatus(it.text, it.statusClass, it.updatedAtMs)
             }
             renderOpenClawStatus()
+            renderUpdateStatus()
             uiHandler.postDelayed(this, 5000)
         }
     }
+    private lateinit var firmwareStatus: TextView
     private lateinit var otaStatus: TextView
     private lateinit var linkStatus: TextView
     private lateinit var linkStatusDetail: TextView
@@ -324,6 +326,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(TextView(this).apply {
             text = "Choose the four files from a signed Nightglass release package. Keep your watch nearby while the update installs."
         })
+        firmwareStatus = TextView(this).apply { text = "Firmware: waiting for watch identity" }
+        root.addView(firmwareStatus)
         otaStatus = TextView(this).apply { text = "No update selected" }
         root.addView(otaStatus)
         root.addView(Button(this).apply {
@@ -493,6 +497,17 @@ class MainActivity : AppCompatActivity() {
             .addOnFailureListener {
                 Toast.makeText(this, "Unable to scan OpenClaw setup QR", Toast.LENGTH_LONG).show()
             }
+    }
+    private fun renderUpdateStatus() {
+        if (!::otaStatus.isInitialized || !::firmwareStatus.isInitialized) return
+        val prefs = getSharedPreferences("nightglass_update", MODE_PRIVATE)
+        val version = prefs.getString("firmware_version", null)
+        firmwareStatus.text = if (version == null) "Firmware: not reported by this watch yet" else
+            "Firmware $version · secure ${prefs.getLong("secure_version", 0)}" +
+            if (prefs.getBoolean("pending_verification", false)) " · checking boot health" else ""
+        val detail = prefs.getString("detail", null) ?: return
+        otaStatus.text = if (prefs.getBoolean("active", false))
+            "$detail — ${prefs.getInt("percent", 0)}%" else detail
     }
     override fun onStart() {
         super.onStart()

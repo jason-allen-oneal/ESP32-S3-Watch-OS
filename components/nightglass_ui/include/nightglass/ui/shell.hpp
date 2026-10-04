@@ -60,6 +60,8 @@ private:
     static void openclaw_duration_callback(lv_event_t *event);
     static void openclaw_previous_callback(lv_event_t *event);
     static void openclaw_next_callback(lv_event_t *event);
+    static void context_primary_callback(lv_event_t *event);
+    static void openclaw_replay_callback(lv_event_t *event);
     static void openclaw_spoken_callback(lv_event_t *event);
     static void discord_voice_press_callback(lv_event_t *event);
     static void discord_voice_release_callback(lv_event_t *event);
@@ -289,6 +291,7 @@ private:
     lv_obj_t *openclaw_previous_{nullptr};
     lv_obj_t *openclaw_next_{nullptr};
     lv_obj_t *openclaw_spoken_{nullptr};
+    lv_obj_t *openclaw_replay_{nullptr};
     lv_obj_t *openclaw_ptt_{nullptr};
     lv_obj_t *openclaw_stop_{nullptr};
     lv_obj_t *openclaw_duration_{nullptr};
@@ -346,6 +349,7 @@ private:
         lv_obj_t *detail{nullptr};
     };
     std::array<ContextCardWidgets, 5> context_cards_{};
+    nightglass::core::NavigationAction context_primary_action_{nightglass::core::NavigationAction::open_connectivity};
 
     // Touch navigation is deliberately edge-gated so vertical scrolling inside
     // an app remains native LVGL behavior.

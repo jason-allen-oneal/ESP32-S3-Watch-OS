@@ -54,6 +54,7 @@ struct VoiceSnapshot {
     std::uint32_t health_sequence{0};
     std::uint32_t health_age_seconds{0};
     bool spoken_replies{false};
+    bool replay_available{false};
     bool discord_reply{false};
     VoiceSettings settings{};
     std::array<char, kVoiceMaximumResponseBytes + 1> response{};
@@ -65,6 +66,7 @@ public:
     nightglass::core::Status begin_capture(
         VoiceDestination destination = VoiceDestination::openclaw);
     void finish_capture();
+    nightglass::core::Status replay_reply();
     void cancel();
     void link_lost();
     // Blocks new turns, requests cancellation, and waits until neither the

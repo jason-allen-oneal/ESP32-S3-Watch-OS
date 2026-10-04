@@ -3,6 +3,16 @@
 #include "nightglass/services/clock.hpp"
 
 int main() {
+    {
+        nightglass::services::AlarmSettings a{};
+        a.enabled = true; a.hour = 7; a.minute = 30; a.repeat_days = 1U << 1;
+        // Sunday 08:00 -> Monday 07:30; Monday after alarm -> next Monday.
+        assert(nightglass::services::next_alarm_local_epoch(a, 28800, 0) == 113400);
+        assert(nightglass::services::next_alarm_local_epoch(a, 115200, 1) == 718200);
+        a.enabled = false;
+        assert(nightglass::services::next_alarm_local_epoch(a, 28800, 0) == std::numeric_limits<std::int64_t>::max());
+    }
+
     using namespace nightglass::services;
     AlarmSettings alarm{};
     assert(valid_alarm_settings(alarm));

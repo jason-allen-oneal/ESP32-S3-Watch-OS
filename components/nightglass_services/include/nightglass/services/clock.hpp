@@ -180,6 +180,20 @@ struct ClockSnapshot {
     bool persistence_ok{true};
 };
 
+constexpr std::int64_t next_alarm_local_epoch(const AlarmSettings &alarm,
+    std::int64_t local_epoch_seconds, std::uint8_t weekday) noexcept {
+    if (!alarm.enabled || local_epoch_seconds < 0 || weekday >= 7)
+        return std::numeric_limits<std::int64_t>::max();
+    const auto day_start = (local_epoch_seconds / 86400) * 86400;
+    for (std::uint8_t offset = 0; offset <= 7; ++offset) {
+        if (!alarm_runs_on_weekday(alarm, static_cast<std::uint8_t>((weekday + offset) % 7))) continue;
+        const auto target = day_start + static_cast<std::int64_t>(offset) * 86400 +
+            static_cast<std::int64_t>(alarm.hour) * 3600 + static_cast<std::int64_t>(alarm.minute) * 60;
+        if (target >= local_epoch_seconds) return target;
+    }
+    return std::numeric_limits<std::int64_t>::max();
+}
+
 constexpr std::uint8_t next_alarm_index(
     const std::array<AlarmSettings, kAlarmCapacity> &alarms,
     std::int64_t local_epoch_seconds, std::uint8_t weekday) noexcept {

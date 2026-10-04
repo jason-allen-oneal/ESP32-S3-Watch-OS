@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
+#include "esp_app_desc.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "nightglass/services/hardware.hpp"
@@ -99,7 +100,7 @@ void publish_transport_snapshot(bool awaiting, bool ready_to_reboot = false) {
 }
 
 void publish_status(UpdateTransportLink requested_link, std::uint64_t requested_session,
-                    std::uint8_t result, UpdateTransportCommandKind kind) {
+                    std::uint8_t result, UpdateTransportCommandKind kind, const char *detail) {
     auto &service = nightglass::update::update_service();
     const auto snapshot = service.snapshot();
     const UpdateTransportStatus status{
@@ -122,7 +123,27 @@ void publish_status(UpdateTransportLink requested_link, std::uint64_t requested_
         sink = status_sinks[link_index(requested_link)];
         portEXIT_CRITICAL(&transport_mux);
     }
-    if (sink != nullptr) (void)sink(frame.data(), frame.size());
+    if (sink != nullptr) {
+        // Optional extension leaves the deployed 22-byte acknowledgement intact.
+        // Emit identity/errors before the ACK so newer clients can explain it.
+        if (kind == UpdateTransportCommandKind::status || result != 0 ||
+            kind == UpdateTransportCommandKind::finish) {
+            const auto *app = esp_app_get_description();
+            std::array<std::uint8_t, 114> info{};
+            info[0] = frame[0]; info[1] = 0x36;
+            std::copy_n(frame.data() + 2, 8, info.data() + 2);
+            for (unsigned i = 0; i < 4; ++i) info[10+i] = app->secure_version >> (8*i);
+            info[14] = result;
+            info[15] = snapshot.pending_verification ? 1 : 0;
+            const auto version_size = strnlen(app->version, 31);
+            const auto detail_size = result != 0 && detail != nullptr ? strnlen(detail, 64) : 0;
+            info[16] = version_size; info[17] = detail_size;
+            std::copy_n(app->version, version_size, info.data() + 18);
+            if (detail_size) std::copy_n(detail, detail_size, info.data() + 18 + version_size);
+            (void)sink(info.data(), 18 + version_size + detail_size);
+        }
+        (void)sink(frame.data(), frame.size());
+    }
 }
 
 void handle(UpdateTransportCommand &command) {
@@ -254,7 +275,7 @@ void handle(UpdateTransportCommand &command) {
         last_command_us = esp_timer_get_time();
     }
     const auto code = result_code(result);
-    publish_status(command.link, command.session, code, command.kind);
+    publish_status(command.link, command.session, code, command.kind, result.detail);
     if (restart_after_status) {
         // Both USB and NimBLE queue the status from publish_status(); do not
         // reset the transport before that acknowledgement can be delivered.

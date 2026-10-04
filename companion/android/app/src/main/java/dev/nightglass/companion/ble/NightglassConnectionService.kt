@@ -25,6 +25,7 @@ import dev.nightglass.companion.notifications.NightglassNotificationListener
 import dev.nightglass.companion.phone.PhoneIntegrationManager
 import dev.nightglass.companion.weather.PhoneWeatherProxy
 import dev.nightglass.companion.update.OtaTransferManager
+import dev.nightglass.companion.update.UpdateOutcome
 import dev.nightglass.companion.voice.OpenClawVoiceGateway
 import dev.nightglass.companion.voice.OpenClawHealth
 import dev.nightglass.companion.voice.OpenClawHealthPolicy
@@ -275,6 +276,11 @@ class NightglassConnectionService : Service() {
     }
     override fun onCreate() {
         super.onCreate()
+        val updatePrefs = getSharedPreferences("nightglass_update", MODE_PRIVATE)
+        if (updatePrefs.getBoolean("active", false)) updatePrefs.edit()
+            .putBoolean("active", false).putBoolean("complete", false)
+            .putString("detail", "Update interrupted — reselect the signed package to resume")
+            .apply()
         destroyed = false
         current = this
         createChannel()
@@ -651,6 +657,32 @@ class NightglassConnectionService : Service() {
                     receivePremium(owned, generation)
                 } finally { owned.fill(0) }
             }
+            return
+        }
+        NightglassProtocol.parseFirmwareInfo(frame)?.let { info ->
+            otaTransfers.onFirmwareInfo(info)
+            val prefs = getSharedPreferences("nightglass_update", MODE_PRIVATE)
+            val edit = prefs.edit().putString("firmware_version", info.version)
+                .putLong("secure_version", info.secureVersion)
+                .putBoolean("pending_verification", info.pendingVerification)
+                .putLong("identity_at", System.currentTimeMillis())
+            val target = prefs.getString("awaiting_version", null)
+            if (info.result == 0 && target != null) {
+                if (UpdateOutcome.confirm(target, info.version, info.pendingVerification, info.result) == UpdateOutcome.Confirmation.INSTALLED) {
+                    edit.putString("detail", "Installed $target — boot health confirmed")
+                        .putBoolean("active", false).putBoolean("complete", true)
+                        .putInt("percent", 100).remove("awaiting_version")
+                } else if (UpdateOutcome.confirm(target, info.version, info.pendingVerification, info.result) == UpdateOutcome.Confirmation.DIFFERENT_VERSION) {
+                    edit.putString("detail", "Update not confirmed: watch is running ${info.version}, expected $target")
+                        .putBoolean("active", false).putBoolean("complete", false)
+                        .remove("awaiting_version")
+                }
+            }
+            edit.apply()
+            Log.i(TAG, "Watch firmware: ${info.version} secure=${info.secureVersion} pending=${info.pendingVerification}")
+            if (info.pendingVerification && target != null) reconnectHandler.postDelayed({
+                if (linkReady && !otaTransfers.active()) write(NightglassProtocol.otaStatusQuery(0x4e47494euL))
+            }, 5000)
             return
         }
         NightglassProtocol.parseOtaStatus(frame)?.let {
@@ -1035,6 +1067,7 @@ class NightglassConnectionService : Service() {
         phoneIntegrations.refreshAll()
         if (otaTransfers.active()) requestOtaConnectionPriority(true)
         otaTransfers.resumeLink()
+        if (!otaTransfers.active()) write(NightglassProtocol.otaStatusQuery(0x4e47494euL))
         scheduleWeatherRefresh(0)
         publishOpenClawHealth(OpenClawHealth.DEGRADED)
         scheduleOpenClawHealth(0)
@@ -1244,6 +1277,14 @@ class NightglassConnectionService : Service() {
         getSystemService(NotificationManager::class.java).notify(7, connectionNotification(text))
     }
     private fun reportOtaProgress(progress: OtaTransferManager.Progress) {
+        val edit = getSharedPreferences("nightglass_update", MODE_PRIVATE).edit()
+            .putString("detail", progress.detail).putBoolean("active", progress.active)
+            .putBoolean("complete", false).putInt("percent", progress.percent)
+            .putLong("updated_at", System.currentTimeMillis())
+        if (progress.complete && progress.targetVersion != null)
+            edit.putString("awaiting_version", progress.targetVersion)
+        else if (progress.active || !progress.complete) edit.remove("awaiting_version")
+        edit.apply()
         sendBroadcast(Intent(ACTION_OTA_PROGRESS).setPackage(packageName)
             .putExtra(EXTRA_OTA_ACTIVE, progress.active)
             .putExtra(EXTRA_OTA_COMPLETE, progress.complete)

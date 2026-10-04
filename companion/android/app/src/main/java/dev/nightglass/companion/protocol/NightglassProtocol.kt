@@ -99,6 +99,27 @@ object NightglassProtocol {
                          val result: Int, val expectedBytes: Long,
                          val receivedBytes: Long,
                          val acknowledgedOpcode: Int = 0)
+    data class FirmwareInfo(val session: ULong, val version: String, val secureVersion: Long,
+                            val pendingVerification: Boolean, val result: Int, val detail: String)
+    fun parseFirmwareInfo(frame: ByteArray): FirmwareInfo? {
+        if (frame.size < 19 || frame[0] != VERSION || frame[1] != 0x36.toByte()) return null
+        val versionLength = frame[16].toInt() and 255
+        val detailLength = frame[17].toInt() and 255
+        if (versionLength !in 1..31 || detailLength > 64 ||
+            frame.size != 18 + versionLength + detailLength ||
+            (frame[14].toInt() and 255) !in 0..9 || (frame[15].toInt() and 255) !in 0..1) return null
+        val version = frame.copyOfRange(18, 18 + versionLength)
+        val detail = frame.copyOfRange(18 + versionLength, frame.size)
+        if (version.any { (it.toInt() and 255) !in 33..126 } ||
+            detail.any { (it.toInt() and 255) !in 32..126 }) return null
+        val input = ByteBuffer.wrap(frame).order(ByteOrder.LITTLE_ENDIAN)
+        input.position(2)
+        val session = input.long.toULong()
+        if (session == 0uL) return null
+        return FirmwareInfo(session, version.toString(Charsets.US_ASCII),
+            input.int.toUInt().toLong(), frame[15] == 1.toByte(), frame[14].toInt() and 255,
+            detail.toString(Charsets.US_ASCII))
+    }
     sealed interface VoiceRequest {
         val sessionId: UInt
         data class Begin(override val sessionId: UInt, val totalBytes: Int,

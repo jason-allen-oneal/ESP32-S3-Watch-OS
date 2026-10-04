@@ -46,6 +46,8 @@ struct CompanionNotification {
     bool alert{false};
     // True only when Android exposes a Notification.Action with RemoteInput.
     bool replyable{false};
+    // Local watch read state; never inferred from notification alert/sound.
+    bool unread{true};
     bool valid{false};
 };
 
