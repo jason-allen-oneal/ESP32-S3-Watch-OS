@@ -149,7 +149,9 @@ class ControlCenterActivity : AppCompatActivity() {
         }
         ViewCompat.requestApplyInsets(scroll)
         heading(root, "Nightglass", 34f)
-        body(root, "Your watch. Your rhythm.")
+        body(root, "Appearance & glances")
+        val jump = intent.getStringExtra("section")
+        var sectionTarget: View? = null
         card("Watch connection") { box ->
             link = body(box, NightglassConnectionService.lastStatus(this)?.text ?: "Ready when you are")
             button(box, "Connections & advanced setup") { startActivity(Intent(this, MainActivity::class.java)) }
@@ -169,13 +171,15 @@ class ControlCenterActivity : AppCompatActivity() {
                 edit(draft.copy(accent = colorOptions[it].second))
             }
             body(box, "Complications appear on the Personal face. Large Text also uses this layout.")
+            if (jump == "face") sectionTarget = box
             repeat(3) { slot ->
                 choose(box, "Complication ${slot + 1}", PremiumProfile.complicationNames, draft.complications[slot]) { value ->
                     edit(draft.copy(complications = draft.complications.toMutableList().also { it[slot] = value }))
                 }
             }
         }
-        card("Context Deck", "Choose the cards you see and their order.") { box ->
+        card("Glance order", "Choose the cards you see and their order.") { box ->
+            if (jump == "glances") sectionTarget = box
             deck = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; box.addView(deck); renderDeck()
         }
         card("Display & comfort") { box ->
@@ -213,6 +217,7 @@ class ControlCenterActivity : AppCompatActivity() {
             button(box, "OpenClaw & voice setup") { startActivity(Intent(this, MainActivity::class.java)) }
             body(box, "Queue selection and reactions appear only when the provider exposes them. Full Discord history and attachment viewing stay in Discord.")
         }
+        sectionTarget?.let { target -> scroll.post { scroll.smoothScrollTo(0, target.top + (target.parent as View).top) } }
     }
     private fun renderDeck() {
         deck.removeAllViews()

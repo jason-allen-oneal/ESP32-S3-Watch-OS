@@ -2251,9 +2251,9 @@ void Shell::render_launcher() {
 }
 
 void Shell::render_context_deck() {
-    add_header(content_host_, "Context", back_callback, this);
+    add_header(content_host_, "Today", back_callback, this);
     constexpr std::array<const char *, 5> kEyebrows{
-        "NEXT UP", "MOVE", "WEATHER", "MEDIA", "INBOX",
+        "Next up", "Activity", "Weather", "Media", "Notifications",
     };
     // Five live cards cannot all fit below the system header at a readable
     // three-line size. Keep the deck a real vertical surface instead of
@@ -2264,6 +2264,8 @@ void Shell::render_context_deck() {
     const int kCardStep = large ? 128 : 104;
     const int kCardHeight = large ? 120 : 96;
     constexpr int kCardWidth = kSafeContentWidth - 8;
+    constexpr std::array<lv_event_cb_t, 5> open_card{
+        connectivity_callback, activity_callback, weather_callback, media_app_callback, notifications_callback};
     unsigned position = 0;
     for (auto index : profile.deck_order) {
         if (!(profile.deck_mask & (1U << index))) continue;
@@ -2277,6 +2279,8 @@ void Shell::render_context_deck() {
         lv_obj_set_style_border_width(card, 1, 0);
         lv_obj_set_style_pad_all(card, 12, 0);
         lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_event_cb(card, open_card[index], LV_EVENT_CLICKED, this);
         auto &widgets = context_cards_[index];
         widgets.eyebrow = label(card, kEyebrows[index], &lv_font_montserrat_14, kSecondary);
         lv_obj_set_pos(widgets.eyebrow, 0, 0);
@@ -2330,6 +2334,9 @@ void Shell::render_openclaw() {
     lv_obj_add_event_cb(openclaw_ptt_, openclaw_press_callback, LV_EVENT_PRESSED, this);
     lv_obj_add_event_cb(openclaw_ptt_, openclaw_release_callback, LV_EVENT_RELEASED, this);
     lv_obj_add_event_cb(openclaw_ptt_, openclaw_release_callback, LV_EVENT_PRESS_LOST, this);
+    openclaw_stop_ = make_button(scroller, 0, 240, kSafeContentWidth - 16,
+        82, "Cancel", kCyan, kVoid, openclaw_cancel_callback, this);
+    lv_obj_add_flag(openclaw_stop_, LV_OBJ_FLAG_HIDDEN);
     openclaw_page_ = label(scroller, "", &lv_font_montserrat_14, kSecondary);
     lv_obj_set_pos(openclaw_page_, 8, 338);
     lv_obj_set_width(openclaw_page_, kSafeContentWidth - 32);
@@ -2353,14 +2360,25 @@ void Shell::render_openclaw() {
 void Shell::render_quick_settings() {
     add_header(content_host_, "Quick settings", quick_settings_back_callback, this);
     auto *scroller = make_scroller(content_host_);
-    quick_brightness_ = make_button(scroller, 0, 0, kSafeContentWidth - 16, 64, "",
-                                    kSurface, kPrimary, quick_brightness_callback, this);
-    quick_mute_ = make_button(scroller, 0, 74, kSafeContentWidth - 16, 64, "",
-                              kSurface, kPrimary, quick_mute_callback, this);
-    quick_dnd_ = make_button(scroller, 0, 148, kSafeContentWidth - 16, 64, "",
-                             kSurface, kPrimary, quick_dnd_callback, this);
-    quick_bluetooth_ = make_button(scroller, 0, 222, kSafeContentWidth - 16, 64, "",
-                                   kSurface, kPrimary, quick_bluetooth_callback, this);
+    quick_dnd_ = make_button(scroller, 0, 0, 164, 82, "Quiet", kSurface, kPrimary, quick_dnd_callback, this);
+    make_button(scroller, 174, 0, 164, 82, "Power", kSurface, kPrimary, [](lv_event_t *event) {
+        auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+        self->quick_settings_open_ = false;
+        self->navigate(nightglass::core::NavigationAction::open_power_settings);
+    }, this);
+    make_button(scroller, 0, 94, 164, 82, "Phone", kSurface, kPrimary, [](lv_event_t *event) {
+        auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+        self->quick_settings_open_ = false;
+        self->navigate(nightglass::core::NavigationAction::open_connectivity);
+    }, this);
+    make_button(scroller, 174, 94, 164, 82, "Settings", kSurface, kPrimary, [](lv_event_t *event) {
+        auto *self = static_cast<Shell *>(lv_event_get_user_data(event));
+        self->quick_settings_open_ = false;
+        self->navigate(nightglass::core::NavigationAction::open_settings);
+    }, this);
+    quick_brightness_ = make_button(scroller, 0, 194, kSafeContentWidth - 16, 64, "", kSurface, kPrimary, quick_brightness_callback, this);
+    quick_mute_ = make_button(scroller, 0, 270, kSafeContentWidth - 16, 64, "", kSurface, kPrimary, quick_mute_callback, this);
+    quick_bluetooth_ = make_button(scroller, 0, 346, kSafeContentWidth - 16, 64, "", kSurface, kPrimary, quick_bluetooth_callback, this);
     refresh_quick_settings();
 }
 
@@ -2558,7 +2576,7 @@ void Shell::render_media() {
     auto *scroller = make_scroller(content_host_);
     auto *card = make_route_card(scroller, 0, 164);
     lv_obj_set_pos(card, 0, 0); lv_obj_set_width(card, kSafeContentWidth - 12);
-    media_state_ = label(card, "PHONE DISCONNECTED", &lv_font_montserrat_14, kAmber);
+    media_state_ = label(card, "Phone disconnected", &lv_font_montserrat_14, kAmber);
     lv_obj_set_pos(media_state_, 0, 0);
     media_title_ = label(card, "Nothing playing", &lv_font_montserrat_20, kPrimary);
     lv_obj_set_pos(media_title_, 0, 34);
@@ -2585,10 +2603,10 @@ void Shell::render_media() {
     make_button(scroller, 232, 180, 104, 76, LV_SYMBOL_NEXT, kSurface, kPrimary,
                 media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
                     nightglass::services::MediaCommand::next)));
-    make_button(scroller, 0, 270, 164, 56, "Volume -", kSurface, kPrimary,
+    make_button(scroller, 0, 270, 164, 56, LV_SYMBOL_VOLUME_MID "  -", kSurface, kPrimary,
                 media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
                     nightglass::services::MediaCommand::volume_down)));
-    make_button(scroller, 174, 270, 164, 56, "Volume +", kSurface, kPrimary,
+    make_button(scroller, 174, 270, 164, 56, LV_SYMBOL_VOLUME_MAX "  +", kSurface, kPrimary,
                 media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
                     nightglass::services::MediaCommand::volume_up)));
     make_button(scroller, 0, 406, 164, 56, "-15 sec", kSurface, kPrimary,
@@ -2604,7 +2622,7 @@ void Shell::render_media() {
                 media_callback, reinterpret_cast<void *>(static_cast<std::uintptr_t>(
                     nightglass::services::MediaCommand::stop)));
     make_button(scroller, 0, 340, kSafeContentWidth - 16, 56,
-                "Artwork / queue / output", kSurface, kPrimary, premium_open_callback, this);
+                "More media controls", kSurface, kPrimary, premium_open_callback, this);
     if (spotify_route) {
         make_button(scroller, 0, 546, kSafeContentWidth - 16, 56, "Open on phone",
                     kSurface, kPrimary, phone_command_callback,
@@ -2961,11 +2979,11 @@ void Shell::render_notifications() {
         }
     }
 
-    add_header(content_host_, "Inbox", back_callback, this);
+    add_header(content_host_, "Notifications", back_callback, this);
     auto *scroller = make_scroller(content_host_);
 
     auto *status = lv_obj_create(scroller);
-    lv_obj_set_size(status, kSafeContentWidth - 16, 76);
+    lv_obj_set_size(status, kSafeContentWidth - 16, 56);
     lv_obj_set_pos(status, 0, 0);
     lv_obj_set_style_radius(status, 14, 0);
     lv_obj_set_style_bg_color(status, lv_color_hex(chrome_palette().surface), 0);
@@ -2976,30 +2994,22 @@ void Shell::render_notifications() {
     const bool connected = snapshot.state ==
                            nightglass::services::CompanionLinkState::connected_encrypted;
     notification_status_ = label(status,
-        connected ? "PHONE CONNECTED" :
-                    (snapshot.notification_count ? "OFFLINE - CACHED" : "PHONE DISCONNECTED"),
+        connected ? "Phone connected" :
+                    (snapshot.notification_count ? "Offline / cached" : "Phone disconnected"),
         &lv_font_montserrat_16, connected ? kGreen : kAmber);
     lv_obj_set_pos(notification_status_, 12, 8);
     char count_text[32]{};
-    std::snprintf(count_text, sizeof(count_text), "%u NOTIFICATION%s",
+    std::snprintf(count_text, sizeof(count_text), "%u item%s",
                   snapshot.notification_count,
                   snapshot.notification_count == 1 ? "" : "S");
     auto *count = label(status, count_text, &lv_font_montserrat_14, kSecondary);
-    lv_obj_set_pos(count, 12, 38);
+    lv_obj_set_pos(count, 190, 8);
 
-    notification_privacy_ = make_button(
-        scroller, 0, 90, kSafeContentWidth - 16, 56,
-        snapshot.notification_privacy ==
-                nightglass::services::NotificationPrivacyPolicy::always_redact
-            ? "PRIVACY  HIDDEN (TAP TO SHOW)"
-            : "PRIVACY  SHOW DETAILS (TAP TO HIDE)",
-        kSurface, kPrimary, notification_privacy_callback, this);
-
-    int y = 156;
+    int y = 70;
     for (const auto &notification : snapshot.notifications) {
         if (!notification.valid || notification_action_count_ + 2 > 24) continue;
         auto *card = lv_obj_create(scroller);
-        lv_obj_set_size(card, kSafeContentWidth - 16, 190);
+        lv_obj_set_size(card, kSafeContentWidth - 16, 170);
         lv_obj_set_pos(card, 0, y);
         lv_obj_set_style_radius(card, 14, 0);
         lv_obj_set_style_bg_color(card, lv_color_hex(chrome_palette().surface), 0);
@@ -3021,13 +3031,13 @@ void Shell::render_notifications() {
 
         auto &view_context = notification_actions_[notification_action_count_++];
         view_context = {this, notification.id, false, nullptr};
-        make_button(card, 12, 118, 128, 56, "VIEW", kSurface, kPrimary,
+        make_button(card, 12, 104, 128, 56, "Read", kSurface, kPrimary,
                     notification_detail_callback, &view_context);
         auto &dismiss_context = notification_actions_[notification_action_count_++];
         dismiss_context = {this, notification.id, true, nullptr};
-        make_button(card, 158, 118, 152, 56, "DISMISS", kSurface, kAmber,
+        make_button(card, 158, 104, 152, 56, "Dismiss", kSurface, kAmber,
                     notification_action_callback, &dismiss_context);
-        y += 202;
+        y += 182;
     }
     if (snapshot.notification_count == 0) {
         auto *empty = label(scroller,
@@ -3038,6 +3048,14 @@ void Shell::render_notifications() {
         lv_obj_set_width(empty, kSafeContentWidth - 40);
         lv_label_set_long_mode(empty, LV_LABEL_LONG_MODE_WRAP);
     }
+    notification_privacy_ = make_button(
+        scroller, 0, y + 12, kSafeContentWidth - 16, 56,
+        snapshot.notification_privacy ==
+                nightglass::services::NotificationPrivacyPolicy::always_redact
+            ? "Details hidden / tap to show"
+            : "Details visible / tap to hide",
+        kSurface, kPrimary, notification_privacy_callback, this);
+
     configure_refresh_timer(500);
 }
 
@@ -3504,7 +3522,7 @@ void Shell::refresh_openclaw() {
     auto color = kGreen;
     switch (snapshot.state) {
         case nightglass::services::VoiceTurnState::recording:
-            state = "RECORDING";
+            state = "Listening";
             color = kRed;
             std::snprintf(detail, sizeof(detail), "Listening  %lu.%lus / %us",
                           static_cast<unsigned long>(snapshot.recorded_ms / 1000U),
@@ -3516,12 +3534,12 @@ void Shell::refresh_openclaw() {
             std::snprintf(detail, sizeof(detail), "Closing microphone safely");
             break;
         case nightglass::services::VoiceTurnState::uploading:
-            state = "SENDING"; color = kAmber;
+            state = "Sending"; color = kAmber;
             std::snprintf(detail, sizeof(detail), "%lu bytes | microphone off",
                           static_cast<unsigned long>(snapshot.encoded_bytes));
             break;
         case nightglass::services::VoiceTurnState::processing:
-            state = "THINKING"; color = kAmber;
+            state = "Thinking"; color = kAmber;
             std::snprintf(detail, sizeof(detail), "OpenClaw is processing the turn");
             break;
         case nightglass::services::VoiceTurnState::complete:
@@ -3529,7 +3547,7 @@ void Shell::refresh_openclaw() {
             std::snprintf(detail, sizeof(detail), "Response received | hold to ask again");
             break;
         case nightglass::services::VoiceTurnState::speaking:
-            state = "SPEAKING"; color = kCyan;
+            state = "Playing reply"; color = kCyan;
             std::snprintf(detail, sizeof(detail), "Watch is reading the response aloud");
             break;
         case nightglass::services::VoiceTurnState::cancelled:
@@ -3571,6 +3589,18 @@ void Shell::refresh_openclaw() {
             std::snprintf(detail, sizeof(detail),
                           "Release to send.");
             break;
+    }
+    const bool busy = snapshot.state == nightglass::services::VoiceTurnState::finishing ||
+        snapshot.state == nightglass::services::VoiceTurnState::uploading ||
+        snapshot.state == nightglass::services::VoiceTurnState::processing ||
+        snapshot.state == nightglass::services::VoiceTurnState::speaking;
+    if (busy) {
+        lv_obj_add_flag(openclaw_ptt_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(openclaw_stop_, LV_OBJ_FLAG_HIDDEN);
+        set_button_text(openclaw_stop_, snapshot.state == nightglass::services::VoiceTurnState::speaking ? "Stop" : "Cancel");
+    } else {
+        lv_obj_remove_flag(openclaw_ptt_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(openclaw_stop_, LV_OBJ_FLAG_HIDDEN);
     }
     set_state(openclaw_state_, state, color);
     set_label_if_changed(openclaw_detail_, detail);
@@ -4440,7 +4470,7 @@ void Shell::refresh_alarm() {
     set_button_text(alarm_repeat_, buffer);
     set_button_text(quiet_toggle_, snapshot.quiet_hours.enabled
                                        ? snapshot.quiet_hours_active
-                                             ? "QUIET HOURS  ACTIVE"
+                                             ? "Quiet hours"
                                              : "QUIET HOURS  ON"
                                        : "QUIET HOURS  OFF");
     std::snprintf(buffer, sizeof(buffer), "START  %02u:%02u",
@@ -4496,9 +4526,9 @@ void Shell::refresh_audio() {
     set_button_text(audio_volume_, setting);
     set_button_text(audio_mute_, snapshot.settings.muted ? "WATCH SOUND  MUTED"
                                                          : "WATCH SOUND  ON");
-    set_button_text(audio_dnd_, snapshot.settings.do_not_disturb ? "DO NOT DISTURB  ON"
-                               : snapshot.scheduled_dnd ? "QUIET HOURS  ACTIVE"
-                                                        : "DO NOT DISTURB  OFF");
+    set_button_text(audio_dnd_, snapshot.settings.do_not_disturb ? "Quiet on"
+                               : snapshot.scheduled_dnd ? "Quiet hours"
+                                                        : "Quiet off");
     if (!snapshot.enabled) {
         set_state(audio_state_, "DISABLED", kAmber);
         set_label_if_changed(audio_detail_, "Audio is disabled in this build");
@@ -4584,9 +4614,11 @@ void Shell::refresh_quick_settings() {
     set_button_text(quick_brightness_, text);
     set_button_text(quick_mute_, audio.settings.muted ? "WATCH SOUND  MUTED"
                                                       : "WATCH SOUND  ON");
-    set_button_text(quick_dnd_, audio.settings.do_not_disturb ? "DO NOT DISTURB  ON"
-                               : audio.scheduled_dnd ? "QUIET HOURS  ACTIVE"
-                                                     : "DO NOT DISTURB  OFF");
+    set_button_text(quick_dnd_, audio.settings.do_not_disturb ? "Quiet on"
+                               : audio.scheduled_dnd ? "Quiet hours"
+                                                     : "Quiet off");
+    lv_obj_set_style_border_color(quick_dnd_, lv_color_hex(
+        audio.settings.do_not_disturb || audio.scheduled_dnd ? chrome_palette().accent : chrome_palette().border), 0);
     set_button_text(quick_bluetooth_, phone.settings.enabled ? "BLUETOOTH  ON"
                                                              : "BLUETOOTH  OFF");
 }
@@ -4952,6 +4984,7 @@ void Shell::clear_route_objects() {
     openclaw_next_ = nullptr;
     openclaw_spoken_ = nullptr;
     openclaw_ptt_ = nullptr;
+    openclaw_stop_ = nullptr;
     openclaw_suggestion_ = nullptr;
     openclaw_duration_ = nullptr;
     openclaw_response_cache_.fill('\0');

@@ -290,6 +290,7 @@ private:
     lv_obj_t *openclaw_next_{nullptr};
     lv_obj_t *openclaw_spoken_{nullptr};
     lv_obj_t *openclaw_ptt_{nullptr};
+    lv_obj_t *openclaw_stop_{nullptr};
     lv_obj_t *openclaw_duration_{nullptr};
     std::array<char, 2049> openclaw_response_cache_{};
     std::uint16_t openclaw_response_page_{0};

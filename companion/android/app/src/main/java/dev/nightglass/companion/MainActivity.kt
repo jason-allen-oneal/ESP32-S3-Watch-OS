@@ -143,6 +143,14 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { startActivity(Intent(this@MainActivity,
                 dev.nightglass.companion.premium.ControlCenterActivity::class.java)) }
         })
+        listOf("Face & appearance" to "face", "Home complications" to "face", "Glance order" to "glances").forEach { (title, section) ->
+            watch.addView(Button(this).apply {
+                text = title
+                setOnClickListener { startActivity(Intent(this@MainActivity,
+                    dev.nightglass.companion.premium.ControlCenterActivity::class.java)
+                    .putExtra("section", section)) }
+            })
+        }
         root = card(pages[2])
         root.addView(label("Notifications & phone features", 20f))
         root.addView(label("Enable only the features you want on your watch.", 15f))
