@@ -48,7 +48,7 @@ class VoiceEventFence(private val owner: VoiceTurnOwner) {
 }
 
 /** Dedicated, atomic, GATT-write-acknowledged watch response transport. */
-class VoiceResponseQueue(private val capacity: Int = 768) {
+class VoiceResponseQueue(private val capacity: Int = 4096) {
     data class Entry(
         val frame: ByteArray,
         val owner: VoiceTurnOwner?,
@@ -110,6 +110,7 @@ class VoiceResponseQueue(private val capacity: Int = 768) {
         text: String,
         audio: ByteArray,
         maximumPayload: Int,
+        streaming: Boolean = false,
     ): Boolean {
         if (responseId == 0u || audioResponseId == 0u || responseId == audioResponseId ||
             maximumPayload < 20 || hasOwnerLocked() ||
@@ -140,8 +141,9 @@ class VoiceResponseQueue(private val capacity: Int = 768) {
         frames.add(Entry(NightglassProtocol.voiceResponseEnd(
             owner.watchSession, responseId, payload.size, textCrc), owner, false))
         frames.add(Entry(NightglassProtocol.voiceAudioResponseBegin(
-            owner.watchSession, audioResponseId, audio.size, audioCrc), owner, false))
-        val audioMaximumChunk = minOf(230, maximumPayload - 14)
+            owner.watchSession, audioResponseId, audio.size, audioCrc, streaming), owner, false))
+        val audioMaximumChunk = if (streaming) minOf(226, maximumPayload - 18)
+            else minOf(230, maximumPayload - 14)
         if (audioMaximumChunk <= 0) {
             payload.fill(0)
             frames.forEach { it.frame.fill(0) }
@@ -151,8 +153,10 @@ class VoiceResponseQueue(private val capacity: Int = 768) {
         while (offset < audio.size) {
             val end = minOf(offset + audioMaximumChunk, audio.size)
             val chunk = audio.copyOfRange(offset, end)
-            frames.add(Entry(NightglassProtocol.voiceAudioResponseData(
-                owner.watchSession, audioResponseId, offset, chunk), owner, false))
+            frames.add(Entry(if (streaming) NightglassProtocol.voiceAudioStreamData(
+                owner.watchSession, audioResponseId, offset, chunk)
+                else NightglassProtocol.voiceAudioResponseData(
+                    owner.watchSession, audioResponseId, offset, chunk), owner, false))
             chunk.fill(0)
             offset = end
         }

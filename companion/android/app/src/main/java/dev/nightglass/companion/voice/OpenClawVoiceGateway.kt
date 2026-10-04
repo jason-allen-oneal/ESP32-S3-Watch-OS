@@ -229,6 +229,59 @@ class OpenClawVoiceGateway(
         return true
     }
 
+    /** Speech generation stays on the authenticated Gateway, never on the watch. */
+    fun synthesizeReply(
+        owner: VoiceTurnOwner,
+        text: String,
+        completed: (Result<ByteArray>) -> Unit,
+    ): Boolean {
+        val spoken = GatewaySpeechReply.spokenExcerpt(text)
+        if (spoken.isBlank()) return false
+        val turn = ActiveTurn(owner)
+        synchronized(activeLock) {
+            if (active != null || resetting.get()) return false
+            active = turn
+        }
+        val task = FutureTask<Unit> {
+            val result = runCatching {
+                val credential = store.load() ?: error("OpenClaw voice is not configured")
+                try {
+                    val socket = RpcSocket(
+                        credential, store, "operator", OpenClawVoiceStore.REQUIRED_SCOPES.sorted(),
+                        credential.operatorAuthToken(), false,
+                    ) { _, _, _ -> }
+                    turn.socket.set(socket)
+                    try {
+                        turn.checkActive()
+                        verifyOperatorHello(socket.connect(), credential.usesVerifiedIdentity)
+                        turn.checkActive()
+                        status("Generating ElevenLabs spoken reply")
+                        val reply = socket.request("talk.speak", buildJsonObject {
+                            put("text", spoken)
+                            put("modelId", GatewaySpeechReply.MODEL)
+                            put("outputFormat", GatewaySpeechReply.FORMAT)
+                        }, 30_000)
+                        turn.checkActive()
+                        GatewaySpeechReply.decode(reply)
+                    } finally {
+                        turn.socket.set(null)
+                        socket.close()
+                    }
+                } finally { credential.wipe() }
+            }
+            val deliver = synchronized(activeLock) {
+                if (active === turn && !turn.cancelled.get()) {
+                    active = null
+                    true
+                } else false
+            }
+            if (deliver) completed(result) else result.getOrNull()?.fill(0)
+        }
+        turn.worker = task
+        executor.execute(task)
+        return true
+    }
+
     /** Create a fresh restricted-agent session and replace the active pointer. */
     fun newConversation(completed: (Result<Unit>) -> Unit): Boolean {
         if (!resetting.compareAndSet(false, true)) return false
@@ -264,7 +317,7 @@ class OpenClawVoiceGateway(
         var credential = store.load() ?: error("OpenClaw voice is not configured")
         try {
             turn.checkActive()
-            if (credential.operatorToken == null) {
+            if (credential.operatorToken == null && !credential.usesVerifiedIdentity) {
                 status("Pairing constrained OpenClaw voice identity")
                 val bootstrap = credential.bootstrapToken ?: error("OpenClaw setup code expired or was consumed")
                 val socket = RpcSocket(
@@ -288,7 +341,7 @@ class OpenClawVoiceGateway(
                 credential.wipe()
                 credential = store.load() ?: error("OpenClaw voice authorization was not persisted")
             }
-            if (!OpenClawVoiceStore.scopesAreExactlyRequired(credential.scopes)) {
+            if (!credential.usesVerifiedIdentity && !OpenClawVoiceStore.scopesAreExactlyRequired(credential.scopes)) {
                 val upgraded = upgradeOperatorCredential(turn, credential)
                 credential.wipe()
                 credential = upgraded
@@ -300,7 +353,7 @@ class OpenClawVoiceGateway(
             val collector = ChatReplyCollector(assistant)
             val socket = RpcSocket(
                 credential, store, "operator", OpenClawVoiceStore.REQUIRED_SCOPES.sorted(),
-                credential.operatorToken ?: error("OpenClaw voice authorization missing"), false,
+                credential.operatorAuthToken(), false,
             ) { event, payload, sequence ->
                 if (event == "chat") collector.accept(
                     payload,
@@ -312,7 +365,7 @@ class OpenClawVoiceGateway(
             try {
                 val hello = socket.connect()
                 turn.checkActive()
-                verifyOperatorHello(hello)
+                verifyOperatorHello(hello, credential.usesVerifiedIdentity)
 
                 val sessionKey = ensureDedicatedSession(socket, credential)
                 turn.sessionKey.set(sessionKey)
@@ -374,7 +427,7 @@ class OpenClawVoiceGateway(
             store,
             "operator",
             credential.scopes.sorted(),
-            credential.operatorToken ?: error("OpenClaw voice authorization missing"),
+            credential.operatorAuthToken(),
             false,
         )
         turn.socket.set(socket)
@@ -419,11 +472,11 @@ class OpenClawVoiceGateway(
             }
             val socket = RpcSocket(
                 credential, store, "operator", OpenClawVoiceStore.REQUIRED_SCOPES.sorted(),
-                credential.operatorToken ?: error("OpenClaw voice authorization missing"), false,
+                credential.operatorAuthToken(), false,
             )
             try {
                 val hello = socket.connect()
-                verifyOperatorHello(hello)
+                verifyOperatorHello(hello, credential.usesVerifiedIdentity)
                 val sessionKey = createDedicatedSession(socket)
                 check(store.replaceSessionKey(credential, credential.sessionKey, sessionKey)) {
                     "OpenClaw setup changed while starting a new conversation; try again"
@@ -480,10 +533,10 @@ class OpenClawVoiceGateway(
             ?: return
         val cleanupSocket = RpcSocket(
             credential, store, "operator", OpenClawVoiceStore.REQUIRED_SCOPES.sorted(),
-            credential.operatorToken ?: error("OpenClaw voice authorization missing"), false,
+            credential.operatorAuthToken(), false,
         )
         try {
-            verifyOperatorHello(cleanupSocket.connect())
+            verifyOperatorHello(cleanupSocket.connect(), credential.usesVerifiedIdentity)
             cleanupSocket.abortChat(sessionKey, runId)
         } catch (retryFailure: Throwable) {
             retryFailure.addSuppressed(firstFailure)
@@ -493,11 +546,11 @@ class OpenClawVoiceGateway(
         }
     }
 
-    private fun verifyOperatorHello(hello: JsonObject) {
+    private fun verifyOperatorHello(hello: JsonObject, identityAuth: Boolean = false) {
         require(hello["auth"]?.jsonObject?.get("role")?.jsonPrimitive?.content == "operator")
         val scopes = hello["auth"]?.jsonObject?.get("scopes")?.jsonArray
             ?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
-        require(OpenClawVoiceStore.scopesAreExactlyRequired(scopes)) {
+        require(VerifiedIdentityPolicy.grantsVoice(scopes, identityAuth)) {
             "OpenClaw voice requires the approved read+talk+write scope profile"
         }
         val methods = hello["features"]?.jsonObject?.get("methods")?.jsonArray
@@ -542,7 +595,14 @@ class OpenClawVoiceGateway(
         @Volatile private var socket: WebSocket? = null
 
         fun connect(): JsonObject {
-            socket = client.newWebSocket(Request.Builder().url(credential.url).build(), this)
+            val request = Request.Builder().url(credential.url)
+            val connectionClient = if (VerifiedIdentityPolicy.isPhoneIngressEndpoint(credential.url)) {
+                request.header("Authorization", "Bearer " + requireNotNull(credential.operatorToken))
+                if (VerifiedIdentityPolicy.isLocalEndpoint(credential.url))
+                    LocalIngressTls.client(client, requireNotNull(credential.tlsFingerprint))
+                else client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+            } else client
+            socket = connectionClient.newWebSocket(request.build(), this)
             opened.get(10, TimeUnit.SECONDS)
             return connected.get(20, TimeUnit.SECONDS)
         }
@@ -564,7 +624,9 @@ class OpenClawVoiceGateway(
 
         override fun onOpen(webSocket: WebSocket, response: Response) {
             val expected = credential.tlsFingerprint
-            if (expected != null) {
+            // LocalIngressTls checks the raw leaf during TLS, before HTTP auth is sent.
+            // OkHttp's cleaned chain may be empty for a pinned self-signed leaf.
+            if (expected != null && !VerifiedIdentityPolicy.isLocalEndpoint(credential.url)) {
                 val cert = response.handshake?.peerCertificates?.firstOrNull() as? X509Certificate
                 val actual = cert?.encoded?.let { MessageDigest.getInstance("SHA-256").digest(it) }
                     ?.joinToString("") { "%02x".format(it) }
@@ -618,7 +680,7 @@ class OpenClawVoiceGateway(
             }
             val canonical = listOf(
                 "v3", credential.deviceId, CLIENT_ID, if (role == "node") "node" else "ui",
-                role, scopes.joinToString(","), issued.toString(), authToken, nonce, "android", "android"
+                role, scopes.joinToString(","), issued.toString(), if (credential.usesVerifiedIdentity) "" else authToken, nonce, "android", "android"
             ).joinToString("|")
             val device = buildJsonObject {
                 put("id", credential.deviceId)
@@ -637,7 +699,8 @@ class OpenClawVoiceGateway(
                 })
                 put("role", role)
                 if (scopes.isNotEmpty()) put("scopes", JsonArray(scopes.map(::JsonPrimitive)))
-                put("auth", buildJsonObject { put(if (bootstrap) "bootstrapToken" else "token", authToken) })
+                if (!credential.usesVerifiedIdentity)
+                    put("auth", buildJsonObject { put(if (bootstrap) "bootstrapToken" else "token", authToken) })
                 put("device", device)
                 put("locale", "en-US")
             }

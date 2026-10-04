@@ -37,7 +37,7 @@ def function(text: str, signature: str) -> str:
 
 
 unchanged = (
-    "void touch_probe_callback(", "void record_touch_read_success(",
+    "void record_touch_read_success(",
     "void handle_touch_error(", "void touchpad_read(",
 )
 if args.baseline:
@@ -224,6 +224,8 @@ void bsp_display_unlock() {
 }
 
 namespace nightglass::bsp {
+nightglass::core::Status Board::sleep_display() { display_sleeping_ = true; return nightglass::core::Status::Ok(); }
+nightglass::core::Status Board::wake_display() { display_sleeping_ = false; return nightglass::core::Status::Ok(); }
 Board instance;
 constexpr char kTag[] = "nightglass_bsp";
 lv_indev_t *touch_input = &input_storage;
@@ -401,10 +403,14 @@ void irq_and_concurrency_checks() {
     const auto wakes = wake_calls.load();
     touch_probe_callback(nullptr);
     require(touch_irq_sequence() == 0 && wake_calls == wakes + 1, "timer probe manufactured IRQ or lost wake");
+    instance.sleep_display();
+    touch_probe_callback(nullptr);
+    require(wake_calls == wakes + 1 && touch_irq_sequence() == 0, "sleeping periodic probe woke LVGL");
     const auto prior_isr_entries = isr_entries.load();
     physical_irq();
     require(touch_irq_sequence() == 1 && wake_calls == wakes + 2 && isr_entries == prior_isr_entries + 1,
             "real GPIO callback lost count, ISR protection, or existing wake");
+    instance.wake_display();
     touch_input = nullptr; physical_irq();
     require(touch_irq_sequence() == 2 && wake_calls == wakes + 2, "IRQ without input was lost or fabricated wake");
     require(!take_touch_bus_quiet_request() && health_state() == health_before, "IRQ manufactured request/health");

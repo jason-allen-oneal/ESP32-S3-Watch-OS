@@ -1,4 +1,5 @@
 #include "nightglass/services/activity.hpp"
+#include "nightglass/services/low_power_raise.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -26,10 +27,14 @@
 namespace nightglass::services {
 namespace {
 
+#if CONFIG_NIGHTGLASS_LOW_POWER_RAISE
+constexpr bool kLowPowerRaiseEnabled = true;
+#else
+constexpr bool kLowPowerRaiseEnabled = false;
+#endif
+
 constexpr char kTag[] = "nightglass_activity";
 constexpr char kNvsNamespace[] = "ng_activity";
-constexpr TickType_t kActivePeriod = pdMS_TO_TICKS(40);
-constexpr TickType_t kBlankPeriod = pdMS_TO_TICKS(100);
 constexpr std::int64_t kStaleAfterUs = 2'000'000;
 constexpr std::int64_t kPeriodicSaveUs = 300'000'000;
 constexpr std::int64_t kSaveRetryBackoffUs = 30'000'000;
@@ -193,7 +198,9 @@ void load_state() {
 }
 
 bool submit(const Command &command) {
-    return command_queue && xQueueSend(command_queue, &command, 0) == pdTRUE;
+    if (!command_queue || xQueueSend(command_queue, &command, 0) != pdTRUE) return false;
+    if (worker_task) xTaskNotifyGive(worker_task);
+    return true;
 }
 
 void publish_processor(const ActivityProcessorOutput &output, const MotionSnapshot &motion,
@@ -283,7 +290,7 @@ void publish_gesture(const GestureProcessorOutput &output, std::int64_t now_us,
 }
 
 void worker(void *) {
-    TickType_t wake = xTaskGetTickCount();
+    LowPowerRaise low_power_raise;
     std::int64_t last_motion_sample_us = 0;
     std::int64_t last_gesture_motion_sample_us = 0;
     std::int64_t last_calibration_keepawake_us = 0;
@@ -460,7 +467,18 @@ void worker(void *) {
                 ++current.sequence;
                 portEXIT_CRITICAL(&snapshot_mux);
             } else {
-                const auto gesture = gesture_processor.process(gesture_sample);
+                auto gesture = gesture_processor.process(gesture_sample);
+                const bool accel_only_raise = kLowPowerRaiseEnabled &&
+                    settings.raise_to_wake && !settings.double_twist_quick_settings &&
+                    !settings.shake_notifications && !settings.flick_media_next;
+                const bool raise = low_power_raise.process(motion.accel_x_g, motion.accel_y_g,
+                    motion.accel_z_g, motion.sampled_at_us, gesture_processor.profile().raise_face_up_g,
+                    accel_only_raise);
+                if (accel_only_raise) {
+                    // Never allow stale gyro state to emit a second raise.
+                    gesture.detected = raise && screen_inactive ? GestureKind::raise : GestureKind::none;
+                    gesture.strength = raise ? -motion.accel_z_g : 0;
+                }
                 publish_gesture(gesture, now_us, external_power, recent_physical_input,
                                 screen_inactive);
             }
@@ -533,12 +551,10 @@ void worker(void *) {
             }
             set_persistence(ok);
         }
-        const auto power_state = power_service().snapshot().state;
-        const auto period = power_state == nightglass::core::PowerState::screen_blank ||
-                                    power_state == nightglass::core::PowerState::light_sleep
-                                ? kBlankPeriod
-                                : kActivePeriod;
-        vTaskDelayUntil(&wake, period);
+        // Process a published sensor sample immediately instead of maintaining
+        // a second independent 25/10 Hz polling schedule. A bounded fallback
+        // retains stale-sensor detection, day rollover and persistence retries.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
     }
 }
 
@@ -600,6 +616,10 @@ bool ActivityService::capture_gesture_calibration_sample() {
 
 bool ActivityService::cancel_gesture_calibration() {
     return submit({CommandType::gesture_calibration_cancel});
+}
+
+void ActivityService::notify_motion_sample() {
+    if (worker_task) xTaskNotifyGive(worker_task);
 }
 
 ActivityService &activity_service() { return instance; }

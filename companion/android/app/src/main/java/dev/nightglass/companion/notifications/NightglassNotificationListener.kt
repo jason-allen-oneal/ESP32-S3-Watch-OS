@@ -3,6 +3,7 @@ package dev.nightglass.companion.notifications
 import android.app.Notification
 import android.app.RemoteInput
 import android.content.Intent
+import android.content.Context
 import android.content.ComponentName
 import android.media.MediaMetadata
 import android.media.session.MediaSessionManager
@@ -33,6 +34,15 @@ class NightglassNotificationListener : NotificationListenerService() {
         relayMedia()
     }
     companion object {
+        private const val SOUND_PREFS = "nightglass_notification_settings"
+        private const val SOUND_ENABLED = "notification_sounds"
+        fun notificationSoundsEnabled(context: Context): Boolean =
+            context.getSharedPreferences(SOUND_PREFS, Context.MODE_PRIVATE)
+                .getBoolean(SOUND_ENABLED, false)
+        fun setNotificationSoundsEnabled(context: Context, enabled: Boolean) {
+            context.getSharedPreferences(SOUND_PREFS, Context.MODE_PRIVATE).edit()
+                .putBoolean(SOUND_ENABLED, enabled).apply()
+        }
         private const val DISCORD_PACKAGE = "com.discord"
         private const val SPOTIFY_PACKAGE = "com.spotify.music"
         @Volatile private var current: NightglassNotificationListener? = null
@@ -156,7 +166,11 @@ class NightglassNotificationListener : NotificationListenerService() {
         mediaController = null
         if (current === this) current = null
     }
-    override fun onNotificationPosted(sbn: StatusBarNotification) { relay(sbn, true); relayMedia() }
+    // Sound is a separate opt-in, never the global speaker mute.
+    override fun onNotificationPosted(sbn: StatusBarNotification) {
+        relay(sbn, notificationSoundsEnabled(this))
+        relayMedia()
+    }
     override fun onNotificationRemoved(sbn: StatusBarNotification) { val id = keys.entries.firstOrNull { it.value == sbn.key }?.key ?: return; keys.remove(id); NightglassConnectionService.send(this, NightglassProtocol.remove(id)); relayMedia() }
     private fun relayMedia() {
         val manager = getSystemService(MediaSessionManager::class.java)

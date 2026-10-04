@@ -267,3 +267,27 @@ python3 scripts/nightglass-usb-update.py build/update-package-0.2.4 \
 - [x] [`components/nightglass_services/src/connectivity.cpp`](../components/nightglass_services/src/connectivity.cpp): Set low-power advertising intervals.
 - [x] [`components/nightglass_services/src/network_weather.cpp`](../components/nightglass_services/src/network_weather.cpp): Implement Wi-Fi disconnect and stop after weather fetch.
 - [x] [`sdkconfig.defaults`](../sdkconfig.defaults): Update BLE modem-sleep, CPU frequency, and FreeRTOS tick-rate settings. The main-XTAL BLE clock is intentionally retained for link stability; the RTC-slow alternative remains a hardware-blocked experiment.
+
+### RTC recovery follow-up (0.2.18)
+
+Following a missing-time/RTC failure report on the watch, RTC sampling is restored
+at one second in all display states. Transient bus failures preserve only the
+last genuine sample, which still expires at the clock's existing freshness bound.
+A successful oscillator-stop/invalid read remains invalid. USB status telemetry
+reports RTC validity and battery voltage/charging alongside the PMIC percentage.
+A physical-USB NGT1 + little-endian uint64 UTC frame queues a validated 2020–2099
+time write on the hardware task: stop RTC, coherent BCD time/date write, restart,
+and readback verification. This is not an update-signature bypass. Hardware
+confirmation and diagnosis remain required before claiming the RTC is fixed.
+
+Hardware confirmation: signed 0.2.18 / secure18 accepted on ota_0, state VALID,
+pending=0. RTC I2C reads succeeded but reported oscillator-stop and reset
+2000-01-01 date before repair. USB time recovery readback matched the requested
+UTC epoch 1791042106. Subsequent independent status queries reported RTC and
+clock valid at UTC 1791042147 and 1791042159 (12 seconds progression). PMIC
+reported 23%, charging, 3874–3877 mV; this does not establish why the earlier
+percentage dropped. Logs retained outside the checkout in the owner-only
+nightglass-evidence/rtc-0.2.18-20261003 directory. Firmware SHA256:
+63ff3571c5f9ebd5ce385740518540980cc069602ca46094a06f8031848e12fd.
+The earlier 30-second blank RTC cadence is reverted; unplugged sleep/current
+validation and the remaining sensor batching work remain unverified/pending.

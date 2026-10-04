@@ -85,6 +85,7 @@ public:
                                                    std::size_t password_length);
     nightglass::core::Status clear_credentials();
     void request_refresh();
+    void notify_power_transition();
     nightglass::core::Status accept_phone_weather(
         std::uint32_t observed_epoch_seconds, std::uint16_t age_seconds,
         WeatherUnits units,

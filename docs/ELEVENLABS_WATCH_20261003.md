@@ -1,0 +1,15 @@
+# ElevenLabs watch replies — integration prepared
+
+The companion now requests authenticated Gateway `talk.speak` after an OpenClaw reply when the watch requests Spoken replies. The RPC pins `eleven_flash_v2_5` and `ulaw_8000`; provider output is checked for exact ElevenLabs/raw 8 kHz mu-law and the installed watch's 96,000-byte limit before Bluetooth transmission. Existing voice-turn/session/link-generation ownership checks and CRC-protected bounded audio queue are reused. Cancelled or stale successful audio results are wiped rather than played. The service posts synthesis results back onto its connection handler before queue mutation.
+
+Generation uses the local Gateway's configured ElevenLabs Talk provider and a protected-store SecretRef. API keys never enter the companion or watch. The prior `talk.agentId` is preserved and provider settings were dry-run validated then changed using a guarded CLI write; hot reload needed no restart. There was no authored Talk speech provider before this change. Android TTS is no longer invoked by this spoken-reply path. No VPS, phone VPN or new public endpoint is involved.
+
+The installed watch still buffers a whole spoken response before playback. Speech uses a leading excerpt bounded to 140 characters to fit its 12-second audio capacity; complete response text follows the existing text path. A synthesis/format/queue failure yields a visible “Voice unavailable” prefix with the reply and companion status, without silently choosing another voice provider. This is not streaming playback and not an unlimited-duration narrator.
+
+## Verification
+
+Companion debug APK built; 94 unit tests passed, zero failures/errors/skips; lint passed. Four new tests guard exact audio format/provider, empty/oversized data and bounded speech excerpts. Build uses the existing cached Android SDK/Gradle 8.9 with the existing signing keystore. APK certificate SHA-256: c8ad213a63f65cf74842424cb9166156f0b129bcf45b0fd3d7792962e8ad7e74. Compare the connected phone's installed certificate before replacement; never uninstall/clear app data to bypass signature mismatch.
+
+Live authenticated Gateway smoke test returned ElevenLabs `ulaw_8000`, 28,235 bytes / 3.529375 seconds. This proves local server synthesis and exact output format, not audible watch playback or speed superiority over another provider. No precise latency claim from this test. No watch firmware changes/install performed; current accepted watch 0.2.19 already supports this buffered format.
+
+Evidence and frozen APK: `/home/rev/projects/hardware/nightglass-evidence/elevenlabs-watch-20261003/`. Phone absent from ADB at this checkpoint; installation and physical speaker verification remain pending. Next: connect/unlock phone, compare signing identity, install with data-preserving replacement, enable Spoken replies on watch and verify a real turn, cancellation and fallback. Streaming remains a subsequent protocol/audio-worker upgrade with its own signed firmware and tests; do not claim it is implemented.

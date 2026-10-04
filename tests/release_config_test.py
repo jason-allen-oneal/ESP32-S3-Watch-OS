@@ -14,6 +14,7 @@ VERIFIER = ROOT / "scripts" / "verify-release-config.py"
 PUBLIC_KEY = (ROOT / "config" / "ota-public-key.hex").read_text(encoding="ascii").strip()
 
 GOOD = {
+    "CONFIG_PM_LIGHT_SLEEP_CALLBACKS": "y",
     "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL": "y",
     "CONFIG_ESP_MAIN_TASK_STACK_SIZE": "8192",
     "CONFIG_ESP_COREDUMP_ENABLE_TO_NONE": "y",
@@ -31,6 +32,8 @@ GOOD = {
     "CONFIG_NIGHTGLASS_OTA_P256_PUBLIC_KEY_HEX": f'"{PUBLIC_KEY}"',
 }
 UNSAFE = (
+    ("CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP", "y"),
+    ("CONFIG_PM_LIGHT_SLEEP_CALLBACKS", "n"),
     ("CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL", "y"),
     ("CONFIG_NIGHTGLASS_AUDIO_BOOT_SELF_TEST", "y"),
     ("CONFIG_NIGHTGLASS_GESTURE_BOOT_TRACE", "y"),

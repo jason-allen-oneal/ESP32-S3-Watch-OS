@@ -406,7 +406,7 @@ void worker(void *) {
         const auto hardware = hardware_service().snapshot();
         const auto &rtc = hardware.rtc;
         const bool rtc_fresh = rtc.present && rtc.valid && rtc.sampled_at_us > 0 &&
-                               now_us - rtc.sampled_at_us <= 5'000'000;
+                               now_us - rtc.sampled_at_us <= 35'000'000;
         bool alert_started = false;
         bool persist_after_tick = false;
 

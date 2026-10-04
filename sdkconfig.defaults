@@ -117,3 +117,12 @@ CONFIG_LV_TXT_BREAK_CHARS=" ,.;:-_"
 # development baggage and must not enter production builds.
 # CONFIG_LV_BUILD_EXAMPLES is not set
 # CONFIG_LV_BUILD_DEMOS is not set
+
+# Paired GPIO touch hand-off around IDF automatic standby sleep.
+CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
+CONFIG_PM_PROFILING=y
+CONFIG_NIGHTGLASS_LOW_POWER_RAISE=y
+
+# CPU retention needs 8800 bytes of scarce internal DMA memory on this board.
+# Keep ordinary light sleep without the optional CPU-domain power-down.
+# CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP is not set

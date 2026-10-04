@@ -87,6 +87,10 @@ struct VoicePlaybackResult {
 
 using VoicePlaybackCallback = void (*)(void *context,
                                         const VoicePlaybackResult &result);
+// Bounded source: read an exact range of verified samples. An empty range at
+// total_bytes waits for the authenticated stream-end/checksum validation.
+using VoicePlaybackSource = bool (*)(void *context, std::size_t offset,
+                                     std::span<std::uint8_t> destination);
 
 struct AudioSettings {
     std::uint8_t volume_percent{100};
@@ -172,7 +176,8 @@ public:
     // remains with the caller.
     nightglass::core::Status request_voice_playback(
         std::uint8_t *encoded, std::size_t encoded_bytes,
-        VoicePlaybackCallback callback, void *context);
+        VoicePlaybackCallback callback, void *context,
+        VoicePlaybackSource source = nullptr);
     void stop_voice_playback();
     nightglass::core::Status request_test_tone();
     nightglass::core::Status request_sound(SoundCue cue);

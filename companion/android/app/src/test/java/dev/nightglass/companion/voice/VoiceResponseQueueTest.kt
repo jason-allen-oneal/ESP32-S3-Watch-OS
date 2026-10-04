@@ -1,9 +1,59 @@
 package dev.nightglass.companion.voice
 
+import dev.nightglass.companion.protocol.NightglassProtocol
 import org.junit.Assert.*
 import org.junit.Test
 
 class VoiceResponseQueueTest {
+    @Test fun fullMinuteStreamFitsQueueAndPreservesEverySample() {
+        val queue = VoiceResponseQueue()
+        val owner = VoiceTurnOwner(7u, 4, 2)
+        val audio = ByteArray(NightglassProtocol.MAX_SPOKEN_REPLY_BYTES) { (it % 256).toByte() }
+        assertTrue(queue.enqueueResponseWithAudio(owner, 9u, 10u, "Long reply",
+            audio, 244, streaming = true))
+        var offset = 0
+        var finished = false
+        while (true) {
+            val entry = queue.beginWrite() ?: break
+            if (entry.frame[1] == 0x4d.toByte()) {
+                val bytes = entry.frame.copyOfRange(14, entry.frame.size - 4)
+                assertArrayEquals(audio.copyOfRange(offset, offset + bytes.size), bytes)
+                offset += bytes.size
+            }
+            if (queue.completeWrite() != null) finished = true
+        }
+        assertEquals(audio.size, offset)
+        assertTrue(finished)
+    }
+
+    @Test fun streamingAudioFramesFitMtuAndProtectAllBindingFields() {
+        val queue = VoiceResponseQueue()
+        val owner = VoiceTurnOwner(7u, 4, 2)
+        assertTrue(queue.enqueueResponseWithAudio(owner, 9u, 10u, "Reply",
+            ByteArray(4000) { (it % 255).toByte() }, 244, streaming = true))
+        var dataBytes = 0
+        var terminal = false
+        while (true) {
+            val entry = queue.beginWrite() ?: break
+            assertTrue(entry.frame.size <= 244)
+            val frame = entry.frame.copyOf()
+            if (frame[1].toInt() == 0x4a) assertEquals(2, frame[18].toInt())
+            if (frame[1].toInt() == 0x4d) {
+                val payloadEnd = frame.size - 4
+                val expected = java.nio.ByteBuffer.wrap(frame, payloadEnd, 4)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN).int.toUInt()
+                assertEquals(expected, VoiceTransferReceiver.crc32(frame.copyOfRange(0, payloadEnd)))
+                val offset = java.nio.ByteBuffer.wrap(frame, 10, 4)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN).int
+                assertEquals(dataBytes, offset)
+                dataBytes += frame.size - 18
+            }
+            val completed = queue.completeWrite()
+            if (completed != null) { assertEquals(owner, completed); terminal = true }
+        }
+        assertEquals(4000, dataBytes)
+        assertTrue(terminal)
+    }
     @Test fun normalizesUnicodeToWatchAscii() {
         val encoded = VoiceResponseQueue.asciiForWatch("Caf\u00e9 \u2014 \"ready\" \ud83d\udc7b")
         assertEquals("Cafe - \"ready\" ?", encoded.toString(Charsets.US_ASCII))

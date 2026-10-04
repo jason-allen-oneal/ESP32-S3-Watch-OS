@@ -171,6 +171,8 @@ void IRAM_ATTR touch_interrupt(esp_lcd_touch_handle_t) {
 }
 
 void touch_probe_callback(void *) {
+    // Sleeping panels rely on real GPIO interrupts, not periodic bus probes.
+    if (instance.display_sleep_requested()) return;
     if (touch_input) lvgl_port_task_wake(LVGL_PORT_EVENT_TOUCH, touch_input);
 }
 
@@ -460,7 +462,7 @@ nightglass::core::Status Board::start_essential() {
         .panel_handle = panel_handle,
         .control_handle = nullptr,
         .buffer_size = BSP_LCD_H_RES * CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT,
-        .double_buffer = false,
+        .double_buffer = true,
         .trans_size = 0,
         .hres = BSP_LCD_H_RES,
         .vres = BSP_LCD_V_RES,

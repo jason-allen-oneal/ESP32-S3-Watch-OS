@@ -34,3 +34,15 @@ config NIGHTGLASS_GESTURE_BOOT_TRACE
         calibration gate only and must remain disabled in production.
 
 endmenu
+
+menu "Nightglass standby power"
+
+config NIGHTGLASS_LOW_POWER_RAISE
+    bool "Use accelerometer-only tilt when raise is the only gesture"
+    default y
+    help
+        Power-gate the gyro in raise-only configurations. Require an arm-down
+        pose, a real tilt and a settled face-up finish. Twist, shake, flick,
+        gyro diagnostics and guided calibration retain their gyro pipeline.
+
+endmenu

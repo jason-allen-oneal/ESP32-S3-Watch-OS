@@ -16,7 +16,7 @@ PROTOCOL = (ROOT / "companion/android/app/src/main/java/dev/nightglass/companion
 for text in (SHELL, LISTENER, FORMATTER, SHARE, SERVICE):
     assert "Discord" in text
 
-assert '"DISCORD MESSAGE"' in SHELL
+assert 'add_header(content_host_, "Message", notification_list_callback, this)' in SHELL
 assert '"REPLY"' in SHELL
 assert '"VOICE"' in SHELL
 assert '"OPEN"' in SHELL

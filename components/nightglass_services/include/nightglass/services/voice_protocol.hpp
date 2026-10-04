@@ -16,7 +16,7 @@ inline constexpr std::size_t kVoiceMaximumResponseBytes = 2048;
 // 8 kHz G.711 mu-law. Keep the optional audio leg short enough that BLE can
 // finish it without turning the watch into a recorder or retaining a large
 // unbounded queue.
-inline constexpr std::size_t kVoiceMaximumSpokenReplyBytes = 96'000;
+inline constexpr std::size_t kVoiceMaximumSpokenReplyBytes = 480'000;
 inline constexpr std::size_t kVoiceDataHeaderBytes = 12;
 inline constexpr std::size_t kVoiceAudioDataHeaderBytes = 14;
 inline constexpr std::size_t kVoiceMaximumDataPayloadBytes =
@@ -44,6 +44,7 @@ enum class VoiceFrameKind : std::uint8_t {
     response_audio_begin = 0x4a,
     response_audio_data = 0x4b,
     response_audio_end = 0x4c,
+    response_audio_stream_data = 0x4d,
 };
 
 enum class VoiceHealthState : std::uint8_t {

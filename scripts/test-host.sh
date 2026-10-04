@@ -2,6 +2,7 @@
 set -euo pipefail
 
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+raise_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-raise-test.XXXXXX")"
 gyro_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gyro-test.XXXXXX")"
 gesture_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gesture-test.XXXXXX")"
 gesture_calibration_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-gesture-calibration-test.XXXXXX")"
@@ -25,9 +26,14 @@ verifier_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-verifier-test.XXXXXX")"
 clock_policy_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-clock-policy-test.XXXXXX")"
 ft3168_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-ft3168-test.XXXXXX")"
 premium_binary="$(mktemp "${TMPDIR:-/tmp}/nightglass-premium-test.XXXXXX")"
-trap 'rm -f "${gyro_binary}" "${gesture_binary}" "${gesture_calibration_binary}" "${gesture_policy_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${voice_codec_binary}" "${voice_protocol_binary}" "${voice_state_binary}" "${update_transport_binary}" "${usb_update_protocol_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}" "${ft3168_binary}"' EXIT
+trap 'rm -f "${raise_binary}" "${gyro_binary}" "${gesture_binary}" "${gesture_calibration_binary}" "${gesture_policy_binary}" "${time_binary}" "${face_binary}" "${connectivity_binary}" "${voice_codec_binary}" "${voice_protocol_binary}" "${voice_state_binary}" "${update_transport_binary}" "${usb_update_protocol_binary}" "${activity_binary}" "${activity_units_binary}" "${day_binary}" "${weather_binary}" "${navigation_binary}" "${audio_binary}" "${update_binary}" "${verifier_binary}" "${clock_policy_binary}" "${ft3168_binary}"' EXIT
 
+python3 "${project_dir}/tests/ui_refresh_efficiency_test.py"
 python3 "${project_dir}/scripts/check-runtime-glyphs.py"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/tests/low_power_raise_test.cpp" -o "${raise_binary}"
+"${raise_binary}"
 "${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
   -I"${project_dir}/components/nightglass_services/include" \
   "${project_dir}/components/nightglass_services/src/premium_protocol.cpp" \
@@ -41,6 +47,8 @@ python3 -B "${project_dir}/tests/voice_stack_contract_test.py"
 python3 -B "${project_dir}/tests/hardware_stack_contract_test.py"
 python3 -B "${project_dir}/tests/lvgl_stack_contract_test.py"
 python3 -B "${project_dir}/tests/touch_wake_contract_test.py"
+python3 -B "${project_dir}/tests/automatic_sleep_test.py"
+python3 -B "${project_dir}/tests/weather_worker_deadline_test.py"
 python3 -B "${project_dir}/tests/power_ui_dispatch_test.py"
 python3 -B "${project_dir}/tests/health_gate_diagnostics_test.py"
 python3 -B "${project_dir}/tests/touch_bus_diagnostic_test.py"
@@ -217,4 +225,13 @@ idf_dir="${NIGHTGLASS_IDF_PATH:-${IDF_PATH:-${HOME}/esp/esp-idf-v5.5.5}}"
 python3 -B "${project_dir}/tests/ota_crypto_test.py" \
   "${update_binary}" "${verifier_binary}"
 
+rtc_binary="$(mktemp)"
+"${CXX:-c++}" -std=c++20 -Wall -Wextra -Werror -pedantic \
+  -I"${project_dir}/components/nightglass_services/include" \
+  "${project_dir}/components/nightglass_services/src/time_math.cpp" \
+  "${project_dir}/tests/rtc_sync_test.cpp" -o "${rtc_binary}"
+"${rtc_binary}"
+rm -f "${rtc_binary}"
+
+python3 "${project_dir}/tests/progressive_voice_source_test.py"
 printf 'Nightglass host tests passed\n'

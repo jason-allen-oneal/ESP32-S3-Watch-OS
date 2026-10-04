@@ -235,6 +235,14 @@ struct PowerSnapshot { nightglass::core::PowerState state; };
 nightglass::core::PowerState power_state = nightglass::core::PowerState::active;
 struct PowerDouble { PowerSnapshot snapshot() { return {power_state}; } };
 PowerDouble &power_service() { static PowerDouble power; return power; }
+struct ActivityDouble {
+    void notify_motion_sample() {
+        require(!events.empty() && events.back() == "motion",
+                "activity notified before publishing motion");
+        events.emplace_back("activity_notify");
+    }
+};
+ActivityDouble &activity_service() { static ActivityDouble activity; return activity; }
 std::atomic_bool diagnostics_gyro_requested{false}, gyro_enabled{false};
 std::int64_t last_gyro_policy_attempt_us = -1'000'000;
 bool imu_ready = false;
@@ -258,6 +266,7 @@ esp_err_t gpio_set_level(gpio_num_t, int) { throw std::runtime_error("diagnostic
 void set_haptic_state(bool, std::int64_t, bool) { throw std::runtime_error("haptic mutation"); }
 void publish_haptic_failure() { throw std::runtime_error("haptic failure mutation"); }
 void publish_motion() { ++motion_polls; events.emplace_back("motion"); }
+void run_rtc_sync() {}
 void publish_rtc() { ++rtc_polls; events.emplace_back("rtc"); }
 void publish_battery() { ++battery_polls; events.emplace_back("battery"); }
 std::uint32_t ulTaskNotifyTake(int clear, TickType_t ticks) {
@@ -343,8 +352,9 @@ void assert_polling_resumed(bool had_window) {
             "IMU/RTC/PMIC normal polling failed to resume");
     require(take_calls == task_iterations, "request not checked once per ordinary hardware iteration");
     const auto motion = std::find(events.begin(), events.end(), "motion");
-    require(motion != events.end() && motion + 3 < events.end(), "missing resumed polling order");
-    require(*(motion + 1) == "rtc" && *(motion + 2) == "battery" && *(motion + 3) == "notify",
+    require(motion != events.end() && motion + 4 < events.end(), "missing resumed polling order");
+    require(*(motion + 1) == "activity_notify" && *(motion + 2) == "rtc" &&
+            *(motion + 3) == "battery" && *(motion + 4) == "notify",
             "normal resumed IMU/RTC/PMIC/notification ordering changed");
     if (had_window) {
         const auto ended = std::find(events.begin(), events.end(), "quiet_end");
@@ -419,6 +429,16 @@ void check_no_request() {
         require(notification_ticks == std::vector<TickType_t>(3, expected_ticks),
                 "ordinary 40-ms active / 100-ms blank polling changed");
         require(rtc_polls == 1 && battery_polls == 1, "ordinary RTC/PMIC cadence changed");
+        reset();
+        power_state = state;
+        task_iterations = 451;
+        run_task();
+        const auto elapsed_us = std::int64_t(450) * expected_ticks * tick_ms * 1000;
+        const bool blank = state != nightglass::core::PowerState::active;
+        require(rtc_polls == 1 + elapsed_us / (blank ? 30'000'000 : 1'000'000),
+                "RTC standby/active cadence regression");
+        require(battery_polls == 1 + elapsed_us / (blank ? 15'000'000 : 2'000'000),
+                "battery standby/active cadence regression");
     }
 }
 

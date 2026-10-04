@@ -269,7 +269,8 @@ void handle(UpdateTransportCommand &command) {
 void worker(void *) {
     UpdateTransportCommand command{};
     while (true) {
-        if (xQueueReceive(command_queue, &command, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (xQueueReceive(command_queue, &command,
+                          active_session == 0 ? portMAX_DELAY : pdMS_TO_TICKS(1000)) == pdTRUE) {
             if (!connection_epoch_current(command)) {
                 wipe(&command, sizeof(command));
                 continue;

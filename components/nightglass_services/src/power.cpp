@@ -1,11 +1,14 @@
 #include "nightglass/services/power.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 
 #include "driver/gpio.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_private/pm_impl.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -41,6 +44,76 @@ PowerSnapshot current{};
 portMUX_TYPE observer_mux = portMUX_INITIALIZER_UNLOCKED;
 PowerStateObserver state_observer = nullptr;
 void *state_observer_context = nullptr;
+
+// Callbacks run with interrupts masked inside IDF's idle path. Never call
+// services, I2C, LVGL, logging or blocking APIs there. GPIO hand-off is bracketed
+// by enter/exit; the level ISR is masked for the whole window to avoid storms.
+std::atomic_bool automatic_sleep_ready{false};
+std::atomic_bool automatic_touch_pending{false};
+std::atomic_bool automatic_sleep_fault{false};
+std::atomic<std::uint32_t> automatic_sleep_count{0};
+std::atomic<std::uint32_t> automatic_sleep_ms{0};
+bool automatic_touch_armed = false;
+
+void IRAM_ATTR notify_sleep_supervisor() {
+    if (!supervisor_task) return;
+    BaseType_t woken = pdFALSE;
+    vTaskNotifyGiveFromISR(supervisor_task, &woken);
+    // IDF resumes scheduling after its idle/sleep critical section returns.
+}
+
+bool IRAM_ATTR skip_automatic_sleep() {
+    if (!automatic_sleep_ready.load() || automatic_sleep_fault.load()) return true;
+    if (gpio_get_level(kTouchInterruptGpio) == 0) {
+        automatic_touch_pending.store(true);
+        automatic_sleep_ready.store(false);
+        notify_sleep_supervisor();
+        return true;
+    }
+    return gpio_get_level(kSideKeyGpio) > 0;
+}
+
+esp_err_t IRAM_ATTR automatic_sleep_enter(std::int64_t, void *) {
+    automatic_touch_armed = true; // Exit restores even a partially failed setup.
+    if (gpio_intr_disable(kTouchInterruptGpio) != ESP_OK ||
+        gpio_wakeup_enable(kTouchInterruptGpio, GPIO_INTR_LOW_LEVEL) != ESP_OK) {
+        automatic_sleep_fault.store(true);
+        notify_sleep_supervisor();
+        return ESP_FAIL;
+    }
+    // A touch racing the skip check is caught by level wake. Latch it too so
+    // an asserted contact cannot be lost during the restoration on exit.
+    if (gpio_get_level(kTouchInterruptGpio) == 0) automatic_touch_pending.store(true);
+    return ESP_OK;
+}
+
+esp_err_t IRAM_ATTR automatic_sleep_exit(std::int64_t slept_us, void *) {
+    const bool touch = automatic_touch_pending.load() ||
+        gpio_get_level(kTouchInterruptGpio) == 0 ||
+        (slept_us > 0 && esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO);
+    bool restored = true;
+    if (automatic_touch_armed) {
+        restored = gpio_wakeup_disable(kTouchInterruptGpio) == ESP_OK;
+        restored = (gpio_set_intr_type(kTouchInterruptGpio, GPIO_INTR_NEGEDGE) == ESP_OK) && restored;
+        restored = (gpio_intr_enable(kTouchInterruptGpio) == ESP_OK) && restored;
+        automatic_touch_armed = false;
+    }
+    if (!restored) automatic_sleep_fault.store(true);
+    if (slept_us >= 1000) {
+        automatic_sleep_count.fetch_add(1);
+        automatic_sleep_ms.fetch_add(static_cast<std::uint32_t>(slept_us / 1000));
+    }
+    // Check again after restoring edge mode: a late assertion wakes through
+    // the normal IRQ or this latch, rather than depending on an old edge.
+    if (touch || gpio_get_level(kTouchInterruptGpio) == 0) {
+        automatic_touch_pending.store(true);
+        automatic_sleep_ready.store(false);
+        notify_sleep_supervisor();
+    } else if (gpio_get_level(kSideKeyGpio) > 0 || automatic_sleep_fault.load()) {
+        notify_sleep_supervisor();
+    }
+    return restored ? ESP_OK : ESP_FAIL;
+}
 
 void IRAM_ATTR side_key_interrupt(void *) {
     if (!supervisor_task) return;
@@ -80,17 +153,22 @@ bool valid_settings(const PowerSettings &settings) {
            settings.sleep_after_blank_seconds <= 3600;
 }
 
-bool disable_automatic_light_sleep() {
+bool configure_automatic_light_sleep() {
     esp_pm_config_t config{};
     if (esp_pm_get_configuration(&config) != ESP_OK) return false;
-    // GPIO38 is normally a falling-edge FT5x06 interrupt. ESP-IDF's
-    // gpio_wakeup_enable() requires a level trigger and also replaces the
-    // pin's normal interrupt type. Until that level/edge hand-off passes a
-    // repeated hardware wake test, automatic light sleep can miss the touch
-    // edge and strand a blank watch. Keep DFS and explicit, bracketed light
-    // sleep, but never enter automatic light sleep with an unarmed touch IRQ.
-    config.light_sleep_enable = false;
-    return esp_pm_configure(&config) == ESP_OK;
+    esp_pm_sleep_cbs_register_config_t callbacks{};
+    callbacks.enter_cb = automatic_sleep_enter;
+    callbacks.exit_cb = automatic_sleep_exit;
+    if (esp_pm_register_skip_light_sleep_callback(skip_automatic_sleep) != ESP_OK) return false;
+    if (esp_pm_light_sleep_register_cbs(&callbacks) != ESP_OK) {
+        esp_pm_unregister_skip_light_sleep_callback(skip_automatic_sleep);
+        return false;
+    }
+    config.light_sleep_enable = true;
+    if (esp_pm_configure(&config) == ESP_OK) return true;
+    esp_pm_light_sleep_unregister_cbs(&callbacks);
+    esp_pm_unregister_skip_light_sleep_callback(skip_automatic_sleep);
+    return false;
 }
 
 PowerSettings load_settings() {
@@ -125,6 +203,7 @@ esp_err_t save_settings(const PowerSettings &settings) {
 }
 
 void publish_activity(std::int64_t when, nightglass::core::WakeReason reason) {
+    automatic_sleep_ready.store(false);
     portENTER_CRITICAL(&snapshot_mux);
     current.last_activity_us = when;
     current.last_activity_reason = reason;
@@ -147,6 +226,7 @@ void publish_key(bool ready, bool pressed) {
 }
 
 void apply_state(nightglass::core::PowerState target, std::int64_t observed_activity_us) {
+    if (target != nightglass::core::PowerState::screen_blank) automatic_sleep_ready.store(false);
     PowerSnapshot before{};
     portENTER_CRITICAL(&snapshot_mux);
     before = current;
@@ -185,15 +265,18 @@ void apply_state(nightglass::core::PowerState target, std::int64_t observed_acti
     ++current.sequence;
     portEXIT_CRITICAL(&snapshot_mux);
     notify_state_observer(target);
+    network_weather_service().notify_power_transition();
     ESP_LOGI(kTag, "Display policy state=%u brightness=%u",
              static_cast<unsigned>(target), brightness);
 }
 
 void enter_light_sleep(std::int64_t observed_activity_us) {
+    // Automatic sleep keeps sensor deadlines and BLE connection events alive.
+    // Never also enter the legacy unbounded manual path while it is configured.
+    if (power_service().snapshot().automatic_light_sleep_enabled) return;
     // Manual long light sleep is not entered while the companion radio is
-    // active. ESP-IDF automatic light sleep and BLE modem sleep remain active
-    // between connection events, preserving notifications without pinning the
-    // CPU and controller fully awake.
+    // active. The fallback must never bypass BLE connection-event scheduling.
+    // Manual esp_light_sleep_start() would disrupt the companion connection.
     if (connectivity_service().snapshot().settings.enabled) return;
     // CPU-side recognition stops in manual light sleep. Until QMI8658 INT1
     // wake-on-motion passes its own hardware gate, keep the IMU stream alive
@@ -315,12 +398,41 @@ void supervisor(void *) {
     bool debounced_key = gpio_get_level(kSideKeyGpio) > 0;
     bool candidate_key = debounced_key;
     bool usb_sleep_inhibited = false;
+    bool previous_usb_connected = true;
+    bool sleep_fault_announced = false;
     std::int64_t candidate_since_us = esp_timer_get_time();
     std::int64_t next_sleep_attempt_us = 0;
     TickType_t timeout_ticks = 1;
     while (true) {
         ulTaskNotifyTake(pdTRUE, timeout_ticks);
         const auto now = esp_timer_get_time();
+        if (automatic_touch_pending.exchange(false)) {
+            portENTER_CRITICAL(&snapshot_mux);
+            current.last_activity_us = now;
+            current.last_physical_input_us = now;
+            current.last_activity_reason = nightglass::core::WakeReason::touch;
+            current.last_wake = nightglass::core::WakeReason::touch;
+            current.wake_touch_pending = true;
+            ++current.sequence;
+            portEXIT_CRITICAL(&snapshot_mux);
+        }
+        if (automatic_sleep_fault.load() && !sleep_fault_announced) {
+            sleep_fault_announced = true;
+            nightglass::core::health_registry().set("power", nightglass::core::HealthState::degraded,
+                "Automatic sleep disabled after touch wake hand-off error");
+        }
+        const bool usb_connected = usb_serial_jtag_is_connected();
+        portENTER_CRITICAL(&snapshot_mux);
+        current.automatic_sleep_count = automatic_sleep_count.load();
+        current.automatic_sleep_ms = automatic_sleep_ms.load();
+        portEXIT_CRITICAL(&snapshot_mux);
+        if (usb_connected && !previous_usb_connected) {
+            ESP_LOGI(kTag, "AUTO_SLEEP_EVIDENCE count=%lu total_ms=%lu fault=%u",
+                static_cast<unsigned long>(automatic_sleep_count.load()),
+                static_cast<unsigned long>(automatic_sleep_ms.load()), automatic_sleep_fault.load());
+            esp_pm_dump_locks(stdout);
+        }
+        previous_usb_connected = usb_connected;
         const bool raw_key = gpio_get_level(kSideKeyGpio) > 0;
         if (raw_key != candidate_key) {
             candidate_key = raw_key;
@@ -358,6 +470,11 @@ void supervisor(void *) {
             : inactive_us >= dim_after_us ? nightglass::core::PowerState::dim
                                           : nightglass::core::PowerState::active;
         apply_state(target, snapshot.last_activity_us);
+        const auto applied = power_service().snapshot();
+        automatic_sleep_ready.store(applied.state == nightglass::core::PowerState::screen_blank &&
+            applied.last_activity_us == snapshot.last_activity_us && !always_on && !usb_connected &&
+            applied.settings.sleep_after_blank_seconds > 0 &&
+            inactive_us >= blank_after_us + sleep_after_us && !automatic_sleep_fault.load());
         if (!always_on && snapshot.settings.sleep_after_blank_seconds > 0 &&
             inactive_us >= blank_after_us + sleep_after_us) {
             if (usb_serial_jtag_is_connected()) {
@@ -468,14 +585,14 @@ nightglass::core::Status PowerService::start() {
     }
 
     const auto settings = load_settings();
-    if (!disable_automatic_light_sleep()) {
+    if (!configure_automatic_light_sleep()) {
         nightglass::core::health_registry().set(
             "power", nightglass::core::HealthState::failed,
-            "Could not disable unsafe automatic light sleep");
+            "Could not configure bracketed automatic light sleep");
         return {nightglass::core::StatusCode::io_error,
                 "automatic light-sleep safety setup failed"};
     }
-    constexpr bool automatic_light_sleep_enabled = false;
+    constexpr bool automatic_light_sleep_enabled = true;
     const auto now = esp_timer_get_time();
     const bool side_key_pressed = gpio_get_level(kSideKeyGpio) > 0;
     portENTER_CRITICAL(&snapshot_mux);

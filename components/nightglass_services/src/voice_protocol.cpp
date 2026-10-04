@@ -113,7 +113,21 @@ bool parse_voice_frame(std::span<const std::uint8_t> frame,
         message.sample_rate_khz = frame[19];
         return message.response_id != 0 && message.total_bytes != 0 &&
                message.total_bytes <= kVoiceMaximumSpokenReplyBytes &&
-               message.codec == 1 && message.sample_rate_khz == 8;
+               (message.codec == 1 || message.codec == 2) && message.sample_rate_khz == 8;
+    }
+    if (kind == VoiceFrameKind::response_audio_stream_data) {
+        // Bind the checksum to session, response, offset and payload, not just
+        // the samples. Each accepted chunk is safe to play before the end.
+        if (!valid_common(frame, message, 18) || frame.size() <= 18 ||
+            frame.size() > kVoiceMaximumFrameBytes) return false;
+        message.response_id = read_u32(frame.data() + 6);
+        message.offset = read_u32(frame.data() + 10);
+        message.payload = frame.subspan(14, frame.size() - 18);
+        return message.response_id != 0 &&
+               message.offset <= kVoiceMaximumSpokenReplyBytes &&
+               message.payload.size() <= kVoiceMaximumSpokenReplyBytes - message.offset &&
+               voice_crc32(frame.first(frame.size() - 4)) ==
+                   read_u32(frame.data() + frame.size() - 4);
     }
     if (kind == VoiceFrameKind::response_audio_data) {
         if (!valid_common(frame, message, kVoiceAudioDataHeaderBytes) ||

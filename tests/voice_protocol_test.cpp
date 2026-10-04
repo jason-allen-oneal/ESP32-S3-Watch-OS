@@ -88,6 +88,28 @@ int main() {
     assert(audio_end.size == 18 && parse_voice_frame(
         {audio_end.bytes.data(), audio_end.size}, frame));
     assert(frame.kind == VoiceFrameKind::response_audio_end && frame.total_bytes == 16);
+    auto stream_begin = audio_begin;
+    stream_begin.bytes[18] = 2;
+    assert(parse_voice_frame({stream_begin.bytes.data(), stream_begin.size}, frame));
+    assert(frame.codec == 2);
+    std::array<std::uint8_t, 20> stream_data{1, 0x4d, 7, 0, 0, 0,
+                                            12, 0, 0, 0, 0, 0, 0, 0, 0x80, 0xff};
+    const auto stream_crc = voice_crc32({stream_data.data(), 16});
+    for (unsigned i = 0; i < 4; ++i) stream_data[16 + i] = stream_crc >> (8 * i);
+    assert(parse_voice_frame(stream_data, frame));
+    assert(frame.kind == VoiceFrameKind::response_audio_stream_data &&
+           frame.payload.size() == 2);
+    // Every binding field and sample is covered before progressive playback.
+    for (std::size_t i = 0; i < stream_data.size(); ++i) {
+        auto corrupted = stream_data;
+        corrupted[i] ^= 1;
+        assert(!parse_voice_frame(corrupted, frame));
+    }
+    assert(!parse_voice_frame(std::span(stream_data).first(18), frame));
+    const auto full_minute = encode_voice_audio_begin(7, 12, 480'000, 1);
+    assert(full_minute.size != 0);
+    assert(parse_voice_frame({full_minute.bytes.data(), full_minute.size}, frame));
+    assert(frame.total_bytes == 480'000);
     assert(encode_voice_audio_begin(7, 12, kVoiceMaximumSpokenReplyBytes + 1U, 1).size == 0);
 
     const std::array<std::uint8_t, 7> health{1, 0x49, 9, 0, 0, 0, 2};

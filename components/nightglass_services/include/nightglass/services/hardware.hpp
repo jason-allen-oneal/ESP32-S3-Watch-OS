@@ -87,6 +87,7 @@ public:
     nightglass::core::Status start(i2c_master_bus_handle_t bus_handle);
     [[nodiscard]] HardwareSnapshot snapshot() const;
     bool set_gyro_enabled(bool enabled);
+    bool request_rtc_time(std::int64_t utc_epoch_seconds);
     bool request_haptic(std::uint16_t duration_ms = 120);
 };
 

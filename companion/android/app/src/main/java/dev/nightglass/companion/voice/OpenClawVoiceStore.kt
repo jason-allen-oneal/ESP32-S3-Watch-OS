@@ -37,6 +37,12 @@ data class OpenClawVoiceCredential(
     val privateKeyPkcs8: ByteArray,
     val sessionKey: String?,
 ) {
+    val usesVerifiedIdentity: Boolean
+        get() = VerifiedIdentityPolicy.isEndpoint(url)
+
+    fun operatorAuthToken(): String = if (usesVerifiedIdentity) "" else
+        operatorToken ?: error("OpenClaw voice authorization missing")
+
     fun wipe() {
         publicKeyRaw.fill(0)
         privateKeyPkcs8.fill(0)
@@ -62,6 +68,37 @@ class OpenClawVoiceStore(context: Context) {
         if (identity !== existing) identity.wipe()
         existing?.wipe()
         value.wipe()
+    }
+
+    /** Switch ingress without rotating the phone key or Bluetooth pairing. */
+    fun configureVerifiedIdentityEndpoint(url: String) = synchronized(STORE_LOCK) {
+        require(VerifiedIdentityPolicy.isEndpoint(url))
+        require(!VerifiedIdentityPolicy.isPhoneIngressEndpoint(url))
+        val current = load() ?: error("OpenClaw voice identity is not provisioned")
+        try {
+            save(current.copy(url = url, bootstrapToken = null, operatorToken = null,
+                scopes = REQUIRED_SCOPES, tlsFingerprint = null))
+        } finally { current.wipe() }
+    }
+
+    /** Enroll this phone's revocable local ingress credential over the trusted USB channel. */
+    fun configureLocalEndpoint(token: String, fingerprint: String) = synchronized(STORE_LOCK) {
+        require(token.matches(Regex("[a-f0-9]{64}")))
+        require(fingerprint.matches(Regex("[a-f0-9]{64}")))
+        val current = load() ?: error("OpenClaw voice identity is not provisioned")
+        try {
+            save(current.copy(url = VerifiedIdentityPolicy.LOCAL_ENDPOINT, bootstrapToken = null,
+                operatorToken = token, scopes = REQUIRED_SCOPES, tlsFingerprint = fingerprint))
+        } finally { current.wipe() }
+    }
+
+    fun configureRemoteEndpoint() = synchronized(STORE_LOCK) {
+        val current = load() ?: error("Missing phone identity")
+        try {
+            require(VerifiedIdentityPolicy.isPhoneIngressEndpoint(current.url))
+            require(current.operatorToken?.matches(Regex("[a-f0-9]{64}")) == true)
+            save(current.copy(url = VerifiedIdentityPolicy.REMOTE_ENDPOINT, tlsFingerprint = null))
+        } finally { current.wipe() }
     }
 
     fun persistOperatorToken(

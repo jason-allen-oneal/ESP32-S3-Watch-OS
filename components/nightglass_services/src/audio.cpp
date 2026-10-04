@@ -205,6 +205,7 @@ struct AudioCommand {
     std::size_t playback_bytes{0};
     VoicePlaybackCallback playback_callback{nullptr};
     void *playback_context{nullptr};
+    VoicePlaybackSource playback_source{nullptr};
 };
 
 AudioService instance;
@@ -762,13 +763,26 @@ OperationResult run_operation(const AudioCommand &command) {
                         }
                         const auto input_offset = frame_offset / 2U;
                         const auto input_frames = frames_this_chunk / 2U;
+                        std::array<std::uint8_t, kDiagnosticFrames / 2U> verified{};
+                        const auto *encoded = command.playback_data + input_offset;
+                        if (command.playback_source != nullptr) {
+                            if (!command.playback_source(command.playback_context,
+                                    input_offset, {verified.data(), input_frames})) {
+                                result.status = {nightglass::core::StatusCode::timeout,
+                                                 "spoken stream stopped or starved"};
+                                transfer_ok = false;
+                                break;
+                            }
+                            encoded = verified.data();
+                        }
                         auto *samples = reinterpret_cast<std::int16_t *>(buffer);
                         for (std::size_t index = 0; index < input_frames; ++index) {
                             const auto sample = mulaw_to_pcm16(
-                                command.playback_data[input_offset + index]);
+                                encoded[index]);
                             samples[index * 2U] = sample;
                             samples[index * 2U + 1U] = sample;
                         }
+                        verified.fill(0);
                     } else if (pcm.data != nullptr) {
                         std::memcpy(buffer, pcm.data + frame_offset * kFrameBytes,
                                     bytes_this_chunk);
@@ -789,6 +803,15 @@ OperationResult run_operation(const AudioCommand &command) {
                         break;
                     }
                     frame_offset += frames_this_chunk;
+                }
+                if (transfer_ok && result.transferred_bytes == result.expected_bytes) {
+                    if (command.playback_source != nullptr &&
+                        !command.playback_source(command.playback_context,
+                                                 command.playback_bytes, {})) {
+                        result.status = {nightglass::core::StatusCode::io_error,
+                                         "spoken stream end was not verified"};
+                        transfer_ok = false;
+                    }
                 }
                 if (transfer_ok && result.transferred_bytes == result.expected_bytes) {
                     // A successful write means the bytes reached the DMA ring,
@@ -1079,7 +1102,8 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
                                  std::uint8_t *playback_data = nullptr,
                                  std::size_t playback_bytes = 0,
                                  VoicePlaybackCallback playback_callback = nullptr,
-                                 void *playback_context = nullptr) {
+                                 void *playback_context = nullptr,
+                                 VoicePlaybackSource playback_source = nullptr) {
     if (audio_bus == nullptr || audio_queue == nullptr || audio_worker == nullptr ||
         request_mutex == nullptr) {
         return {nightglass::core::StatusCode::unavailable, "audio service is not armed"};
@@ -1112,7 +1136,8 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
     }
     if (duplicate || voice_busy) {
         xSemaphoreGive(request_mutex);
-        return operation == AudioOperation::voice_capture
+        return (operation == AudioOperation::voice_capture ||
+                operation == AudioOperation::voice_playback)
                    ? nightglass::core::Status{
                          nightglass::core::StatusCode::unavailable,
                          "audio path is busy"}
@@ -1140,7 +1165,7 @@ nightglass::core::Status request(AudioOperation operation, SoundCue cue,
     const AudioCommand command{operation, cue, generation, voice_capacity,
                                voice_sink, voice_callback, voice_context,
                                playback_data, playback_bytes, playback_callback,
-                               playback_context};
+                               playback_context, playback_source};
     const bool urgent = critical || cue == SoundCue::call;
     const auto queued = urgent ? xQueueSendToFront(audio_queue, &command, 0)
                                : xQueueSendToBack(audio_queue, &command, 0);
@@ -1295,12 +1320,13 @@ void AudioService::stop_voice_capture(bool cancel) {
 
 nightglass::core::Status AudioService::request_voice_playback(
     std::uint8_t *encoded, std::size_t encoded_bytes,
-    VoicePlaybackCallback callback, void *context) {
+        VoicePlaybackCallback callback, void *context, VoicePlaybackSource source) {
 #if !NIGHTGLASS_AUDIO_RUNTIME
     (void)encoded;
     (void)encoded_bytes;
     (void)callback;
     (void)context;
+    (void)source;
     return {nightglass::core::StatusCode::unavailable,
             "audio disabled by build configuration"};
 #else
@@ -1313,7 +1339,7 @@ nightglass::core::Status AudioService::request_voice_playback(
     return request(AudioOperation::voice_playback, SoundCue::test,
                    nightglass::core::WakeReason::notification,
                    0, nullptr, nullptr, nullptr,
-                   encoded, encoded_bytes, callback, context);
+                   encoded, encoded_bytes, callback, context, source);
 #endif
 }
 
