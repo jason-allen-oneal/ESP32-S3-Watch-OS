@@ -105,7 +105,7 @@ class MainActivity : AppCompatActivity() {
         val pad = dp(20)
         val shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(12, 15, 22))
+            setBackgroundColor(Color.BLACK)
             setPadding(0, dp(12), 0, 0)
         }
         val pages = listOf("Home", "Watch", "Settings").map { name ->
@@ -348,7 +348,7 @@ class MainActivity : AppCompatActivity() {
         fun select(index: Int) {
             selectedPage = index
             scrolls.forEachIndexed { i, view -> view.visibility = if (i == index) View.VISIBLE else View.GONE }
-            tabs.forEachIndexed { i, button -> button.setTextColor(if (i == index) Color.rgb(184, 171, 255) else Color.LTGRAY) }
+            tabs.forEachIndexed { i, button -> button.setTextColor(if (i == index) Color.rgb(168, 255, 50) else Color.LTGRAY) }
         }
         listOf("Home", "Watch", "Settings").forEachIndexed { index, name ->
             val button = Button(this).apply { text = name; isAllCaps = false; setOnClickListener { select(index) } }
@@ -382,7 +382,7 @@ class MainActivity : AppCompatActivity() {
     }
     private fun card(parent: LinearLayout) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(14), dp(18), dp(16))
-        background = GradientDrawable().apply { setColor(Color.rgb(24, 29, 41)); cornerRadius = dp(20).toFloat() }
+        background = GradientDrawable().apply { setColor(Color.rgb(18, 20, 20)); cornerRadius = dp(20).toFloat() }
         parent.addView(this, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16) })
     }
     private fun styleViews(view: View) {
@@ -391,8 +391,8 @@ class MainActivity : AppCompatActivity() {
             if (view is EditText) view.setHintTextColor(Color.rgb(161, 170, 190))
             if (view is Button) {
                 view.isAllCaps = false; view.minHeight = dp(52)
-                view.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(49, 43, 69))
-                view.setTextColor(Color.rgb(204, 193, 255))
+                view.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(28, 31, 31))
+                view.setTextColor(Color.rgb(235, 237, 235))
             }
         }
         if (view is ViewGroup) for (i in 0 until view.childCount) styleViews(view.getChildAt(i))
