@@ -21,3 +21,11 @@ These checks are not physical usability, listening or unplugged battery validati
 Deterministic release gate passed commit `bf0e79e`, firmware **0.2.26 / secure 26**, image SHA-256 `34d4ae7788783e8864adc9578b9f6dfa0fdf5bb01d63f92478078c5dfab6e0c7`, 3,147,232 bytes. Home/face/ambient function bodies compare unchanged. All 102 Android tests and lint passed; original installed companion certificate matches the new APK.
 
 Installation attempt stopped before transfer because the phone disappeared from ADB. Paired OpenClaw phone remains connected, but advertises no file-transfer/install/mobile-UI commands; no remote install capability was assumed or enabled. Companion APK is built but **not yet installed**. Firmware **not yet installed**. Masked signing prompt opened on the existing desktop; passphrase and phone reconnection are needed. Watch delivery remains Bluetooth OTA, not a request for a watch cable. Evidence: `/home/rev/projects/hardware/nightglass-evidence/ota-diagnosis-20261003/`.
+
+### Live deployment continuation
+
+Signed package `build/update-package-0.2.26-polish` verified successfully. The existing masked signer was used without exposing its passphrase. Restarting the host ADB server restored authorization using existing host keys; no phone authorization prompt or key replacement was required. Companion installed successfully in place with matching certificate. Signed package selected through internal-storage picker; Bluetooth OTA transfer began and reached 25%. Watch installation/boot acceptance remains pending until actual post-reboot identity and health confirmation.
+
+### Accepted Bluetooth deployment
+
+Companion installed in place successfully. Signed 0.2.26 transferred over Bluetooth, validated and rebooted. Authenticated running identity reported `firmware_version=0.2.26`, `secure_version=26`; subsequently `pending_verification=false`, `complete=true`, `active=false`, `percent=100`, and persisted detail `Installed 0.2.26 — boot health confirmed` (identity timestamp 1791084216127). This confirms running version and cleared boot verification, not physical usability/audio/battery acceptance. No watch USB was used. Generated package/evidence folders were removed by a concurrent owner-authorized cleanup; this compact source record preserves the observed result without recreating deleted artifacts.
